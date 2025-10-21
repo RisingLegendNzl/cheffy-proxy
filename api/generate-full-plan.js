@@ -1,5 +1,5 @@
 const fetch = require('node-fetch');
-// --- MODIFICATION: Directly import the pure function ---
+// --- FIX: Directly import the pure 'fetchPriceData' function ---
 const { fetchPriceData } = require('./price-search.js');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -26,12 +26,11 @@ const calculateUnitPrice = (price, size) => {
 };
 
 module.exports = async function handler(request, response) {
-    // --- MODIFICATION: Structured Log Collector ---
     const logs = [];
     const log = (type, title, content = '') => {
         const logEntry = { type, title, content, timestamp: new Date().toISOString() };
         logs.push(logEntry);
-        console.log(`[LOG] ${type} - ${title}: ${content}`);
+        console.log(`[LOG] ${type} - ${title}: ${JSON.stringify(content)}`);
     };
     
     log("SYSTEM", "Orchestrator Invoked");
@@ -51,13 +50,13 @@ module.exports = async function handler(request, response) {
 
     try {
         const formData = request.body;
-        log("USER_INPUT", "Received User Data", JSON.stringify(formData, null, 2));
+        log("USER_INPUT", "Received User Data", formData);
         
         const calorieTarget = calculateCalorieTarget(formData);
         log("CALCULATION", "Calorie Target Calculated", `${calorieTarget} kcal/day`);
         
         const { ingredients: ingredientPlan, mealPlan, llmPayload } = await generateLLMPlanAndMeals(formData, calorieTarget);
-        log("LLM_PROMPT", "Sent to Gemini AI", JSON.stringify(llmPayload, null, 2));
+        log("LLM_PROMPT", "Sent to Gemini AI", llmPayload);
         if (!ingredientPlan || ingredientPlan.length === 0) throw new Error("LLM did not return an ingredient plan.");
         log("LLM_RESPONSE", "Blueprint Received", `Found ${ingredientPlan.length} ingredients.`);
 
@@ -92,15 +91,14 @@ async function processSingleIngredient(item, store, selfUrl, log) {
     const ingredientKey = item.originalIngredient;
     const currentQuery = item.searchQuery;
     
-    // --- MODIFICATION: Call the pure function directly ---
+    // --- FIX: Call the pure function directly ---
     const rawProducts = await fetchPriceData(store, currentQuery);
     log("PRICE_API", `Fetched ${rawProducts.length} products for "${currentQuery}"`);
     
     let finalProducts = [];
     if (rawProducts.length > 0) {
         const productCandidates = rawProducts.map(p => p.product_name || "Unknown");
-        // Analysis and Nutrition steps remain the same...
-        const analysisResult = await analyzeProductsInBatch([{ ingredientName: ingredientKey, productCandidates }], log);
+        const analysisResult = await analyzeProductsInBatch([{ ingredientName: ingredientKey, productCandidates }]);
         const perfectMatchNames = new Set((analysisResult[0]?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
         const perfectProductsRaw = rawProducts.filter(p => perfectMatchNames.has(p.product_name));
         
@@ -158,6 +156,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget) {
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
+    // Return the payload along with the result for logging purposes
     return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
 
