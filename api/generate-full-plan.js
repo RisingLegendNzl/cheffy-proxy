@@ -261,9 +261,14 @@ async function generateLLMPlanAndMeals(formData, nutritionalTargets, log) {
 RULES:
 1.  Generate a complete meal plan for the specified number of days that STRICTLY adheres to the daily nutritional targets provided.
 2.  Generate a consolidated shopping list of unique ingredients required for the entire plan.
-3.  For each ingredient, provide a 'searchQuery' which MUST be a simple, generic term suitable for a grocery store search engine (e.g., "chicken breast", "rolled oats", "mixed berries"). DO NOT include quantities or brands in the searchQuery.
+3.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
 4.  Estimate the total grams required for each ingredient across the entire plan.
-5.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
+5.  CRITICAL RULE FOR 'searchQuery': The searchQuery MUST be the most generic, searchable keyword for the item.
+    - EXCLUDE PREPARATIONS: Remove words like \`canned\`, \`frozen\`, \`fresh\`, \`dried\`, \`raw\`, \`cooked\`.
+    - EXCLUDE PACKAGING: Remove descriptions like \`in water\`, \`in oil\`, \`in brine\`.
+    - EXCLUDE SPECIFIERS: Remove words like \`(dry)\`.
+    - EXAMPLE 1: If the ingredient is 'Canned Tuna in Water', the \`originalIngredient\` should be 'Canned Tuna' and the \`searchQuery\` MUST be 'tuna'.
+    - EXAMPLE 2: If the ingredient is 'Rolled Oats (dry)', the \`originalIngredient\` should be 'Rolled Oats' and the \`searchQuery\` MUST be 'rolled oats'.
 6.  Adhere strictly to all user-provided constraints (dietary, cost, variety, etc.).`;
     const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}.
 - User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
