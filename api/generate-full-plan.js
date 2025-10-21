@@ -1,5 +1,8 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 const fetch = require('node-fetch');
+const { fetchPriceData } = require('./price-search.js');
+const { fetchNutritionData: fetchNutritionFromApi } = require('./nutrition-search.js');
+
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -96,11 +99,16 @@ module.exports = async function handler(request, response) {
             const batchItems = itemsToDiscover.slice(i, i + BATCH_SIZE);
             log(`Processing Batch ${batchNum} of ${Math.ceil(itemsToDiscover.length / BATCH_SIZE)}...`);
             
-            // Step 1: Fetch raw price data for the entire batch concurrently.
-            const priceDataPromises = batchItems.map(item => fetchRawProducts(item.searchQuery, store, log).then(rawProducts => ({ item, rawProducts })));
+            const priceDataPromises = batchItems.map(item => 
+                fetchPriceData(store, item.searchQuery)
+                    .then(rawProducts => ({ item, rawProducts }))
+                    .catch(err => {
+                        log(`[CRITICAL] Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, 'CRITICAL');
+                        return { item, rawProducts: [] };
+                    })
+            );
             const batchPriceResults = await Promise.all(priceDataPromises);
 
-            // Step 2: Prepare a SINGLE payload for the Gemini analysis API.
             const analysisPayload = batchPriceResults
                 .filter(result => result.rawProducts.length > 0)
                 .map(result => ({
@@ -108,18 +116,16 @@ module.exports = async function handler(request, response) {
                     productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
                 }));
 
-            // Step 3: Call the analysis API ONCE for the whole batch.
             let batchAnalysis = [];
             if(analysisPayload.length > 0) {
                 try {
                     batchAnalysis = await analyzeProductsInBatch(analysisPayload, log);
-                    log(`Analysis for batch ${batchNum} successful.`, 'SUCCESS');
+                    log(`Analysis for batch ${batchNum} successful.`);
                 } catch (err) {
                     log(`Product analysis FAILED for batch ${batchNum}. Reason: ${err.message}.`, 'WARN');
                 }
             }
 
-            // Step 4: Process the results, fetch nutrition, and build the final data object for each item in the batch.
             const finalDataPromises = batchPriceResults.map(async (priceResult) => {
                 const { item, rawProducts } = priceResult;
                 const ingredientKey = item.originalIngredient;
@@ -131,7 +137,7 @@ module.exports = async function handler(request, response) {
 
                 let finalProducts = [];
                 if (perfectProductsRaw.length > 0) {
-                    const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionData(p, store, log));
+                    const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionFromApi(p.barcode, p.product_name));
                     const nutritionResults = await Promise.all(nutritionPromises);
 
                     finalProducts = perfectProductsRaw.map((p, index) => ({
@@ -158,7 +164,7 @@ module.exports = async function handler(request, response) {
             
             await Promise.all(finalDataPromises);
             log(`Batch ${batchNum} complete.`);
-            await delay(200);
+            await delay(1000); // Add a 1-second delay between batches to further reduce load on APIs
         }
         log("Market Run complete.", 'SUCCESS');
 
@@ -175,79 +181,8 @@ module.exports = async function handler(request, response) {
     }
 }
 
+
 // --- API-CALLING FUNCTIONS ---
-async function fetchRawProducts(query, store, log) {
-    const priceSearchHandler = require('./price-search.js');
-    const mockReq = { query: { store, query } };
-    let capturedData;
-    let errorOccurred = false;
-
-    const mockRes = {
-        setHeader: () => {},
-        status: (code) => ({
-            json: (data) => {
-                if (code >= 400) {
-                    log(`Internal Price API Error for query "${query}": HTTP ${code}, Data: ${JSON.stringify(data)}`, 'WARN');
-                    errorOccurred = true;
-                }
-                capturedData = data;
-            },
-        }),
-    };
-    
-    try {
-        await priceSearchHandler.fetchPriceData(store, query)
-            .then(results => {
-                capturedData = { results };
-                log(`Price search for "${query}" successful, found ${results.length} raw products.`);
-            })
-            .catch(err => {
-                log(`Price search FAILED for "${query}". Reason: ${err.message}.`, 'WARN');
-                capturedData = { results: [] };
-                errorOccurred = true;
-            });
-    } catch (err) {
-        log(`Critical failure in price search handler for "${query}": ${err.message}`, 'CRITICAL');
-        capturedData = { results: [] };
-        errorOccurred = true;
-    }
-    
-    if (errorOccurred) {
-        return []; // Return empty array on failure
-    }
-
-    return capturedData.results || [];
-}
-
-async function fetchNutritionData(product, store, log) {
-    // This function calls the Open Food Facts API via the nutrition-search proxy
-    const nutritionSearchHandler = require('./nutrition-search.js');
-    const { barcode, product_name } = product;
-
-    // We can't use node-fetch here because nutrition-search.js expects Vercel's req/res objects.
-    // So we'll mock them to call the handler directly.
-    const mockReq = { query: barcode ? { barcode } : { query: product_name } };
-    let nutritionData = MOCK_NUTRITION_DATA;
-
-    const mockRes = {
-        setHeader: () => {},
-        status: () => ({ // Chain status call
-            json: (data) => { // Capture json data
-                nutritionData = data;
-            },
-            end: () => {}
-        })
-    };
-
-    try {
-        await nutritionSearchHandler(mockReq, mockRes);
-    } catch (e) {
-        log(`Nutrition handler execution CRITICAL for "${product_name}": ${e.message}`, 'WARN');
-        return MOCK_NUTRITION_DATA;
-    }
-    return nutritionData;
-}
-
 async function analyzeProductsInBatch(analysisData, log) {
     if(!analysisData || analysisData.length === 0){
         log("Skipping product analysis: no data to analyze.", "INFO");
@@ -329,4 +264,5 @@ function calculateCalorieTarget(formData) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
+
 
