@@ -231,11 +231,20 @@ async function analyzeProductsInBatch(analysisData, log) {
         return [];
     }
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to determine if a given product name is a "perfect match" for a required grocery ingredient.
+    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to accurately classify product names returned by a grocery store search engine against the core ingredient requested in a recipe.
+CRITICAL RULE: The goal is to maximize successful ingredient matches for the user. A "perfect" match must be returned unless the product is fundamentally the wrong food item.
+
 Classifications:
-- "perfect": The product is exactly what was asked for (e.g., ingredient "Chicken Breast" and product "Woolworths RSPCA Approved Chicken Breast Fillets"). Brand names, sizes, or minor descriptors like "fresh" or "frozen" are acceptable.
-- "substitute": The product is a reasonable alternative but not an exact match (e.g., ingredient "Chicken Breast" and product "Chicken Thighs").
-- "irrelevant": The product is completely wrong (e.g., ingredient "Chicken Breast" and product "Beef Mince").
+- "perfect": The product is a **direct core ingredient match**. This includes common varieties, packaging differences, and quality descriptors.
+    - Examples of a "perfect" match:
+        - Ingredient Request: "Premium Smoked Salmon" -> Product: "Woolworths Smoked Salmon Slices" (Perfect, matches core ingredient)
+        - Ingredient Request: "Lean Ground Beef (95%+)" -> Product: "Deli Beef Mince" (Perfect, matches core ingredient: beef mince)
+        - Ingredient Request: "Extra Virgin Olive Oil" -> Product: "Bertocchi Olive Oil" (Perfect, matches core ingredient: olive oil)
+- "substitute": The product is a fundamentally different ingredient that could still work in the recipe, but is not what was requested.
+    - Example: Ingredient Request: "Chicken Breast" -> Product: "Chicken Thighs" (Substitute)
+- "irrelevant": The product is completely wrong or cannot be used.
+    - Example: Ingredient Request: "Chicken Breast" -> Product: "Beef Mince" (Irrelevant)
+
 Analyze the following list of grocery items and provide a JSON response. For each ingredient, analyze its corresponding product candidates.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
     const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
@@ -298,5 +307,4 @@ RULES:
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
     return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
-
 
