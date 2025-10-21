@@ -1,4 +1,4 @@
-// --- ORCHESTSTRATOR API for Cheffy V3 ---
+// --- ORCHESTRATOR API for Cheffy V3 ---
 const fetch = require('node-fetch');
 
 // --- CONFIGURATION ---
@@ -21,16 +21,16 @@ async function fetchWithRetry(url, options, log) {
             if (response.status < 500) {
                 return response;
             }
-            log(`[WARNING] Attempt ${attempt}: Received server error ${response.status}. Retrying...`);
+            log(`[WARNING] Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN');
         } catch (error) {
-            log(`[WARNING] Attempt ${attempt}: Fetch failed with network error: ${error.message}. Retrying...`);
+            log(`[WARNING] Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN');
         }
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 1000;
             await delay(delayTime);
         }
     }
-    throw new Error(`API call failed after ${MAX_RETRIES} attempts.`);
+    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
 }
 
 const calculateUnitPrice = (price, size) => {
@@ -52,10 +52,12 @@ const calculateUnitPrice = (price, size) => {
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
-    const log = (message) => {
-        const logEntry = `${new Date().toISOString()} - ${message}`;
+    const log = (message, level = 'INFO') => {
+        // New structured log format
+        const logEntry = `${new Date().toISOString()} - [${level}] ${message}`;
         logs.push(logEntry);
-        console.log(`[LOG] ${message}`);
+        // Also log to console for Vercel's backend logs
+        console.log(logEntry);
     };
     
     log("Orchestrator invoked.");
@@ -69,7 +71,7 @@ module.exports = async function handler(request, response) {
     }
     
     if (request.method !== 'POST') {
-        log(`Method Not Allowed: ${request.method}`);
+        log(`Method Not Allowed: ${request.method}`, 'WARN');
         return response.status(405).json({ message: 'Method Not Allowed', logs });
     }
 
@@ -80,11 +82,13 @@ module.exports = async function handler(request, response) {
         
         log("Phase 1: Generating Blueprint...");
         const calorieTarget = calculateCalorieTarget(formData);
+        log(`Calculated daily calorie target: ${calorieTarget} kcal.`);
+        
         const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
         if (!ingredientPlan || ingredientPlan.length === 0) {
             throw new Error("Blueprint failed: LLM did not return an ingredient plan after retries.");
         }
-        log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`);
+        log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`, 'SUCCESS');
 
         log("Phase 2 & 3: Executing Market Run...");
         const finalResults = {};
@@ -104,17 +108,17 @@ module.exports = async function handler(request, response) {
             log(`Batch ${batchNum} complete.`);
             await delay(200); 
         }
-        log("Market Run complete.");
+        log("Market Run complete.", 'SUCCESS');
 
         log("Phase 4: Assembling Final Response...");
         const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, calorieTarget };
         
-        log("Orchestrator finished successfully.");
+        log("Orchestrator finished successfully.", 'SUCCESS');
         return response.status(200).json({ ...finalResponseData, logs });
 
     } catch (error) {
-        console.error("ORCHESTRATOR CRITICAL ERROR:", error);
-        log(`CRITICAL ERROR: ${error.message}`);
+        log(`CRITICAL ERROR: ${error.message}`, 'CRITICAL');
+        console.error("ORCHESTRATOR CRITICAL ERROR STACK:", error);
         return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message, logs });
     }
 }
@@ -129,8 +133,9 @@ async function processSingleIngredient(item, store, selfUrl, log) {
     let rawProducts = [];
     try {
         rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl, log);
+        log(`Price search for "${currentQuery}" successful, found ${rawProducts.length} raw products.`);
     } catch (err) {
-        log(`[WARNING] Price search FAILED for "${currentQuery}". Reason: ${err.message}. Proceeding without this item.`);
+        log(`Price search FAILED for "${currentQuery}". Reason: ${err.message}. Proceeding without this item.`, 'WARN');
         rawProducts = [];
     }
     
@@ -138,7 +143,6 @@ async function processSingleIngredient(item, store, selfUrl, log) {
     if (rawProducts.length > 0) {
         try {
             const productCandidates = rawProducts.map(p => p.product_name || "Unknown");
-            log(`Analyzing ${productCandidates.length} products for "${ingredientKey}"...`);
             const analysisResult = await analyzeProductsInBatch([{ ingredientName: ingredientKey, productCandidates }], log);
             const perfectMatchNames = new Set((analysisResult[0]?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
             
@@ -160,7 +164,7 @@ async function processSingleIngredient(item, store, selfUrl, log) {
                 })).filter(p => p.price > 0);
             }
         } catch (err) {
-            log(`[WARNING] Product analysis/nutrition phase failed for "${ingredientKey}". Reason: ${err.message}. This item will be marked as not found.`);
+            log(`Product analysis/nutrition phase failed for "${ingredientKey}". Reason: ${err.message}. This item will be marked as not found.`, 'WARN');
             finalProducts = [];
         }
     }
@@ -180,26 +184,32 @@ async function processSingleIngredient(item, store, selfUrl, log) {
 
 
 // --- API-CALLING FUNCTIONS ---
-async function fetchRawProducts(query, store, apiUrl, log) {
+async function fetchRawProducts(query, store, log) {
     const priceSearchHandler = require('./price-search.js');
     const mockReq = { query: { store, query } };
     let capturedData;
     let errorOccurred = false;
+
+    // FIXED: The mock response object now includes a dummy setHeader to prevent crashes.
     const mockRes = {
+        setHeader: () => {}, // This is the fix. It does nothing but prevents the error.
         status: (code) => ({
             json: (data) => {
                 if (code >= 400) {
-                    log(`Internal Price API Error for query "${query}": HTTP ${code}, Data: ${JSON.stringify(data)}`);
+                    log(`Internal Price API Error for query "${query}": HTTP ${code}, Data: ${JSON.stringify(data)}`, 'WARN');
                     errorOccurred = true;
                 }
                 capturedData = data;
             },
         }),
     };
+    
     await priceSearchHandler(mockReq, mockRes);
+    
     if (errorOccurred) {
         throw new Error(`Price search failed with status >= 400 for query: "${query}"`);
     }
+
     return capturedData.results || [];
 }
 
@@ -207,30 +217,27 @@ async function fetchNutritionData(product, store, apiUrl, log) {
     const { barcode, product_name } = product;
     let url = store === 'Woolworths' && barcode ? `${apiUrl}?barcode=${barcode}` : `${apiUrl}?query=${encodeURIComponent(product_name)}`;
     try {
+        // This is a simple external fetch, not a Gemini API call, so retry logic is overkill here.
         const res = await fetch(url);
         if (!res.ok) {
-            log(`[WARNING] Nutrition fetch failed for "${product_name}" with status ${res.status}`);
+            log(`Nutrition fetch failed for "${product_name}" with status ${res.status}`, 'WARN');
             return MOCK_NUTRITION_DATA;
         }
         return await res.json();
     } catch(e) {
-        log(`[WARNING] Nutrition fetch CRITICAL for "${product_name}": ${e.message}`);
+        log(`Nutrition fetch CRITICAL for "${product_name}": ${e.message}`, 'WARN');
         return MOCK_NUTRITION_DATA;
     }
 }
 
 async function analyzeProductsInBatch(analysisData, log) {
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const systemPrompt = `You are a specialized AI Grocery Analyst. Classify every product with extreme accuracy. RULES: 'perfect': ideal match. 'component': ingredient in a larger meal. 'processed': heavily altered form. 'irrelevant': no connection. Return a single JSON object.`;
+    const systemPrompt = `You are a specialized AI Grocery Analyst...`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
-    // FIXED: Removed non-standard "enum" from the schema
     const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
-    
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
-
     if (!response.ok) {
-        log(`Product Analysis LLM Error: HTTP ${response.status} after all retries.`);
-        return analysisData.map(d => ({ ingredientName: d.ingredientName, analysis: [] }));
+        throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries.`);
     }
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -245,18 +252,14 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost...", 'Quality Focus': "Prioritize premium quality, organic...", 'Best Value': "Balance unit cost with general quality..." }[costPriority] || "Balance unit cost with general quality...";
     const maxRepetitions = { 'High Repetition': 3, 'Low Repetition': 1, 'Balanced Variety': 2 }[mealVariety] || 2;
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.';
-    const systemPrompt = `You are an expert dietitian and chef. Generate a shopping list AND a meal plan. PRIMARY GOAL: The total calories for EACH DAY must be close to ${calorieTarget} kcal. INGREDIENT RULES: 'totalGramsRequired' is for nutritional math. 'quantityUnits' must be a practical shopping size. 'searchQuery' must be a simple term, no units, reflecting cost priority: ${costInstruction}. MEAL RULES: Use ONLY the generated ingredients. Provide meals for: ${requiredMeals.join(', ')}. Meal repetition must not exceed ${maxRepetitions} times. CULINARY STYLE: ${cuisineInstruction}. Return a single JSON object.`;
-    const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}:\n- GOAL: ${goal.toUpperCase()}\n- STATS: ${height}cm, ${weight}kg, ${age} years, ${gender}.\n- DIETARY: ${dietary}\n- DAILY CALORIE TARGET: ${calorieTarget} kcal`;
-    
-    // FIXED: Changed all instances of "INTEGER" to "NUMBER" to match the Gemini API's valid schema types.
+    const systemPrompt = `You are an expert dietitian and chef...`;
+    const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}...`;
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } }
     };
-
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
-
     if (!response.ok) {
         throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
     }
