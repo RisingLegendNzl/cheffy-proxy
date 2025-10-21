@@ -53,7 +53,6 @@ export default async function handler(request, response) {
     try {
         const formData = request.body;
         const { store } = formData;
-        // The base URL of the current deployment (e.g., https://cheffy-proxy.vercel.app)
         const selfUrl = `https://${request.headers.host}`; 
 
         // --- Phase 1: The Blueprint (Call Gemini) ---
@@ -64,13 +63,9 @@ export default async function handler(request, response) {
         }
 
         // --- Phase 2 & 3: Execution & Fusion ---
-        // For now, we will treat all items as "unknown" to simplify. 
-        // Pantry logic can be added back here later.
-        
         const finalResults = {};
         const itemsToDiscover = [...ingredientPlan];
         
-        // ** THE CORE FIX: Process items in controlled batches **
         for (let i = 0; i < itemsToDiscover.length; i += BATCH_SIZE) {
             const batch = itemsToDiscover.slice(i, i + BATCH_SIZE);
             const batchPromises = batch.map(item => processSingleIngredient(item, store, selfUrl));
@@ -79,7 +74,7 @@ export default async function handler(request, response) {
             for (const result of batchResults) {
                 finalResults[result.ingredientKey] = result.data;
             }
-            await delay(250); // Small delay between batches to be safe
+            await delay(250); 
         }
 
         // --- Phase 4: Assemble and Return ---
@@ -104,9 +99,14 @@ async function processSingleIngredient(item, store, selfUrl) {
     const ingredientKey = item.originalIngredient;
     const currentQuery = item.searchQuery;
 
-    // Call our own internal APIs for price and nutrition
-    const priceApiUrl = `${selfUrl}/api/proxy`;
+    // --- START OF FIX ---
+    // The grocery store API lives at a different Vercel deployment.
+    // We must use its full, hardcoded address.
+    const priceApiUrl = 'https://cheffy-api-proxy.vercel.app/api/proxy';
+    
+    // The nutrition API lives in THIS deployment, so 'selfUrl' is correct.
     const nutritionApiUrl = `${selfUrl}/api/nutrition-search`;
+    // --- END OF FIX ---
 
     const rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl);
     
@@ -132,7 +132,6 @@ async function processSingleIngredient(item, store, selfUrl) {
         })).filter(p => p.price > 0);
     }
     
-    // Assemble the final data structure for this one ingredient
     const cheapest = finalProducts.length > 0
         ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0])
         : null;
@@ -192,8 +191,6 @@ async function analyzeProductsInBatch(analysisData) {
 }
 
 async function generateLLMPlanAndMeals(formData, calorieTarget) {
-    // This function is large and mostly unchanged from your React app.
-    // It's included here for completeness.
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = { '3': ['Breakfast', 'Lunch', 'Dinner'], '4': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1'], '5': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1', 'Snack 2'], };
@@ -206,7 +203,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget) {
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "INTEGER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "INTEGER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } }
+        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "INTEGER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "INTEGER" }, "meals": { "type": "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } }
     };
     const response = await fetch(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     if (!response.ok) throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
@@ -216,7 +213,6 @@ async function generateLLMPlanAndMeals(formData, calorieTarget) {
     return JSON.parse(jsonText);
 }
 
-// --- UTILITY: Calculate Calorie Target (copied from your React app) ---
 function calculateCalorieTarget(formData) {
     const { weight, height, age, gender, activityLevel, goal } = formData;
     const weightKg = parseFloat(weight);
