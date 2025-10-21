@@ -1,7 +1,8 @@
 {
   "functions": {
-    "api/nutrition-search.js": {
-      "includeFiles": "node_modules/node-fetch/**"
+    "api/**/*.js": {
+      "maxDuration": 10
     }
   }
 }
+
