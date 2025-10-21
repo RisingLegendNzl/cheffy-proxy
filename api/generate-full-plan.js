@@ -1,13 +1,19 @@
 const fetch = require('node-fetch');
-// --- FIX: Directly import the pure 'fetchPriceData' function ---
-const { fetchPriceData } = require('./price-search.js');
+const axios = require('axios'); // Now used directly here for RapidAPI
 
+// --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+const RAPID_API_HOSTS = {
+    Coles: 'coles-product-price-api.p.rapidapi.com',
+    Woolworths: 'woolworths-products-api.p.rapidapi.com'
+};
 const BATCH_SIZE = 3;
+
+// --- MOCK DATA & HELPERS ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
 const MOCK_NUTRITION_DATA = { status: 'not_found', calories: 0, protein: 0, fat: 0, carbs: 0 };
-
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const calculateUnitPrice = (price, size) => {
     if (!price || price <= 0 || typeof size !== 'string' || size.length === 0) return price;
@@ -25,6 +31,31 @@ const calculateUnitPrice = (price, size) => {
     return price;
 };
 
+
+// --- MERGED FUNCTION: Fetches price data from RapidAPI ---
+async function fetchPriceData(store, query) {
+    if (!RAPIDAPI_KEY) throw new Error('Server configuration error: RAPIDAPI_KEY is missing.');
+    if (!store || !query) throw new Error('Missing required parameters: store and query.');
+    
+    const host = RAPID_API_HOSTS[store];
+    if (!host) throw new Error('Invalid store specified. Must be "Coles" or "Woolworths".');
+
+    const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
+    try {
+        const rapidResp = await axios.get(endpointUrl, {
+            params: { query },
+            headers: { 'x-rapidapi-key': RAPIDAPI_KEY, 'x-rapidapi-host': host },
+            timeout: 15000
+        });
+        return rapidResp.data.results || [];
+    } catch (error) {
+        console.error(`RapidAPI Error for "${query}":`, error.message);
+        return []; // Return empty array on failure to allow process to continue
+    }
+}
+
+
+// --- MAIN ORCHESTRATOR HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
     const log = (type, title, content = '') => {
@@ -91,7 +122,7 @@ async function processSingleIngredient(item, store, selfUrl, log) {
     const ingredientKey = item.originalIngredient;
     const currentQuery = item.searchQuery;
     
-    // --- FIX: Call the pure function directly ---
+    // --- THIS IS THE FIX: Call the local function directly ---
     const rawProducts = await fetchPriceData(store, currentQuery);
     log("PRICE_API", `Fetched ${rawProducts.length} products for "${currentQuery}"`);
     
@@ -116,6 +147,7 @@ async function processSingleIngredient(item, store, selfUrl, log) {
     return { ingredientKey, data: { ...item, allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}], currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url, userQuantity: 1 } };
 }
 
+// Other helper functions (fetchNutritionData, analyzeProductsInBatch, etc.) remain below
 async function fetchNutritionData(product, store, apiUrl) {
     const { barcode, product_name } = product;
     let url = store === 'Woolworths' && barcode ? `${apiUrl}?barcode=${barcode}` : `${apiUrl}?query=${encodeURIComponent(product_name)}`;
@@ -156,7 +188,6 @@ async function generateLLMPlanAndMeals(formData, calorieTarget) {
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
-    // Return the payload along with the result for logging purposes
     return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
 
