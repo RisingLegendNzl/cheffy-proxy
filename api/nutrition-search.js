@@ -1,5 +1,5 @@
-// Use 'require' for node-fetch version 2.x, which Vercel supports
-const fetch = require('node-fetch');
+// Use ES Module import syntax to match project configuration
+import fetch from 'node-fetch';
 
 // Vercel's main handler for serverless functions
 export default async function handler(request, response) {
@@ -81,3 +81,4 @@ export default async function handler(request, response) {
     return response.status(500).json({ status: 'error', message: error.message });
   }
 }
+
