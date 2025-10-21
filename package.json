@@ -1,25 +1,9 @@
 {
-  "name": "cheffy-proxy",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
-  },
+  "name": "cheffy-proxy-unified",
+  "version": "2.0.0",
+  "description": "Unified proxy and orchestrator for Cheffy.",
   "dependencies": {
-    "react": "^18",
-    "react-dom": "^18",
-    "next": "14.2.3"
-  },
-  "devDependencies": {
-    "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "eslint": "^8",
-    "eslint-config-next": "14.2.3",
-    "typescript": "^5"
+    "axios": "^1.7.2",
+    "node-fetch": "^2.7.0"
   }
 }
-
