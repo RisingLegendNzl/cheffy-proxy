@@ -1,4 +1,4 @@
-onst axios = require('axios');
+const axios = require('axios');
 
 const RAPID_API_HOSTS = {
     Coles: 'coles-product-price-api.p.rapidapi.com',
@@ -67,5 +67,4 @@ module.exports = async (req, res) => {
 
 // Export the pure function for internal use by other scripts
 module.exports.fetchPriceData = fetchPriceData;
-
 
