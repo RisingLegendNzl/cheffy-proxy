@@ -33,7 +33,8 @@ async function fetchPriceData(store, query) {
         const rapidResp = await axios.get(endpointUrl, {
             params: { query },
             headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
-            timeout: 15000
+            // Increased timeout from 15 to 30 seconds for better reliability
+            timeout: 30000 
         });
         return rapidResp.data.results || [];
     } catch (error) {
@@ -67,4 +68,5 @@ module.exports = async (req, res) => {
 
 // Export the pure function for internal use by other scripts
 module.exports.fetchPriceData = fetchPriceData;
+
 
