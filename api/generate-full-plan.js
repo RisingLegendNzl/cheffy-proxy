@@ -21,9 +21,9 @@ async function fetchWithRetry(url, options, log) {
             if (response.status < 500) {
                 return response;
             }
-            log(`[WARNING] Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN');
+            log(`[WARN] Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN');
         } catch (error) {
-            log(`[WARNING] Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN');
+            log(`[WARN] Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN');
         }
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 1000;
@@ -53,10 +53,8 @@ const calculateUnitPrice = (price, size) => {
 module.exports = async function handler(request, response) {
     const logs = [];
     const log = (message, level = 'INFO') => {
-        // New structured log format
         const logEntry = `${new Date().toISOString()} - [${level}] ${message}`;
         logs.push(logEntry);
-        // Also log to console for Vercel's backend logs
         console.log(logEntry);
     };
     
@@ -78,7 +76,6 @@ module.exports = async function handler(request, response) {
     try {
         const formData = request.body;
         const { store } = formData;
-        const selfUrl = `https://${request.headers.host}`; 
         
         log("Phase 1: Generating Blueprint...");
         const calorieTarget = calculateCalorieTarget(formData);
@@ -96,17 +93,72 @@ module.exports = async function handler(request, response) {
         
         for (let i = 0; i < itemsToDiscover.length; i += BATCH_SIZE) {
             const batchNum = (i / BATCH_SIZE) + 1;
-            const batch = itemsToDiscover.slice(i, i + BATCH_SIZE);
+            const batchItems = itemsToDiscover.slice(i, i + BATCH_SIZE);
             log(`Processing Batch ${batchNum} of ${Math.ceil(itemsToDiscover.length / BATCH_SIZE)}...`);
             
-            const batchPromises = batch.map(item => processSingleIngredient(item, store, selfUrl, log));
-            const batchResults = await Promise.all(batchPromises);
-            
-            for (const result of batchResults) {
-                finalResults[result.ingredientKey] = result.data;
+            // Step 1: Fetch raw price data for the entire batch concurrently.
+            const priceDataPromises = batchItems.map(item => fetchRawProducts(item.searchQuery, store, log).then(rawProducts => ({ item, rawProducts })));
+            const batchPriceResults = await Promise.all(priceDataPromises);
+
+            // Step 2: Prepare a SINGLE payload for the Gemini analysis API.
+            const analysisPayload = batchPriceResults
+                .filter(result => result.rawProducts.length > 0)
+                .map(result => ({
+                    ingredientName: result.item.originalIngredient,
+                    productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
+                }));
+
+            // Step 3: Call the analysis API ONCE for the whole batch.
+            let batchAnalysis = [];
+            if(analysisPayload.length > 0) {
+                try {
+                    batchAnalysis = await analyzeProductsInBatch(analysisPayload, log);
+                    log(`Analysis for batch ${batchNum} successful.`, 'SUCCESS');
+                } catch (err) {
+                    log(`Product analysis FAILED for batch ${batchNum}. Reason: ${err.message}.`, 'WARN');
+                }
             }
+
+            // Step 4: Process the results, fetch nutrition, and build the final data object for each item in the batch.
+            const finalDataPromises = batchPriceResults.map(async (priceResult) => {
+                const { item, rawProducts } = priceResult;
+                const ingredientKey = item.originalIngredient;
+
+                const analysisForItem = batchAnalysis.find(a => a.ingredientName === ingredientKey);
+                const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
+                
+                const perfectProductsRaw = rawProducts.filter(p => perfectMatchNames.has(p.product_name));
+
+                let finalProducts = [];
+                if (perfectProductsRaw.length > 0) {
+                    const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionData(p, store, log));
+                    const nutritionResults = await Promise.all(nutritionPromises);
+
+                    finalProducts = perfectProductsRaw.map((p, index) => ({
+                        name: p.product_name,
+                        brand: p.product_brand,
+                        price: p.current_price,
+                        size: p.product_size,
+                        url: p.url,
+                        unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
+                        nutrition: nutritionResults[index] || MOCK_NUTRITION_DATA,
+                    })).filter(p => p.price > 0);
+                }
+
+                const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
+
+                finalResults[ingredientKey] = {
+                    ...item,
+                    allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
+                    currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
+                    userQuantity: 1,
+                    source: finalProducts.length > 0 ? 'discovery' : 'failed'
+                };
+            });
+            
+            await Promise.all(finalDataPromises);
             log(`Batch ${batchNum} complete.`);
-            await delay(200); 
+            await delay(200);
         }
         log("Market Run complete.", 'SUCCESS');
 
@@ -123,66 +175,6 @@ module.exports = async function handler(request, response) {
     }
 }
 
-// --- SUB-PROCESS ---
-async function processSingleIngredient(item, store, selfUrl, log) {
-    const ingredientKey = item.originalIngredient;
-    const currentQuery = item.searchQuery;
-    const nutritionApiUrl = `${selfUrl}/api/nutrition-search`;
-    const priceApiUrl = `${selfUrl}/api/price-search`;
-    
-    let rawProducts = [];
-    try {
-        rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl, log);
-        log(`Price search for "${currentQuery}" successful, found ${rawProducts.length} raw products.`);
-    } catch (err) {
-        log(`Price search FAILED for "${currentQuery}". Reason: ${err.message}. Proceeding without this item.`, 'WARN');
-        rawProducts = [];
-    }
-    
-    let finalProducts = [];
-    if (rawProducts.length > 0) {
-        try {
-            const productCandidates = rawProducts.map(p => p.product_name || "Unknown");
-            const analysisResult = await analyzeProductsInBatch([{ ingredientName: ingredientKey, productCandidates }], log);
-            const perfectMatchNames = new Set((analysisResult[0]?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
-            
-            const perfectProductsRaw = rawProducts.filter(p => perfectMatchNames.has(p.product_name));
-            log(`Found ${perfectProductsRaw.length} perfect matches for "${ingredientKey}".`);
-
-            if (perfectProductsRaw.length > 0) {
-                 const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionData(p, store, nutritionApiUrl, log));
-                 const nutritionResults = await Promise.all(nutritionPromises);
-
-                 finalProducts = perfectProductsRaw.map((p, i) => ({
-                    name: p.product_name,
-                    brand: p.product_brand,
-                    price: p.current_price,
-                    size: p.product_size,
-                    url: p.url,
-                    unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
-                    nutrition: nutritionResults[i] || MOCK_NUTRITION_DATA,
-                })).filter(p => p.price > 0);
-            }
-        } catch (err) {
-            log(`Product analysis/nutrition phase failed for "${ingredientKey}". Reason: ${err.message}. This item will be marked as not found.`, 'WARN');
-            finalProducts = [];
-        }
-    }
-    
-    const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
-
-    const data = {
-        ...item,
-        allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
-        currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
-        userQuantity: 1,
-        source: finalProducts.length > 0 ? 'discovery' : 'failed'
-    };
-    
-    return { ingredientKey, data };
-}
-
-
 // --- API-CALLING FUNCTIONS ---
 async function fetchRawProducts(query, store, log) {
     const priceSearchHandler = require('./price-search.js');
@@ -190,9 +182,8 @@ async function fetchRawProducts(query, store, log) {
     let capturedData;
     let errorOccurred = false;
 
-    // FIXED: The mock response object now includes a dummy setHeader to prevent crashes.
     const mockRes = {
-        setHeader: () => {}, // This is the fix. It does nothing but prevents the error.
+        setHeader: () => {},
         status: (code) => ({
             json: (data) => {
                 if (code >= 400) {
@@ -204,40 +195,78 @@ async function fetchRawProducts(query, store, log) {
         }),
     };
     
-    await priceSearchHandler(mockReq, mockRes);
+    try {
+        await priceSearchHandler.fetchPriceData(store, query)
+            .then(results => {
+                capturedData = { results };
+                log(`Price search for "${query}" successful, found ${results.length} raw products.`);
+            })
+            .catch(err => {
+                log(`Price search FAILED for "${query}". Reason: ${err.message}.`, 'WARN');
+                capturedData = { results: [] };
+                errorOccurred = true;
+            });
+    } catch (err) {
+        log(`Critical failure in price search handler for "${query}": ${err.message}`, 'CRITICAL');
+        capturedData = { results: [] };
+        errorOccurred = true;
+    }
     
     if (errorOccurred) {
-        throw new Error(`Price search failed with status >= 400 for query: "${query}"`);
+        return []; // Return empty array on failure
     }
 
     return capturedData.results || [];
 }
 
-async function fetchNutritionData(product, store, apiUrl, log) {
+async function fetchNutritionData(product, store, log) {
+    // This function calls the Open Food Facts API via the nutrition-search proxy
+    const nutritionSearchHandler = require('./nutrition-search.js');
     const { barcode, product_name } = product;
-    let url = store === 'Woolworths' && barcode ? `${apiUrl}?barcode=${barcode}` : `${apiUrl}?query=${encodeURIComponent(product_name)}`;
+
+    // We can't use node-fetch here because nutrition-search.js expects Vercel's req/res objects.
+    // So we'll mock them to call the handler directly.
+    const mockReq = { query: barcode ? { barcode } : { query: product_name } };
+    let nutritionData = MOCK_NUTRITION_DATA;
+
+    const mockRes = {
+        setHeader: () => {},
+        status: () => ({ // Chain status call
+            json: (data) => { // Capture json data
+                nutritionData = data;
+            },
+            end: () => {}
+        })
+    };
+
     try {
-        // This is a simple external fetch, not a Gemini API call, so retry logic is overkill here.
-        const res = await fetch(url);
-        if (!res.ok) {
-            log(`Nutrition fetch failed for "${product_name}" with status ${res.status}`, 'WARN');
-            return MOCK_NUTRITION_DATA;
-        }
-        return await res.json();
-    } catch(e) {
-        log(`Nutrition fetch CRITICAL for "${product_name}": ${e.message}`, 'WARN');
+        await nutritionSearchHandler(mockReq, mockRes);
+    } catch (e) {
+        log(`Nutrition handler execution CRITICAL for "${product_name}": ${e.message}`, 'WARN');
         return MOCK_NUTRITION_DATA;
     }
+    return nutritionData;
 }
 
 async function analyzeProductsInBatch(analysisData, log) {
+    if(!analysisData || analysisData.length === 0){
+        log("Skipping product analysis: no data to analyze.", "INFO");
+        return [];
+    }
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const systemPrompt = `You are a specialized AI Grocery Analyst...`;
+    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to determine if a given product name is a "perfect match" for a required grocery ingredient.
+Classifications:
+- "perfect": The product is exactly what was asked for (e.g., ingredient "Chicken Breast" and product "Woolworths RSPCA Approved Chicken Breast Fillets"). Brand names, sizes, or minor descriptors like "fresh" or "frozen" are acceptable.
+- "substitute": The product is a reasonable alternative but not an exact match (e.g., ingredient "Chicken Breast" and product "Chicken Thighs").
+- "irrelevant": The product is completely wrong (e.g., ingredient "Chicken Breast" and product "Beef Mince").
+
+Analyze the following list of grocery items and provide a JSON response. For each ingredient, analyze its corresponding product candidates.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
     const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) {
-        throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries.`);
+        const errorBody = await response.text();
+        throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries. Body: ${errorBody}`);
     }
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -249,11 +278,28 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = { '3': ['Breakfast', 'Lunch', 'Dinner'], '4': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1'], '5': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1', 'Snack 2'], };
     const requiredMeals = mealTypesMap[eatingOccasions] || mealTypesMap['3'];
-    const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost...", 'Quality Focus': "Prioritize premium quality, organic...", 'Best Value': "Balance unit cost with general quality..." }[costPriority] || "Balance unit cost with general quality...";
+    const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost, most basic ingredients (e.g., rice, beans, oats, basic vegetables). Avoid expensive meats, pre-packaged items, and specialty goods.", 'Quality Focus': "Prioritize premium quality, organic, free-range, and branded ingredients where appropriate. Cost is a secondary concern to quality and health benefits.", 'Best Value': "Balance unit cost with general quality. Use a mix of budget-friendly staples and good quality fresh produce and proteins. Avoid premium brands unless necessary." }[costPriority] || "Balance unit cost with general quality...";
     const maxRepetitions = { 'High Repetition': 3, 'Low Repetition': 1, 'Balanced Variety': 2 }[mealVariety] || 2;
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.';
-    const systemPrompt = `You are an expert dietitian and chef...`;
-    const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}...`;
+    const systemPrompt = `You are an expert dietitian and chef creating a practical, cost-effective grocery and meal plan.
+RULES:
+1.  Generate a complete meal plan for the specified number of days.
+2.  Generate a consolidated shopping list of unique ingredients required for the entire plan.
+3.  For each ingredient, provide a 'searchQuery' which MUST be a simple, generic term suitable for a grocery store search engine (e.g., "chicken breast", "rolled oats", "mixed berries"). DO NOT include quantities or brands in the searchQuery.
+4.  Estimate the total grams required for each ingredient across the entire plan.
+5.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
+6.  Adhere strictly to all user-provided constraints (dietary, cost, variety, etc.).`;
+    const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}.
+- User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
+- Activity: ${formData.activityLevel}.
+- Goal: ${goal}.
+- Daily Calorie Target: ~${calorieTarget} kcal.
+- Dietary Needs: ${dietary}.
+- Meals Per Day: ${eatingOccasions} (${requiredMeals.join(', ')}).
+- Spending Priority: ${costPriority} (${costInstruction}).
+- Meal Repetition Allowed: A single meal can appear up to ${maxRepetitions} times max.
+- Cuisine Profile: ${cuisineInstruction}.
+- Grocery Store: ${store}.`;
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -283,5 +329,4 @@ function calculateCalorieTarget(formData) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
-
 
