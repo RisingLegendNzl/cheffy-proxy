@@ -1,9 +1,11 @@
 {
-  "name": "cheffy-proxy",
-  "version": "1.0.0",
-  "description": "Proxy for Open Food Facts and Orchestrator",
+  "name": "cheffy-proxy-unified",
+  "version": "2.0.0",
+  "description": "Unified proxy and orchestrator for Cheffy.",
   "dependencies": {
+    "axios": "^1.7.2",
     "node-fetch": "^2.7.0"
   }
 }
+
 
