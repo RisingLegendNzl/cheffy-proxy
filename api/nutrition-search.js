@@ -1,22 +1,16 @@
-// Use ES Module import syntax to match project configuration
-import fetch from 'node-fetch';
+// --- OPEN FOOD FACTS NUTRITION PROXY ---
+const fetch = require('node-fetch');
 
-// Vercel's main handler for serverless functions
-export default async function handler(request, response) {
-  
-  // Set permission headers to allow any domain to access this API
+// --- MAIN HANDLER ---
+module.exports = async (request, response) => {
+  // Set CORS headers
   response.setHeader('Access-Control-Allow-Credentials', true);
-  response.setHeader('Access-Control-Allow-Origin', '*'); // Allow all origins
+  response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  response.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
-  );
+  response.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-  // Handle pre-flight requests for CORS
   if (request.method === 'OPTIONS') {
-    response.status(200).end();
-    return;
+    return response.status(200).end();
   }
 
   const { barcode, query } = request.query;
@@ -33,9 +27,7 @@ export default async function handler(request, response) {
   try {
     const apiResponse = await fetch(openFoodFactsURL, {
       method: 'GET',
-      headers: {
-        'User-Agent': 'CheffyApp/1.0 (youremail@example.com)'
-      }
+      headers: { 'User-Agent': 'CheffyApp/1.0 (contact@yourapp.com)' }
     });
 
     if (!apiResponse.ok) {
@@ -43,23 +35,13 @@ export default async function handler(request, response) {
     }
 
     const data = await apiResponse.json();
-    let product;
-    if (barcode) {
-      product = data.product;
-    } else if (query && data.products && data.products.length > 0) {
-      product = data.products[0];
-    }
+    const product = barcode ? data.product : (data.products && data.products[0]);
 
     if (product && product.nutriments && product.nutriments['energy-kcal_100g']) {
       const nutriments = product.nutriments;
-      
-      // --- START UPGRADE FOR DETAILED NUTRITION ---
       const detailedNutritionData = {
         status: 'found',
-        // Explicitly state the unit for the values
         servingUnit: product.nutrition_data_per || '100g',
-        
-        // Nutritional Fields (converted to numbers)
         calories: parseFloat(nutriments['energy-kcal_100g'] || 0),
         protein: parseFloat(nutriments.proteins_100g || 0),
         fat: parseFloat(nutriments.fat_100g || 0),
@@ -69,17 +51,14 @@ export default async function handler(request, response) {
         fiber: parseFloat(nutriments.fiber_100g || 0),
         sodium: parseFloat(nutriments.sodium_100g || 0)
       };
-      // --- END UPGRADE ---
-      
       return response.status(200).json(detailedNutritionData);
     } else {
-      const mockData = { status: 'not_found' };
-      return response.status(200).json(mockData);
+      return response.status(200).json({ status: 'not_found' });
     }
 
   } catch (error) {
     return response.status(500).json({ status: 'error', message: error.message });
   }
-}
+};
 
 
