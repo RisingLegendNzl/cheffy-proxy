@@ -1,5 +1,4 @@
 // --- API ENDPOINT: GET PLAN STATUS (POLLING) - CORS FIXED ---
-const { kv } = require('@vercel/kv');
 
 module.exports = async function handler(request, response) {
     // --- CORS PREFLIGHT HANDLING (FIX) ---
@@ -17,6 +16,7 @@ module.exports = async function handler(request, response) {
     }
 
     try {
+        const { kv } = await import('@vercel/kv');
         const resultJson = await kv.get(jobId);
 
         if (resultJson) {
@@ -44,5 +44,4 @@ module.exports = async function handler(request, response) {
         });
     }
 };
-
 
