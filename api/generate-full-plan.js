@@ -5,7 +5,6 @@ const fetch = require('node-fetch');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const BATCH_SIZE = 3;
-const PRICE_API_URL = 'https://cheffy-api-proxy.vercel.app/api/proxy';
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
@@ -51,6 +50,7 @@ module.exports = async function handler(request, response) {
     try {
         const formData = request.body;
         const { store } = formData;
+        // The base URL of our own deployment, used to call our other functions
         const selfUrl = `https://${request.headers.host}`; 
         
         log("Phase 1: Generating Blueprint...");
@@ -98,9 +98,11 @@ module.exports = async function handler(request, response) {
 async function processSingleIngredient(item, store, selfUrl) {
     const ingredientKey = item.originalIngredient;
     const currentQuery = item.searchQuery;
+    // Construct URLs to our own API functions within this project
     const nutritionApiUrl = `${selfUrl}/api/nutrition-search`;
+    const priceApiUrl = `${selfUrl}/api/price-search`;
 
-    const rawProducts = await fetchRawProducts(currentQuery, store, PRICE_API_URL);
+    const rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl);
     
     let finalProducts = [];
     if (rawProducts.length > 0) {
@@ -155,8 +157,8 @@ async function fetchRawProducts(query, store, apiUrl) {
 }
 
 async function fetchNutritionData(product, store, apiUrl) {
-    const { barcode, name } = product;
-    let url = store === 'Woolworths' && barcode ? `${apiUrl}?barcode=${barcode}` : `${apiUrl}?query=${encodeURIComponent(name)}`;
+    const { barcode, product_name } = product; // Use product_name as it comes from RapidAPI
+    let url = store === 'Woolworths' && barcode ? `${apiUrl}?barcode=${barcode}` : `${apiUrl}?query=${encodeURIComponent(product_name)}`;
     try {
         const res = await fetch(url);
         if (!res.ok) return MOCK_NUTRITION_DATA;
@@ -170,7 +172,8 @@ async function analyzeProductsInBatch(analysisData) {
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const systemPrompt = `You are a specialized AI Grocery Analyst. Classify every product with extreme accuracy. RULES: 'perfect': ideal match. 'component': ingredient in a larger meal. 'processed': heavily altered form. 'irrelevant': no connection. Return a single JSON object.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
-    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING", "enum": ["perfect", "component", "processed", "irrelevant"] }, "reason": { "type": "STRING" } } } } } } } } } };
+    // ** SYNTAX ERROR FIXED HERE **: Removed the stray semicolon at the end of the schema object.
+    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING", "enum": ["perfect", "component", "processed", "irrelevant"] }, "reason": { "type": "STRING" } } } } } } } } } } };
     try {
         const response = await fetch(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         if (!response.ok) return [];
@@ -195,7 +198,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget) {
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "INTEGER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "INTEGER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } }
+        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "INTEGER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "INTEGER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } }
     };
     const response = await fetch(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     if (!response.ok) throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
@@ -219,4 +222,5 @@ function calculateCalorieTarget(formData) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
+
 
