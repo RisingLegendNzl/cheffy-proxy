@@ -7,15 +7,16 @@ const RAPID_API_HOSTS = {
 const RAPID_API_KEY = process.env.RAPIDAPI_KEY;
 
 /**
- * Core reusable logic for fetching price data. This function is "pure"
- * and does not depend on Vercel's request/response objects.
+ * Core reusable logic for fetching price data.
  * @param {string} store - The store to search ('Coles' or 'Woolworths').
  * @param {string} query - The product search query.
- * @returns {Promise<Array>} A promise that resolves to an array of product results.
+ * @returns {Promise<Array>} A promise that resolves to a maximum of 10 product results.
  */
 async function fetchPriceData(store, query) {
+    // Note: The maximum product candidates to return is capped at 10 for speed optimization.
+    const MAX_CANDIDATES = 10;
+    
     if (!RAPID_API_KEY) {
-        console.error('Configuration Error: RAPIDAPI_KEY is not set.');
         // In a pure function, we throw the error instead of sending a response
         throw new Error('Server configuration error: API key missing.');
     }
@@ -33,11 +34,16 @@ async function fetchPriceData(store, query) {
         const rapidResp = await axios.get(endpointUrl, {
             params: { query },
             headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
-            // Increased timeout from 15 to 30 seconds for better reliability
-            timeout: 30000 
+            // Reducing timeout to 10 seconds to fail fast and prevent Vercel timeouts.
+            timeout: 10000 
         });
-        return rapidResp.data.results || [];
+        
+        // Filter and cap the results immediately to reduce payload size and AI workload.
+        const allResults = rapidResp.data.results || [];
+        return allResults.slice(0, MAX_CANDIDATES);
+
     } catch (error) {
+        // Axios wraps the timeout error, so we log the message.
         console.error(`RapidAPI Execution Error for "${query}":`, error.message);
         // Return an empty array on failure to allow the orchestrator to continue.
         return [];
@@ -68,5 +74,4 @@ module.exports = async (req, res) => {
 
 // Export the pure function for internal use by other scripts
 module.exports.fetchPriceData = fetchPriceData;
-
 
