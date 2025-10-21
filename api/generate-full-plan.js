@@ -1,6 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 const fetch = require('node-fetch');
-const { fetchPriceData } = require('./price-search.js');
+// UPDATE: Import the new fallback function
+const { fetchPriceDataWithFallback } = require('./price-search.js');
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -65,12 +66,10 @@ function calculateNutritionalTargets(formData, log) {
     let calculationMethod;
 
     if (bodyFatPercent && bodyFatPercent > 0) {
-        // Katch-McArdle Formula (more accurate if body fat is known)
         const leanBodyMass = weightKg * (1 - (bodyFatPercent / 100));
         bmr = 370 + (21.6 * leanBodyMass);
         calculationMethod = `Katch-McArdle (LBM: ${leanBodyMass.toFixed(1)}kg)`;
     } else {
-        // Mifflin-St Jeor Formula (reliable for general population)
         bmr = (gender === 'male')
             ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
             : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
@@ -85,10 +84,8 @@ function calculateNutritionalTargets(formData, log) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     const calorieTarget = tdee + (goalAdjustments[goal] || 0);
 
-    // Science-based Macronutrient Calculation
-    const proteinTargetGrams = Math.round(weightKg * 1.8); // 1.8g per kg of bodyweight
-    const fatTargetGrams = Math.round((calorieTarget * 0.25) / 9); // 25% of calories from fat
-    
+    const proteinTargetGrams = Math.round(weightKg * 1.8);
+    const fatTargetGrams = Math.round((calorieTarget * 0.25) / 9);
     const caloriesFromProtein = proteinTargetGrams * 4;
     const caloriesFromFat = fatTargetGrams * 9;
     const remainingCaloriesForCarbs = calorieTarget - caloriesFromProtein - caloriesFromFat;
@@ -152,16 +149,17 @@ module.exports = async function handler(request, response) {
         log({ message: `Blueprint successful. ${ingredientPlan.length} ingredients found.`, level: 'SUCCESS', tag: 'LLM' });
 
         log({ message: "Phase 2: Executing Parallel Market Run...", tag: 'PHASE' });
-        log({ message: "Fetching all product prices simultaneously...", tag: 'HTTP' });
+        log({ message: "Fetching all product prices simultaneously with fallback logic...", tag: 'HTTP' });
 
         const pricePromises = ingredientPlan.map(item =>
-            fetchPriceData(store, item.searchQuery)
+            // UPDATE: Use the new reliable fallback function
+            fetchPriceDataWithFallback(store, item.searchQuery)
                 .then(rawProducts => {
-                    log({ message: `Found ${rawProducts.length} candidates for "${item.searchQuery}"`, tag: 'DATA' });
+                    log({ message: `Found ${rawProducts.length} candidates for "${item.searchQuery}" after fallback.`, tag: 'DATA' });
                     return { item, rawProducts };
                 })
                 .catch(err => {
-                    log({ message: `Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, level: 'CRITICAL', tag: 'HTTP' });
+                    log({ message: `Fallback chain failed catastrophically for "${item.searchQuery}": ${err.message}`, level: 'CRITICAL', tag: 'HTTP' });
                     return { item, rawProducts: [] };
                 })
         );
@@ -171,7 +169,7 @@ module.exports = async function handler(request, response) {
         const analysisPayload = allPriceResults
             .filter(result => result.rawProducts.length > 0)
             .map(result => ({
-                ingredientName: result.item.searchQuery, // DEFINITIVE FIX: Use searchQuery as the reference
+                ingredientName: result.item.searchQuery,
                 productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
             }));
 
@@ -191,7 +189,6 @@ module.exports = async function handler(request, response) {
         const finalResults = {};
         allPriceResults.forEach(({ item, rawProducts }) => {
             const ingredientKey = item.originalIngredient;
-            // DEFINITIVE FIX: Find analysis using the same key we sent: searchQuery
             const analysisForItem = fullAnalysis.find(a => a.ingredientName === item.searchQuery);
             const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
             
