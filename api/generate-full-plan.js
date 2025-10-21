@@ -48,14 +48,71 @@ const calculateUnitPrice = (price, size) => {
     return price;
 };
 
+// --- NUTRITION CALCULATION ENGINE ---
+function calculateNutritionalTargets(formData, log) {
+    const { weight, height, age, gender, activityLevel, goal, bodyFat } = formData;
+    const weightKg = parseFloat(weight);
+    const heightCm = parseFloat(height);
+    const ageYears = parseInt(age, 10);
+    const bodyFatPercent = parseFloat(bodyFat);
+
+    if (!weightKg || !heightCm || !ageYears) {
+        log({ message: "Invalid user metrics, returning default targets.", level: 'WARN', tag: 'CALC' });
+        return { calories: 2000, protein: 150, fat: 60, carbs: 215, method: 'defaults' };
+    }
+
+    let bmr;
+    let calculationMethod;
+
+    if (bodyFatPercent && bodyFatPercent > 0) {
+        // Katch-McArdle Formula (more accurate if body fat is known)
+        const leanBodyMass = weightKg * (1 - (bodyFatPercent / 100));
+        bmr = 370 + (21.6 * leanBodyMass);
+        calculationMethod = `Katch-McArdle (LBM: ${leanBodyMass.toFixed(1)}kg)`;
+    } else {
+        // Mifflin-St Jeor Formula (reliable for general population)
+        bmr = (gender === 'male')
+            ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
+            : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
+        calculationMethod = 'Mifflin-St Jeor';
+    }
+    log({ message: `BMR calculated using ${calculationMethod}: ${Math.round(bmr)} kcal.`, tag: 'CALC' });
+
+    const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
+    const tdee = bmr * (activityMultipliers[activityLevel] || 1.55);
+    log({ message: `TDEE calculated: ${Math.round(tdee)} kcal (Activity: ${activityLevel}).`, tag: 'CALC' });
+
+    const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
+    const calorieTarget = tdee + (goalAdjustments[goal] || 0);
+
+    // Science-based Macronutrient Calculation
+    const proteinTargetGrams = Math.round(weightKg * 1.8); // 1.8g per kg of bodyweight
+    const fatTargetGrams = Math.round((calorieTarget * 0.25) / 9); // 25% of calories from fat
+    
+    const caloriesFromProtein = proteinTargetGrams * 4;
+    const caloriesFromFat = fatTargetGrams * 9;
+    const remainingCaloriesForCarbs = calorieTarget - caloriesFromProtein - caloriesFromFat;
+    const carbsTargetGrams = Math.round(remainingCaloriesForCarbs / 4);
+
+    const targets = {
+        calories: Math.round(calorieTarget),
+        protein: proteinTargetGrams,
+        fat: fatTargetGrams,
+        carbs: carbsTargetGrams,
+    };
+    log({ message: `Final nutritional targets set for goal "${goal}".`, data: targets, tag: 'CALC' });
+    return targets;
+}
+
+
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
     const log = (logObject) => {
         const entry = {
             timestamp: new Date().toISOString(),
-            level: 'INFO', // Default level
-            tag: 'GENERAL', // Default tag
+            level: 'INFO', 
+            tag: 'GENERAL',
             ...logObject
         };
         logs.push(entry);
@@ -84,10 +141,9 @@ module.exports = async function handler(request, response) {
         log({ message: "Phase 1: Generating Blueprint...", tag: 'PHASE' });
         log({ message: `Received form data for store: ${store}`, data: formData, tag: 'DATA' });
         
-        const calorieTarget = calculateCalorieTarget(formData);
-        log({ message: `Calculated daily calorie target: ${calorieTarget} kcal.`, tag: 'CALC' });
+        const nutritionalTargets = calculateNutritionalTargets(formData, log);
         
-        const { ingredients: ingredientPlan, mealPlan, llmPayload } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
+        const { ingredients: ingredientPlan, mealPlan, llmPayload } = await generateLLMPlanAndMeals(formData, nutritionalTargets, log);
         log({ message: 'LLM Blueprint Prompt', data: llmPayload, tag: 'LLM_PROMPT' });
 
         if (!ingredientPlan || ingredientPlan.length === 0) {
@@ -156,7 +212,7 @@ module.exports = async function handler(request, response) {
         log({ message: "Market Run complete.", level: 'SUCCESS', tag: 'PHASE' });
 
         log({ message: "Phase 3: Assembling Final Response...", tag: 'PHASE' });
-        const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, calorieTarget };
+        const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets };
         
         log({ message: "Orchestrator finished successfully.", level: 'SUCCESS', tag: 'SYSTEM' });
         return response.status(200).json({ ...finalResponseData, logs });
@@ -193,7 +249,7 @@ Analyze the following list of grocery items and provide a JSON response. For eac
     return jsonText ? (JSON.parse(jsonText).batchAnalysis || []) : [];
 }
 
-async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
+async function generateLLMPlanAndMeals(formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = { '3': ['Breakfast', 'Lunch', 'Dinner'], '4': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1'], '5': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1', 'Snack 2'], };
@@ -201,9 +257,9 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost, most basic ingredients (e.g., rice, beans, oats, basic vegetables). Avoid expensive meats, pre-packaged items, and specialty goods.", 'Quality Focus': "Prioritize premium quality, organic, free-range, and branded ingredients where appropriate. Cost is a secondary concern to quality and health benefits.", 'Best Value': "Balance unit cost with general quality. Use a mix of budget-friendly staples and good quality fresh produce and proteins. Avoid premium brands unless necessary." }[costPriority] || "Balance unit cost with general quality...";
     const maxRepetitions = { 'High Repetition': 3, 'Low Repetition': 1, 'Balanced Variety': 2 }[mealVariety] || 2;
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.';
-    const systemPrompt = `You are an expert dietitian and chef creating a practical, cost-effective grocery and meal plan.
+    const systemPrompt = `You are an expert dietitian and chef creating a practical, cost-effective grocery and meal plan based on precise, science-backed nutritional targets.
 RULES:
-1.  Generate a complete meal plan for the specified number of days.
+1.  Generate a complete meal plan for the specified number of days that STRICTLY adheres to the daily nutritional targets provided.
 2.  Generate a consolidated shopping list of unique ingredients required for the entire plan.
 3.  For each ingredient, provide a 'searchQuery' which MUST be a simple, generic term suitable for a grocery store search engine (e.g., "chicken breast", "rolled oats", "mixed berries"). DO NOT include quantities or brands in the searchQuery.
 4.  Estimate the total grams required for each ingredient across the entire plan.
@@ -213,8 +269,11 @@ RULES:
 - User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
 - Activity: ${formData.activityLevel}.
 - Goal: ${goal}.
-- Daily Calorie Target: ~${calorieTarget} kcal.
-- Dietary Needs: ${dietary}.
+- DAILY NUTRITIONAL TARGETS (Adhere Strictly):
+  - Calories: ~${nutritionalTargets.calories} kcal
+  - Protein: ~${nutritionalTargets.protein} g
+  - Fat: ~${nutritionalTargets.fat} g
+  - Carbohydrates: ~${nutritionalTargets.carbs} g
 - Meals Per Day: ${eatingOccasions} (${requiredMeals.join(', ')}).
 - Spending Priority: ${costPriority} (${costInstruction}).
 - Meal Repetition Allowed: A single meal can appear up to ${maxRepetitions} times max.
@@ -232,22 +291,7 @@ RULES:
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
-    // Return the payload along with the result for logging purposes
     return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
 
-function calculateCalorieTarget(formData) {
-    const { weight, height, age, gender, activityLevel, goal } = formData;
-    const weightKg = parseFloat(weight);
-    const heightCm = parseFloat(height);
-    const ageYears = parseInt(age, 10);
-    if (!weightKg || !heightCm || !ageYears) return 2000;
-    let bmr = (gender === 'male')
-        ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
-        : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
-    const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
-    const tdee = bmr * (activityMultipliers[activityLevel] || 1.55);
-    const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
-    return Math.round(tdee + (goalAdjustments[goal] || 0));
-}
 
