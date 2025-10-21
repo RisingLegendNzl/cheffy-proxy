@@ -53,20 +53,27 @@ export default async function handler(request, response) {
     if (product && product.nutriments && product.nutriments['energy-kcal_100g']) {
       const nutriments = product.nutriments;
       
-      // --- START DATA TYPE FIX ---
-      // Convert all values to numbers using parseFloat()
-      const nutritionData = {
+      // --- START UPGRADE FOR DETAILED NUTRITION ---
+      const detailedNutritionData = {
         status: 'found',
+        // Explicitly state the unit for the values
+        servingUnit: product.nutrition_data_per || '100g',
+        
+        // Nutritional Fields (converted to numbers)
         calories: parseFloat(nutriments['energy-kcal_100g'] || 0),
         protein: parseFloat(nutriments.proteins_100g || 0),
         fat: parseFloat(nutriments.fat_100g || 0),
+        saturatedFat: parseFloat(nutriments['saturated-fat_100g'] || 0),
         carbs: parseFloat(nutriments.carbohydrates_100g || 0),
+        sugars: parseFloat(nutriments.sugars_100g || 0),
+        fiber: parseFloat(nutriments.fiber_100g || 0),
+        sodium: parseFloat(nutriments.sodium_100g || 0)
       };
-      // --- END DATA TYPE FIX ---
+      // --- END UPGRADE ---
       
-      return response.status(200).json(nutritionData);
+      return response.status(200).json(detailedNutritionData);
     } else {
-      const mockData = { status: 'not_found', calories: 0, protein: 0, fat: 0, carbs: 0 };
+      const mockData = { status: 'not_found' };
       return response.status(200).json(mockData);
     }
 
