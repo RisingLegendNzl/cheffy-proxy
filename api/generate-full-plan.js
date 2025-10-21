@@ -1,5 +1,5 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
-import fetch from 'node-fetch';
+const fetch = require('node-fetch');
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -32,7 +32,7 @@ const calculateUnitPrice = (price, size) => {
 };
 
 // --- MAIN API HANDLER ---
-export default async function handler(request, response) {
+module.exports = async function handler(request, response) {
     log("Orchestrator invoked.");
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -219,5 +219,4 @@ function calculateCalorieTarget(formData) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
-
 
