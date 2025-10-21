@@ -1,12 +1,8 @@
-// --- API ENDPOINT: GET PLAN STATUS (POLLING) ---
+// --- API ENDPOINT: GET PLAN STATUS (POLLING) - FIXED ---
 const { kv } = require('@vercel/kv');
-
-// This is a lightweight endpoint that the frontend calls repeatedly
-// to check if the background job has finished.
 
 module.exports = async function handler(request, response) {
     const { jobId } = request.query;
-
     if (!jobId) {
         return response.status(400).json({ message: 'Missing jobId parameter.' });
     }
@@ -15,12 +11,12 @@ module.exports = async function handler(request, response) {
         const resultJson = await kv.get(jobId);
 
         if (resultJson) {
-            // Data is ready, return the full payload
+            // Data is ready, return the full payload which now includes logs
             const result = JSON.parse(resultJson);
             return response.status(200).json({
                 jobId,
-                status: result.status, // will be 'complete' or 'failed'
-                ...result
+                status: result.status,
+                ...result // This will contain 'results' and 'logs'
             });
         } else {
             // Job is not yet complete
@@ -31,7 +27,6 @@ module.exports = async function handler(request, response) {
             });
         }
     } catch (error) {
-        console.error(`[${jobId}] GET STATUS ERROR:`, error);
         return response.status(500).json({
             jobId,
             status: 'failed',
@@ -40,4 +35,5 @@ module.exports = async function handler(request, response) {
         });
     }
 };
+
 
