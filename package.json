@@ -1,11 +1,12 @@
 {
-  "name": "cheffy-proxy-advanced",
-  "version": "3.0.0",
-  "description": "Asynchronous, resilient, and self-improving orchestrator for Cheffy.",
+  "name": "cheffy-proxy-final",
+  "version": "4.0.0",
+  "description": "Fixed asynchronous, resilient, and self-improving orchestrator for Cheffy.",
   "dependencies": {
     "axios": "^1.7.2",
     "node-fetch": "^2.7.0",
     "@vercel/kv": "^2.0.0"
   }
 }
+
 
