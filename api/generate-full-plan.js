@@ -20,9 +20,9 @@ async function fetchWithRetry(url, options, log) {
             if (response.status < 500) {
                 return response;
             }
-            log(`[WARN] Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN');
+            log({ message: `Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, level: 'WARN', tag: 'HTTP' });
         } catch (error) {
-            log(`[WARN] Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN');
+            log({ message: `Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, level: 'WARN', tag: 'HTTP' });
         }
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 1000;
@@ -51,24 +51,29 @@ const calculateUnitPrice = (price, size) => {
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
-    const log = (message, level = 'INFO') => {
-        const logEntry = `${new Date().toISOString()} - [${level}] ${message}`;
-        logs.push(logEntry);
-        console.log(logEntry);
+    const log = (logObject) => {
+        const entry = {
+            timestamp: new Date().toISOString(),
+            level: 'INFO', // Default level
+            tag: 'GENERAL', // Default tag
+            ...logObject
+        };
+        logs.push(entry);
+        console.log(`${entry.timestamp} - [${entry.level}/${entry.tag}] ${entry.message}`);
     };
     
-    log("Orchestrator invoked.");
+    log({ message: "Orchestrator invoked.", tag: 'SYSTEM' });
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (request.method === 'OPTIONS') {
-        log("Handling OPTIONS pre-flight request.");
+        log({ message: "Handling OPTIONS pre-flight request.", tag: 'HTTP' });
         return response.status(200).end();
     }
     
     if (request.method !== 'POST') {
-        log(`Method Not Allowed: ${request.method}`, 'WARN');
+        log({ message: `Method Not Allowed: ${request.method}`, level: 'WARN', tag: 'HTTP' });
         return response.status(405).json({ message: 'Method Not Allowed', logs });
     }
 
@@ -76,32 +81,37 @@ module.exports = async function handler(request, response) {
         const formData = request.body;
         const { store } = formData;
         
-        log("Phase 1: Generating Blueprint...");
-        const calorieTarget = calculateCalorieTarget(formData);
-        log(`Calculated daily calorie target: ${calorieTarget} kcal.`);
+        log({ message: "Phase 1: Generating Blueprint...", tag: 'PHASE' });
+        log({ message: `Received form data for store: ${store}`, data: formData, tag: 'DATA' });
         
-        const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
+        const calorieTarget = calculateCalorieTarget(formData);
+        log({ message: `Calculated daily calorie target: ${calorieTarget} kcal.`, tag: 'CALC' });
+        
+        const { ingredients: ingredientPlan, mealPlan, llmPayload } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
+        log({ message: 'LLM Blueprint Prompt', data: llmPayload, tag: 'LLM_PROMPT' });
+
         if (!ingredientPlan || ingredientPlan.length === 0) {
             throw new Error("Blueprint failed: LLM did not return an ingredient plan after retries.");
         }
-        log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`, 'SUCCESS');
+        log({ message: `Blueprint successful. ${ingredientPlan.length} ingredients found.`, level: 'SUCCESS', tag: 'LLM' });
 
-        log("Phase 2: Executing Parallel Market Run...");
+        log({ message: "Phase 2: Executing Parallel Market Run...", tag: 'PHASE' });
+        log({ message: "Fetching all product prices simultaneously...", tag: 'HTTP' });
 
-        // Step 1: Fetch all price data in parallel.
-        log("Fetching all product prices simultaneously...");
         const pricePromises = ingredientPlan.map(item =>
             fetchPriceData(store, item.searchQuery)
-                .then(rawProducts => ({ item, rawProducts }))
+                .then(rawProducts => {
+                    log({ message: `Found ${rawProducts.length} candidates for "${item.searchQuery}"`, tag: 'DATA' });
+                    return { item, rawProducts };
+                })
                 .catch(err => {
-                    log(`[CRITICAL] Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, 'CRITICAL');
-                    return { item, rawProducts: [] }; // Ensure promise doesn't reject
+                    log({ message: `Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, level: 'CRITICAL', tag: 'HTTP' });
+                    return { item, rawProducts: [] };
                 })
         );
         const allPriceResults = await Promise.all(pricePromises);
-        log("All price searches complete.", 'SUCCESS');
+        log({ message: "All price searches complete.", level: 'SUCCESS', tag: 'HTTP' });
 
-        // Step 2: Prepare one single payload for AI analysis.
         const analysisPayload = allPriceResults
             .filter(result => result.rawProducts.length > 0)
             .map(result => ({
@@ -109,20 +119,19 @@ module.exports = async function handler(request, response) {
                 productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
             }));
 
-        // Step 3: Make a single, consolidated call to the AI for analysis.
         let fullAnalysis = [];
         if (analysisPayload.length > 0) {
+            log({ message: `Sending single batch of ${analysisPayload.length} ingredients for AI product analysis...`, tag: 'LLM' });
+            log({ message: 'LLM Analysis Prompt', data: analysisPayload, tag: 'LLM_PROMPT' });
             try {
-                log("Sending single batch for AI product analysis...");
                 fullAnalysis = await analyzeProductsInBatch(analysisPayload, log);
-                log("Product analysis successful.", 'SUCCESS');
+                log({ message: "Product analysis successful.", level: 'SUCCESS', tag: 'LLM' });
             } catch (err) {
-                log(`[CRITICAL] The single AI analysis batch failed. Reason: ${err.message}. Proceeding without matches.`, 'CRITICAL');
+                 log({ message: `The single AI analysis batch failed. Reason: ${err.message}. Proceeding without matches.`, level: 'CRITICAL', tag: 'LLM' });
             }
         }
         
-        // Step 4: Assemble final results without nutrition data.
-        log("Assembling final results...");
+        log({ message: "Assembling final results...", tag: 'SYSTEM' });
         const finalResults = {};
         allPriceResults.forEach(({ item, rawProducts }) => {
             const ingredientKey = item.originalIngredient;
@@ -132,37 +141,28 @@ module.exports = async function handler(request, response) {
             const finalProducts = rawProducts
                 .filter(p => perfectMatchNames.has(p.product_name))
                 .map(p => ({
-                    name: p.product_name,
-                    brand: p.product_brand,
-                    price: p.current_price,
-                    size: p.product_size,
-                    url: p.url,
-                    barcode: p.barcode, // Pass barcode to frontend for nutrition lookup
+                    name: p.product_name, brand: p.product_brand, price: p.current_price, size: p.product_size, url: p.url, barcode: p.barcode,
                     unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
-                    // Nutrition is explicitly NOT fetched here.
-                })).filter(p => p.price > 0);
+                }));
 
             const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
 
             finalResults[ingredientKey] = {
                 ...item,
                 allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
-                currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
-                userQuantity: 1,
-                source: finalProducts.length > 0 ? 'discovery' : 'failed'
+                currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url, userQuantity: 1, source: finalProducts.length > 0 ? 'discovery' : 'failed'
             };
         });
+        log({ message: "Market Run complete.", level: 'SUCCESS', tag: 'PHASE' });
 
-        log("Market Run complete.", 'SUCCESS');
-
-        log("Phase 3: Assembling Final Response...");
+        log({ message: "Phase 3: Assembling Final Response...", tag: 'PHASE' });
         const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, calorieTarget };
         
-        log("Orchestrator finished successfully.", 'SUCCESS');
+        log({ message: "Orchestrator finished successfully.", level: 'SUCCESS', tag: 'SYSTEM' });
         return response.status(200).json({ ...finalResponseData, logs });
 
     } catch (error) {
-        log(`CRITICAL ERROR: ${error.message}`, 'CRITICAL');
+        log({ message: `CRITICAL ERROR: ${error.message}`, level: 'CRITICAL', tag: 'SYSTEM' });
         console.error("ORCHESTRATOR CRITICAL ERROR STACK:", error);
         return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message, logs });
     }
@@ -171,7 +171,7 @@ module.exports = async function handler(request, response) {
 // --- API-CALLING FUNCTIONS ---
 async function analyzeProductsInBatch(analysisData, log) {
     if (!analysisData || analysisData.length === 0) {
-        log("Skipping product analysis: no data to analyze.", "INFO");
+        log({ message: "Skipping product analysis: no data to analyze.", tag: 'LLM' });
         return [];
     }
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
@@ -180,7 +180,6 @@ Classifications:
 - "perfect": The product is exactly what was asked for (e.g., ingredient "Chicken Breast" and product "Woolworths RSPCA Approved Chicken Breast Fillets"). Brand names, sizes, or minor descriptors like "fresh" or "frozen" are acceptable.
 - "substitute": The product is a reasonable alternative but not an exact match (e.g., ingredient "Chicken Breast" and product "Chicken Thighs").
 - "irrelevant": The product is completely wrong (e.g., ingredient "Chicken Breast" and product "Beef Mince").
-
 Analyze the following list of grocery items and provide a JSON response. For each ingredient, analyze its corresponding product candidates.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
     const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
@@ -233,7 +232,8 @@ RULES:
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
-    return JSON.parse(jsonText);
+    // Return the payload along with the result for logging purposes
+    return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
 
 function calculateCalorieTarget(formData) {
@@ -250,5 +250,4 @@ function calculateCalorieTarget(formData) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
-
 
