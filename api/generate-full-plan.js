@@ -1,18 +1,14 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
-const { fetchNutritionData: fetchNutritionFromApi } = require('./nutrition-search.js');
-
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
-const BATCH_SIZE = 3;
 const MAX_RETRIES = 3;
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
-const MOCK_NUTRITION_DATA = { status: 'not_found', calories: 0, protein: 0, fat: 0, carbs: 0 };
 
 // --- HELPERS ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -90,85 +86,76 @@ module.exports = async function handler(request, response) {
         }
         log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`, 'SUCCESS');
 
-        log("Phase 2 & 3: Executing Market Run...");
-        const finalResults = {};
-        const itemsToDiscover = [...ingredientPlan];
-        
-        for (let i = 0; i < itemsToDiscover.length; i += BATCH_SIZE) {
-            const batchNum = (i / BATCH_SIZE) + 1;
-            const batchItems = itemsToDiscover.slice(i, i + BATCH_SIZE);
-            log(`Processing Batch ${batchNum} of ${Math.ceil(itemsToDiscover.length / BATCH_SIZE)}...`);
-            
-            const priceDataPromises = batchItems.map(item => 
-                fetchPriceData(store, item.searchQuery)
-                    .then(rawProducts => ({ item, rawProducts }))
-                    .catch(err => {
-                        log(`[CRITICAL] Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, 'CRITICAL');
-                        return { item, rawProducts: [] };
-                    })
-            );
-            const batchPriceResults = await Promise.all(priceDataPromises);
+        log("Phase 2: Executing Parallel Market Run...");
 
-            const analysisPayload = batchPriceResults
-                .filter(result => result.rawProducts.length > 0)
-                .map(result => ({
-                    ingredientName: result.item.originalIngredient,
-                    productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
-                }));
+        // Step 1: Fetch all price data in parallel.
+        log("Fetching all product prices simultaneously...");
+        const pricePromises = ingredientPlan.map(item =>
+            fetchPriceData(store, item.searchQuery)
+                .then(rawProducts => ({ item, rawProducts }))
+                .catch(err => {
+                    log(`[CRITICAL] Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, 'CRITICAL');
+                    return { item, rawProducts: [] }; // Ensure promise doesn't reject
+                })
+        );
+        const allPriceResults = await Promise.all(pricePromises);
+        log("All price searches complete.", 'SUCCESS');
 
-            let batchAnalysis = [];
-            if(analysisPayload.length > 0) {
-                try {
-                    batchAnalysis = await analyzeProductsInBatch(analysisPayload, log);
-                    log(`Analysis for batch ${batchNum} successful.`);
-                } catch (err) {
-                    log(`Product analysis FAILED for batch ${batchNum}. Reason: ${err.message}.`, 'WARN');
-                }
+        // Step 2: Prepare one single payload for AI analysis.
+        const analysisPayload = allPriceResults
+            .filter(result => result.rawProducts.length > 0)
+            .map(result => ({
+                ingredientName: result.item.originalIngredient,
+                productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
+            }));
+
+        // Step 3: Make a single, consolidated call to the AI for analysis.
+        let fullAnalysis = [];
+        if (analysisPayload.length > 0) {
+            try {
+                log("Sending single batch for AI product analysis...");
+                fullAnalysis = await analyzeProductsInBatch(analysisPayload, log);
+                log("Product analysis successful.", 'SUCCESS');
+            } catch (err) {
+                log(`[CRITICAL] The single AI analysis batch failed. Reason: ${err.message}. Proceeding without matches.`, 'CRITICAL');
             }
-
-            const finalDataPromises = batchPriceResults.map(async (priceResult) => {
-                const { item, rawProducts } = priceResult;
-                const ingredientKey = item.originalIngredient;
-
-                const analysisForItem = batchAnalysis.find(a => a.ingredientName === ingredientKey);
-                const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
-                
-                const perfectProductsRaw = rawProducts.filter(p => perfectMatchNames.has(p.product_name));
-
-                let finalProducts = [];
-                if (perfectProductsRaw.length > 0) {
-                    const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionFromApi(p.barcode, p.product_name));
-                    const nutritionResults = await Promise.all(nutritionPromises);
-
-                    finalProducts = perfectProductsRaw.map((p, index) => ({
-                        name: p.product_name,
-                        brand: p.product_brand,
-                        price: p.current_price,
-                        size: p.product_size,
-                        url: p.url,
-                        unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
-                        nutrition: nutritionResults[index] || MOCK_NUTRITION_DATA,
-                    })).filter(p => p.price > 0);
-                }
-
-                const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
-
-                finalResults[ingredientKey] = {
-                    ...item,
-                    allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
-                    currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
-                    userQuantity: 1,
-                    source: finalProducts.length > 0 ? 'discovery' : 'failed'
-                };
-            });
-            
-            await Promise.all(finalDataPromises);
-            log(`Batch ${batchNum} complete.`);
-            await delay(1000); // Add a 1-second delay between batches to further reduce load on APIs
         }
+        
+        // Step 4: Assemble final results without nutrition data.
+        log("Assembling final results...");
+        const finalResults = {};
+        allPriceResults.forEach(({ item, rawProducts }) => {
+            const ingredientKey = item.originalIngredient;
+            const analysisForItem = fullAnalysis.find(a => a.ingredientName === ingredientKey);
+            const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
+            
+            const finalProducts = rawProducts
+                .filter(p => perfectMatchNames.has(p.product_name))
+                .map(p => ({
+                    name: p.product_name,
+                    brand: p.product_brand,
+                    price: p.current_price,
+                    size: p.product_size,
+                    url: p.url,
+                    barcode: p.barcode, // Pass barcode to frontend for nutrition lookup
+                    unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
+                    // Nutrition is explicitly NOT fetched here.
+                })).filter(p => p.price > 0);
+
+            const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
+
+            finalResults[ingredientKey] = {
+                ...item,
+                allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
+                currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
+                userQuantity: 1,
+                source: finalProducts.length > 0 ? 'discovery' : 'failed'
+            };
+        });
+
         log("Market Run complete.", 'SUCCESS');
 
-        log("Phase 4: Assembling Final Response...");
+        log("Phase 3: Assembling Final Response...");
         const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, calorieTarget };
         
         log("Orchestrator finished successfully.", 'SUCCESS');
@@ -181,10 +168,9 @@ module.exports = async function handler(request, response) {
     }
 }
 
-
 // --- API-CALLING FUNCTIONS ---
 async function analyzeProductsInBatch(analysisData, log) {
-    if(!analysisData || analysisData.length === 0){
+    if (!analysisData || analysisData.length === 0) {
         log("Skipping product analysis: no data to analyze.", "INFO");
         return [];
     }
