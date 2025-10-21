@@ -171,7 +171,7 @@ module.exports = async function handler(request, response) {
         const analysisPayload = allPriceResults
             .filter(result => result.rawProducts.length > 0)
             .map(result => ({
-                ingredientName: result.item.originalIngredient,
+                ingredientName: result.item.searchQuery, // DEFINITIVE FIX: Use searchQuery as the reference
                 productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
             }));
 
@@ -191,7 +191,8 @@ module.exports = async function handler(request, response) {
         const finalResults = {};
         allPriceResults.forEach(({ item, rawProducts }) => {
             const ingredientKey = item.originalIngredient;
-            const analysisForItem = fullAnalysis.find(a => a.ingredientName === ingredientKey);
+            // DEFINITIVE FIX: Find analysis using the same key we sent: searchQuery
+            const analysisForItem = fullAnalysis.find(a => a.ingredientName === item.searchQuery);
             const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
             
             const finalProducts = rawProducts
@@ -231,21 +232,22 @@ async function analyzeProductsInBatch(analysisData, log) {
         return [];
     }
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to accurately classify product names returned by a grocery store search engine against the core ingredient requested in a recipe.
-CRITICAL RULE: The goal is to maximize successful ingredient matches for the user. A "perfect" match must be returned unless the product is fundamentally the wrong food item.
+    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to accurately classify product names returned by a grocery store search engine against the generic search query used to find them.
+CRITICAL RULE: The goal is to maximize successful ingredient matches. A "perfect" match must be returned if the product is fundamentally the correct food item for the search query.
 
 Classifications:
-- "perfect": The product is a **direct core ingredient match**. This includes common varieties, packaging differences, and quality descriptors.
+- "perfect": The product is a **direct core ingredient match** for the search query. This includes common varieties, packaging differences, and quality descriptors.
     - Examples of a "perfect" match:
-        - Ingredient Request: "Premium Smoked Salmon" -> Product: "Woolworths Smoked Salmon Slices" (Perfect, matches core ingredient)
-        - Ingredient Request: "Lean Ground Beef (95%+)" -> Product: "Deli Beef Mince" (Perfect, matches core ingredient: beef mince)
-        - Ingredient Request: "Extra Virgin Olive Oil" -> Product: "Bertocchi Olive Oil" (Perfect, matches core ingredient: olive oil)
-- "substitute": The product is a fundamentally different ingredient that could still work in the recipe, but is not what was requested.
-    - Example: Ingredient Request: "Chicken Breast" -> Product: "Chicken Thighs" (Substitute)
+        - Search Query: "salmon" -> Product: "Woolworths Smoked Salmon Slices" (Perfect, it is salmon)
+        - Search Query: "beef mince" -> Product: "Deli Lean Ground Beef" (Perfect, it is beef mince)
+        - Search Query: "olive oil" -> Product: "Bertocchi Extra Virgin Olive Oil" (Perfect, it is olive oil)
+        - Search Query: "bell pepper" -> Product: "Red Capsicum" (Perfect, capsicum is a bell pepper)
+- "substitute": The product is a fundamentally different ingredient that could still work, but is not what was searched for.
+    - Example: Search Query: "chicken breast" -> Product: "Chicken Thighs" (Substitute)
 - "irrelevant": The product is completely wrong or cannot be used.
-    - Example: Ingredient Request: "Chicken Breast" -> Product: "Beef Mince" (Irrelevant)
+    - Example: Search Query: "chicken breast" -> Product: "Beef Mince" (Irrelevant)
 
-Analyze the following list of grocery items and provide a JSON response. For each ingredient, analyze its corresponding product candidates.`;
+Analyze the following list. For each search query (ingredientName), analyze its corresponding product candidates.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
     const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
@@ -307,4 +309,5 @@ RULES:
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
     return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
+
 
