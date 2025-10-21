@@ -1,23 +1,20 @@
-// --- ORCHESTRATOR API for Cheffy V2 ---
-// This single endpoint handles the entire meal plan generation process.
-
-// Use 'require' for node-fetch version 2.x
-const fetch = require('node-fetch');
+// --- ORCHESTRATOR API for Cheffy V3 ---
+import fetch from 'node-fetch';
 
 // --- CONFIGURATION ---
-// We read the secure key from Vercel's Environment Variables
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
-const BATCH_SIZE = 3; // Process 3 ingredients at a time to prevent overload
+const BATCH_SIZE = 3;
+const PRICE_API_URL = 'https://cheffy-api-proxy.vercel.app/api/proxy';
 
-// --- MOCK DATA (for when APIs fail) ---
+// --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
 const MOCK_NUTRITION_DATA = { status: 'not_found', calories: 0, protein: 0, fat: 0, carbs: 0 };
 
-// --- HELPER: Delay function to space out requests if needed ---
+// --- HELPERS ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const log = (message) => console.log(`[LOG] ${new Date().toISOString()} - ${message}`);
 
-// --- HELPER: Calculate Unit Price (copied from your React app) ---
 const calculateUnitPrice = (price, size) => {
     if (!price || price <= 0 || typeof size !== 'string' || size.length === 0) return price;
     const sizeLower = size.toLowerCase().replace(/\s/g, '');
@@ -34,19 +31,20 @@ const calculateUnitPrice = (price, size) => {
     return price;
 };
 
-
 // --- MAIN API HANDLER ---
 export default async function handler(request, response) {
-    // Set CORS headers to allow your React app to call this endpoint
+    log("Orchestrator invoked.");
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (request.method === 'OPTIONS') {
+        log("Handling OPTIONS pre-flight request.");
         return response.status(200).end();
     }
     
     if (request.method !== 'POST') {
+        log(`Method Not Allowed: ${request.method}`);
         return response.status(405).json({ message: 'Method Not Allowed' });
     }
 
@@ -54,61 +52,55 @@ export default async function handler(request, response) {
         const formData = request.body;
         const { store } = formData;
         const selfUrl = `https://${request.headers.host}`; 
-
-        // --- Phase 1: The Blueprint (Call Gemini) ---
+        
+        log("Phase 1: Generating Blueprint...");
         const calorieTarget = calculateCalorieTarget(formData);
         const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget);
         if (!ingredientPlan || ingredientPlan.length === 0) {
             throw new Error("Blueprint failed: LLM did not return an ingredient plan.");
         }
+        log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`);
 
-        // --- Phase 2 & 3: Execution & Fusion ---
+        log("Phase 2 & 3: Executing Market Run...");
         const finalResults = {};
         const itemsToDiscover = [...ingredientPlan];
         
         for (let i = 0; i < itemsToDiscover.length; i += BATCH_SIZE) {
+            const batchNum = (i / BATCH_SIZE) + 1;
             const batch = itemsToDiscover.slice(i, i + BATCH_SIZE);
+            log(`Processing Batch ${batchNum} of ${Math.ceil(itemsToDiscover.length / BATCH_SIZE)}...`);
+            
             const batchPromises = batch.map(item => processSingleIngredient(item, store, selfUrl));
             const batchResults = await Promise.all(batchPromises);
             
             for (const result of batchResults) {
                 finalResults[result.ingredientKey] = result.data;
             }
-            await delay(250); 
+            log(`Batch ${batchNum} complete.`);
+            await delay(200); 
         }
+        log("Market Run complete.");
 
-        // --- Phase 4: Assemble and Return ---
-        const finalResponseData = {
-            mealPlan,
-            uniqueIngredients: ingredientPlan,
-            results: finalResults,
-            calorieTarget
-        };
+        log("Phase 4: Assembling Final Response...");
+        const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, calorieTarget };
         
+        log("Orchestrator finished successfully.");
         return response.status(200).json(finalResponseData);
 
     } catch (error) {
-        console.error("Orchestrator Error:", error);
+        console.error("ORCHESTRATOR CRITICAL ERROR:", error);
+        log(`CRITICAL ERROR: ${error.message}`);
         return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message });
     }
 }
 
-
-// --- SUB-PROCESS: Handles fetching and analysis for one ingredient ---
+// --- SUB-PROCESS ---
 async function processSingleIngredient(item, store, selfUrl) {
     const ingredientKey = item.originalIngredient;
     const currentQuery = item.searchQuery;
-
-    // --- START OF FIX ---
-    // The grocery store API lives at a different Vercel deployment.
-    // We must use its full, hardcoded address.
-    const priceApiUrl = 'https://cheffy-api-proxy.vercel.app/api/proxy';
-    
-    // The nutrition API lives in THIS deployment, so 'selfUrl' is correct.
     const nutritionApiUrl = `${selfUrl}/api/nutrition-search`;
-    // --- END OF FIX ---
 
-    const rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl);
+    const rawProducts = await fetchRawProducts(currentQuery, store, PRICE_API_URL);
     
     let finalProducts = [];
     if (rawProducts.length > 0) {
@@ -132,9 +124,7 @@ async function processSingleIngredient(item, store, selfUrl) {
         })).filter(p => p.price > 0);
     }
     
-    const cheapest = finalProducts.length > 0
-        ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0])
-        : null;
+    const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
 
     const data = {
         ...item,
@@ -147,17 +137,19 @@ async function processSingleIngredient(item, store, selfUrl) {
     return { ingredientKey, data };
 }
 
-
-// --- API-CALLING FUNCTIONS (Adapted from React App) ---
-
+// --- API-CALLING FUNCTIONS ---
 async function fetchRawProducts(query, store, apiUrl) {
     const url = `${apiUrl}?store=${store}&query=${encodeURIComponent(query)}`;
     try {
         const res = await fetch(url);
-        if (!res.ok) return [];
+        if (!res.ok) {
+             log(`Price API Error for query "${query}": HTTP ${res.status}`);
+             return [];
+        }
         const data = await res.json();
         return data.results || [];
-    } catch {
+    } catch (e) {
+        log(`Price API CRITICAL FAIL for query "${query}": ${e.message}`);
         return [];
     }
 }
