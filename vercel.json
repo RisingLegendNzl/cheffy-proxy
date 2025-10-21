@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/nutrition-search.js": {
+      "includeFiles": "node_modules/node-fetch/**"
+    }
+  }
+}
