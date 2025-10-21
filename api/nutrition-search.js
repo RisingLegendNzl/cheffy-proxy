@@ -4,7 +4,6 @@ const fetch = require('node-fetch');
 // Vercel's main handler for serverless functions
 export default async function handler(request, response) {
   
-  // --- START CORS FIX ---
   // Set permission headers to allow any domain to access this API
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*'); // Allow all origins
@@ -19,14 +18,10 @@ export default async function handler(request, response) {
     response.status(200).end();
     return;
   }
-  // --- END CORS FIX ---
 
-  // 1. Get 'barcode' or 'query' from your React app's request
   const { barcode, query } = request.query;
-
   let openFoodFactsURL = '';
 
-  // 2. Decide which Open Food Facts API to use
   if (barcode) {
     openFoodFactsURL = `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`;
   } else if (query) {
@@ -36,7 +31,6 @@ export default async function handler(request, response) {
   }
 
   try {
-    // 3. Call the REAL Open Food Facts API
     const apiResponse = await fetch(openFoodFactsURL, {
       method: 'GET',
       headers: {
@@ -49,8 +43,6 @@ export default async function handler(request, response) {
     }
 
     const data = await apiResponse.json();
-
-    // 4. Find the product in the response data
     let product;
     if (barcode) {
       product = data.product;
@@ -58,16 +50,20 @@ export default async function handler(request, response) {
       product = data.products[0];
     }
 
-    // 5. Check if we found a product AND it has nutrition info
     if (product && product.nutriments && product.nutriments['energy-kcal_100g']) {
       const nutriments = product.nutriments;
+      
+      // --- START DATA TYPE FIX ---
+      // Convert all values to numbers using parseFloat()
       const nutritionData = {
         status: 'found',
-        calories: nutriments['energy-kcal_100g'] || 0,
-        protein: nutriments.proteins_100g || 0,
-        fat: nutriments.fat_100g || 0,
-        carbs: nutriments.carbohydrates_100g || 0,
+        calories: parseFloat(nutriments['energy-kcal_100g'] || 0),
+        protein: parseFloat(nutriments.proteins_100g || 0),
+        fat: parseFloat(nutriments.fat_100g || 0),
+        carbs: parseFloat(nutriments.carbohydrates_100g || 0),
       };
+      // --- END DATA TYPE FIX ---
+      
       return response.status(200).json(nutritionData);
     } else {
       const mockData = { status: 'not_found', calories: 0, protein: 0, fat: 0, carbs: 0 };
