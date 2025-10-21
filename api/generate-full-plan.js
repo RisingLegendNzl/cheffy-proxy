@@ -1,8 +1,10 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 const fetch = require('node-fetch');
+const axios = require('axios'); // For internal call
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY; // For price-search
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const BATCH_SIZE = 3;
 
@@ -12,7 +14,6 @@ const MOCK_NUTRITION_DATA = { status: 'not_found', calories: 0, protein: 0, fat:
 
 // --- HELPERS ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const log = (message) => console.log(`[LOG] ${new Date().toISOString()} - ${message}`);
 
 const calculateUnitPrice = (price, size) => {
     if (!price || price <= 0 || typeof size !== 'string' || size.length === 0) return price;
@@ -32,6 +33,14 @@ const calculateUnitPrice = (price, size) => {
 
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
+    // --- MODIFICATION: Initialize log collector ---
+    const logs = [];
+    const log = (message) => {
+        const logEntry = `${new Date().toISOString()} - ${message}`;
+        logs.push(logEntry);
+        console.log(`[LOG] ${message}`);
+    };
+    
     log("Orchestrator invoked.");
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -44,18 +53,17 @@ module.exports = async function handler(request, response) {
     
     if (request.method !== 'POST') {
         log(`Method Not Allowed: ${request.method}`);
-        return response.status(405).json({ message: 'Method Not Allowed' });
+        return response.status(405).json({ message: 'Method Not Allowed', logs });
     }
 
     try {
         const formData = request.body;
         const { store } = formData;
-        // The base URL of our own deployment, used to call our other functions
         const selfUrl = `https://${request.headers.host}`; 
         
         log("Phase 1: Generating Blueprint...");
         const calorieTarget = calculateCalorieTarget(formData);
-        const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget);
+        const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
         if (!ingredientPlan || ingredientPlan.length === 0) {
             throw new Error("Blueprint failed: LLM did not return an ingredient plan.");
         }
@@ -70,7 +78,7 @@ module.exports = async function handler(request, response) {
             const batch = itemsToDiscover.slice(i, i + BATCH_SIZE);
             log(`Processing Batch ${batchNum} of ${Math.ceil(itemsToDiscover.length / BATCH_SIZE)}...`);
             
-            const batchPromises = batch.map(item => processSingleIngredient(item, store, selfUrl));
+            const batchPromises = batch.map(item => processSingleIngredient(item, store, selfUrl, log));
             const batchResults = await Promise.all(batchPromises);
             
             for (const result of batchResults) {
@@ -85,34 +93,37 @@ module.exports = async function handler(request, response) {
         const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, calorieTarget };
         
         log("Orchestrator finished successfully.");
-        return response.status(200).json(finalResponseData);
+        // --- MODIFICATION: Include logs in successful response ---
+        return response.status(200).json({ ...finalResponseData, logs });
 
     } catch (error) {
         console.error("ORCHESTRATOR CRITICAL ERROR:", error);
         log(`CRITICAL ERROR: ${error.message}`);
-        return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message });
+        // --- MODIFICATION: Include logs in error response ---
+        return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message, logs });
     }
 }
 
 // --- SUB-PROCESS ---
-async function processSingleIngredient(item, store, selfUrl) {
+async function processSingleIngredient(item, store, selfUrl, log) {
     const ingredientKey = item.originalIngredient;
     const currentQuery = item.searchQuery;
-    // Construct URLs to our own API functions within this project
     const nutritionApiUrl = `${selfUrl}/api/nutrition-search`;
     const priceApiUrl = `${selfUrl}/api/price-search`;
 
-    const rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl);
+    const rawProducts = await fetchRawProducts(currentQuery, store, priceApiUrl, log);
     
     let finalProducts = [];
     if (rawProducts.length > 0) {
         const productCandidates = rawProducts.map(p => p.product_name || "Unknown");
-        const analysisResult = await analyzeProductsInBatch([{ ingredientName: ingredientKey, productCandidates }]);
+        log(`Analyzing ${productCandidates.length} products for "${ingredientKey}"...`);
+        const analysisResult = await analyzeProductsInBatch([{ ingredientName: ingredientKey, productCandidates }], log);
         const perfectMatchNames = new Set((analysisResult[0]?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
         
         const perfectProductsRaw = rawProducts.filter(p => perfectMatchNames.has(p.product_name));
+        log(`Found ${perfectProductsRaw.length} perfect matches for "${ingredientKey}".`);
 
-        const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionData(p, store, nutritionApiUrl));
+        const nutritionPromises = perfectProductsRaw.map(p => fetchNutritionData(p, store, nutritionApiUrl, log));
         const nutritionResults = await Promise.all(nutritionPromises);
 
         finalProducts = perfectProductsRaw.map((p, i) => ({
@@ -140,52 +151,69 @@ async function processSingleIngredient(item, store, selfUrl) {
 }
 
 // --- API-CALLING FUNCTIONS ---
-async function fetchRawProducts(query, store, apiUrl) {
-    const url = `${apiUrl}?store=${store}&query=${encodeURIComponent(query)}`;
+async function fetchRawProducts(query, store, apiUrl, log) {
+    // This is now an internal call, so we require and execute it directly.
+    const priceSearchHandler = require('./price-search.js');
+    
+    const mockReq = { query: { store, query } };
+    let capturedData;
+    const mockRes = {
+        status: (code) => ({
+            json: (data) => {
+                if (code !== 200) {
+                    log(`Internal Price API Error for query "${query}": HTTP ${code}`);
+                    capturedData = { results: [] };
+                } else {
+                    capturedData = data;
+                }
+            },
+        }),
+    };
+
     try {
-        const res = await fetch(url);
-        if (!res.ok) {
-             log(`Price API Error for query "${query}": HTTP ${res.status}`);
-             return [];
-        }
-        const data = await res.json();
-        return data.results || [];
+        await priceSearchHandler(mockReq, mockRes);
+        return capturedData.results || [];
     } catch (e) {
-        log(`Price API CRITICAL FAIL for query "${query}": ${e.message}`);
+        log(`Internal Price API CRITICAL FAIL for query "${query}": ${e.message}`);
         return [];
     }
 }
 
-async function fetchNutritionData(product, store, apiUrl) {
-    const { barcode, product_name } = product; // Use product_name as it comes from RapidAPI
+async function fetchNutritionData(product, store, apiUrl, log) {
+    const { barcode, product_name } = product;
+    // Woolworths has barcodes, which are more reliable.
     let url = store === 'Woolworths' && barcode ? `${apiUrl}?barcode=${barcode}` : `${apiUrl}?query=${encodeURIComponent(product_name)}`;
     try {
         const res = await fetch(url);
         if (!res.ok) return MOCK_NUTRITION_DATA;
         return await res.json();
-    } catch {
+    } catch(e) {
+        log(`Nutrition fetch failed for "${product_name}": ${e.message}`);
         return MOCK_NUTRITION_DATA;
     }
 }
 
-async function analyzeProductsInBatch(analysisData) {
+async function analyzeProductsInBatch(analysisData, log) {
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const systemPrompt = `You are a specialized AI Grocery Analyst. Classify every product with extreme accuracy. RULES: 'perfect': ideal match. 'component': ingredient in a larger meal. 'processed': heavily altered form. 'irrelevant': no connection. Return a single JSON object.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
-    // ** SYNTAX ERROR FIXED HERE **: Removed the stray semicolon at the end of the schema object.
     const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING", "enum": ["perfect", "component", "processed", "irrelevant"] }, "reason": { "type": "STRING" } } } } } } } } } } };
     try {
         const response = await fetch(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        if (!response.ok) return [];
+        if (!response.ok) {
+            log(`Product Analysis LLM Error: HTTP ${response.status}`);
+            return [];
+        }
         const result = await response.json();
         const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
         return jsonText ? (JSON.parse(jsonText).batchAnalysis || []) : [];
-    } catch {
+    } catch(e) {
+        log(`Product Analysis LLM CRITICAL FAIL: ${e.message}`);
         return [];
     }
 }
 
-async function generateLLMPlanAndMeals(formData, calorieTarget) {
+async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = { '3': ['Breakfast', 'Lunch', 'Dinner'], '4': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1'], '5': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1', 'Snack 2'], };
@@ -216,6 +244,7 @@ function calculateCalorieTarget(formData) {
     if (!weightKg || !heightCm || !ageYears) return 2000;
     let bmr = (gender === 'male')
         ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
+        // Note: Corrected BMR formula for females
         : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
     const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
     const tdee = bmr * (activityMultipliers[activityLevel] || 1.55);
