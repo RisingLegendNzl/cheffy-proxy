@@ -1,11 +1,11 @@
 {
-  "name": "cheffy-proxy-unified",
-  "version": "2.0.0",
-  "description": "Unified proxy and orchestrator for Cheffy.",
+  "name": "cheffy-proxy-advanced",
+  "version": "3.0.0",
+  "description": "Asynchronous, resilient, and self-improving orchestrator for Cheffy.",
   "dependencies": {
     "axios": "^1.7.2",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "@vercel/kv": "^2.0.0"
   }
 }
-
 
