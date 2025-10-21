@@ -1,7 +1,16 @@
-// --- API ENDPOINT: GET PLAN STATUS (POLLING) - FIXED ---
+// --- API ENDPOINT: GET PLAN STATUS (POLLING) - CORS FIXED ---
 const { kv } = require('@vercel/kv');
 
 module.exports = async function handler(request, response) {
+    // --- CORS PREFLIGHT HANDLING (FIX) ---
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (request.method === 'OPTIONS') {
+        return response.status(200).end();
+    }
+    // --- END FIX ---
+
     const { jobId } = request.query;
     if (!jobId) {
         return response.status(400).json({ message: 'Missing jobId parameter.' });
