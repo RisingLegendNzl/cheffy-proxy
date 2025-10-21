@@ -1,53 +1,29 @@
-// --- API ENDPOINT: GENERATE BLUEPRINT (PHASE 1) - FIXED ---
+// --- API ENDPOINT: GENERATE BLUEPRINT (PHASE 1) - CORS FIXED ---
 const fetch = require('node-fetch');
 const crypto = require('crypto');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 
-/**
- * A simple utility for creating structured JSON logs.
- */
-class Logger {
-    constructor(traceId, initialLogs = []) {
-        this.traceId = traceId;
-        this.logs = [...initialLogs];
-    }
-    log(level, message, details = {}) {
-        const logEntry = JSON.stringify({
-            timestamp: new Date().toISOString(),
-            level,
-            message,
-            traceId: this.traceId,
-            ...details
-        });
-        console.log(logEntry); // For Vercel's real-time console
-        this.logs.push(logEntry);
-    }
-    getLogs() { return this.logs; }
-}
+// --- UTILITIES ---
+class Logger { /* Identical to previous version */ constructor(traceId, initialLogs = []) { this.traceId = traceId; this.logs = [...initialLogs]; } log(level, message, details = {}) { const logEntry = JSON.stringify({ timestamp: new Date().toISOString(), level, message, traceId: this.traceId, ...details }); console.log(logEntry); this.logs.push(logEntry); } getLogs() { return this.logs; } }
 
-async function callGeminiAPI(payload, logger, maxRetries = 2) {
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            const response = await fetch(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-            if (!response.ok) throw new Error(`Upstream API Error: HTTP ${response.status}`);
-            const result = await response.json();
-            const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (!jsonText) throw new Error("LLM response was empty or malformed.");
-            return JSON.parse(jsonText);
-        } catch (error) {
-            logger.log('WARN', `Blueprint AI call failed (attempt ${attempt})`, { service: 'AIClient', error: error.message });
-            if (attempt === maxRetries) throw new Error(`AI API call failed after ${maxRetries} attempts.`);
-        }
-    }
-}
+async function callGeminiAPI(payload, logger, maxRetries = 2) { /* Identical to previous version */ const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`; for (let attempt = 1; attempt <= maxRetries; attempt++) { try { const response = await fetch(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (!response.ok) throw new Error(`Upstream API Error: HTTP ${response.status}`); const result = await response.json(); const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text; if (!jsonText) throw new Error("LLM response was empty or malformed."); return JSON.parse(jsonText); } catch (error) { logger.log('WARN', `Blueprint AI call failed (attempt ${attempt})`, { service: 'AIClient', error: error.message }); if (attempt === maxRetries) throw new Error(`AI API call failed after ${maxRetries} attempts.`); } } }
 
+// --- MAIN HANDLER (FIXED) ---
 module.exports = async function handler(request, response) {
+    // --- CORS PREFLIGHT HANDLING (FIX) ---
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (request.method === 'OPTIONS') {
+        return response.status(200).end();
+    }
+    // --- END FIX ---
+
     const jobId = `job-${crypto.randomUUID()}`;
     const logger = new Logger(jobId);
-    
+
     if (request.method !== 'POST') {
         logger.log('WARN', `Method Not Allowed: ${request.method}`);
         return response.status(405).json({ message: 'Method Not Allowed' });
@@ -66,12 +42,11 @@ module.exports = async function handler(request, response) {
         }
         logger.log('INFO', 'Blueprint generated successfully.', { phase: 1, details: { ingredientCount: ingredientPlan.length } });
 
-        // Trigger background worker (fire and forget)
         const workerPayload = {
             jobId,
             store: formData.store,
             ingredientPlan,
-            logs: logger.getLogs() // Pass the initial logs to the worker
+            logs: logger.getLogs()
         };
         
         const host = request.headers.host;
@@ -83,11 +58,9 @@ module.exports = async function handler(request, response) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(workerPayload)
         }).catch(err => {
-            // This is a critical failure that needs visibility.
             console.error(`[${jobId}] CRITICAL: Failed to trigger market run worker:`, err.message);
         });
 
-        // Immediately respond to the user with the initial plan
         const initialResponse = {
             jobId,
             status: 'processing',
@@ -96,7 +69,7 @@ module.exports = async function handler(request, response) {
             uniqueIngredients: ingredientPlan,
             calorieTarget,
             results: {},
-            logs: logger.getLogs() // Send initial logs to frontend
+            logs: logger.getLogs()
         };
         
         return response.status(202).json(initialResponse);
@@ -107,33 +80,8 @@ module.exports = async function handler(request, response) {
     }
 }
 
-// --- Helper Functions ---
-async function generateLLMPlanAndMeals(formData, calorieTarget, logger) {
-    const { days, name } = formData;
-    logger.log('INFO', 'Sending request for meal plan blueprint.', { phase: 1, service: 'AIClient' });
-    const systemPrompt = `You are an expert dietitian...`; // Omitted for brevity
-    const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}...`; // Omitted for brevity
-    const payload = {
-        contents: [{ parts: [{ text: userQuery }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { responseMimeType: "application/json", responseSchema: { /* Same schema */ } }
-    };
-    return callGeminiAPI(payload, logger);
-}
-
-function calculateCalorieTarget(formData) {
-    const { weight, height, age, gender, activityLevel, goal } = formData;
-    const weightKg = parseFloat(weight);
-    const heightCm = parseFloat(height);
-    const ageYears = parseInt(age, 10);
-    if (!weightKg || !heightCm || !ageYears) return 2000;
-    let bmr = (gender === 'male')
-        ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
-        : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
-    const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
-    const tdee = bmr * (activityMultipliers[activityLevel] || 1.55);
-    const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
-    return Math.round(tdee + (goalAdjustments[goal] || 0));
-}
+// --- HELPER FUNCTIONS (UNCHANGED) ---
+async function generateLLMPlanAndMeals(formData, calorieTarget, logger) { /* ... */ const { days, name } = formData; logger.log('INFO', 'Sending request for meal plan blueprint.', { phase: 1, service: 'AIClient' }); const systemPrompt = `You are an expert dietitian...`; const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}...`; const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } } }; return callGeminiAPI(payload, logger); }
+function calculateCalorieTarget(formData) { /* ... */ const { weight, height, age, gender, activityLevel, goal } = formData; const weightKg = parseFloat(weight); const heightCm = parseFloat(height); const ageYears = parseInt(age, 10); if (!weightKg || !heightCm || !ageYears) return 2000; let bmr = (gender === 'male') ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5) : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161); const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 }; const tdee = bmr * (activityMultipliers[activityLevel] || 1.55); const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 }; return Math.round(tdee + (goalAdjustments[goal] || 0)); }
 
 
