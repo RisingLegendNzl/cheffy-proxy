@@ -1,8 +1,11 @@
 {
   "name": "cheffy-proxy",
   "version": "1.0.0",
-  "description": "Proxy for Open Food Facts",
+  "description": "Proxy for Open Food Facts and Orchestrator",
+  "type": "module",
   "dependencies": {
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^3.3.2"
   }
 }
+
+
