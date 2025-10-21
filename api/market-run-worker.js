@@ -1,5 +1,4 @@
 // --- API ENDPOINT: MARKET RUN WORKER (BACKGROUND JOB) - FIXED ---
-const { kv } = require('@vercel/kv');
 const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
@@ -16,6 +15,8 @@ class Logger { /* Identical to blueprint logger */ constructor(traceId, initialL
 
 // Main handler for the background worker
 module.exports = async function handler(request, response) {
+    const { kv } = await import('@vercel/kv');
+
     if (request.method !== 'POST') return response.status(405).end();
     
     const { jobId, store, ingredientPlan, logs: initialLogs } = request.body;
@@ -112,5 +113,4 @@ async function prefetchNutritionData(finalResults, logger) {
     await Promise.all(nutritionPromises);
 }
 // Other helpers like calculateUnitPrice are omitted for brevity but are present
-
 
