@@ -7,24 +7,18 @@ const RAPID_API_HOSTS = {
 const RAPID_API_KEY = process.env.RAPIDAPI_KEY;
 
 /**
- * Core reusable logic for fetching price data. This function is "pure"
- * and does not depend on Vercel's request/response objects.
+ * Core reusable logic for fetching price data, now with structured logging.
  * @param {string} store - The store to search ('Coles' or 'Woolworths').
  * @param {string} query - The product search query.
+ * @param {Logger} logger - The structured logger instance.
  * @returns {Promise<Array>} A promise that resolves to an array of product results.
  */
-async function fetchPriceData(store, query) {
-    if (!RAPID_API_KEY) {
-        console.error('Configuration Error: RAPIDAPI_KEY is not set.');
-        // In a pure function, we throw the error instead of sending a response
-        throw new Error('Server configuration error: API key missing.');
-    }
-    if (!store || !query) {
-        throw new Error('Missing required parameters: store and query.');
-    }
+async function fetchPriceData(store, query, logger) {
     const host = RAPID_API_HOSTS[store];
     if (!host) {
-        throw new Error('Invalid store specified. Must be "Coles" or "Woolworths".');
+        // This case should be caught by the worker's safeguard, but we log just in case.
+        logger.log('CRITICAL', 'Invalid store specified in fetchPriceData.', { store });
+        return [];
     }
 
     const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
@@ -37,35 +31,22 @@ async function fetchPriceData(store, query) {
         });
         return rapidResp.data.results || [];
     } catch (error) {
-        console.error(`RapidAPI Execution Error for "${query}":`, error.message);
+        // --- FIX: Log the actual error instead of failing silently ---
+        const errorDetails = {
+            query,
+            store,
+            message: error.message,
+            statusCode: error.response?.status, // e.g., 401, 403, 429
+            data: error.response?.data, // The API might return a useful error message
+        };
+        logger.log('WARN', 'RapidAPI price search failed for an ingredient.', errorDetails);
+        // --- END FIX ---
+        
         // Return an empty array on failure to allow the orchestrator to continue.
         return [];
     }
 }
 
-/**
- * Vercel serverless function handler. This part is only used if the file is called
- * directly as an API endpoint, which it no longer is by the orchestrator.
- */
-module.exports = async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-        return res.status(200).send();
-    }
-
-    try {
-        const { store, query } = req.query;
-        const results = await fetchPriceData(store, query);
-        return res.status(200).json({ results });
-    } catch (error) {
-        return res.status(400).json({ error: error.message });
-    }
-};
-
 // Export the pure function for internal use by other scripts
 module.exports.fetchPriceData = fetchPriceData;
-
 
