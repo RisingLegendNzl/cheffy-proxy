@@ -8,7 +8,7 @@ const RAPID_API_KEY = process.env.RAPIDAPI_KEY;
 
 // --- CONFIGURATION FOR RETRY ---
 const MAX_RETRIES = 5;
-const DELAY_MS = 1000;
+const DELAY_MS = 2000; // Increased base delay to 2 seconds for more aggressive backoff
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
@@ -21,7 +21,6 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function fetchPriceData(store, query) {
     if (!RAPID_API_KEY) {
         console.error('Configuration Error: RAPIDAPI_KEY is not set.');
-        // In a pure function, we throw the error instead of sending a response
         return { error: { message: 'Server configuration error: API key missing.', status: 500 } };
     }
     if (!store || !query) {
@@ -35,20 +34,49 @@ async function fetchPriceData(store, query) {
     const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
     
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        // --- Log the specific request details before execution (as requested) ---
+        console.log(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: 'INFO',
+            tag: 'RAPID_REQUEST',
+            message: `Attempt ${attempt + 1}/${MAX_RETRIES}: Requesting product data.`,
+            data: {
+                store: store,
+                query: query,
+                endpoint: endpointUrl,
+                host: host
+            }
+        }));
+        
         try {
             const rapidResp = await axios.get(endpointUrl, {
                 params: { query },
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
                 timeout: 30000 
             });
+
+            // Log successful response
+            console.log(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: 'SUCCESS',
+                tag: 'RAPID_RESPONSE',
+                message: `Successfully fetched products for "${query}".`,
+                data: {
+                    count: rapidResp.data.results ? rapidResp.data.results.length : 0,
+                    status: rapidResp.status
+                }
+            }));
+            
             // Success: return results
             return { results: rapidResp.data.results || [] };
 
         } catch (error) {
             const status = error.response?.status;
+            const isRateLimitOrNetworkError = status === 429 || error.code === 'ECONNABORTED' || error.code === 'EAI_AGAIN';
             
-            if (status === 429 || error.code === 'ECONNABORTED' || error.code === 'EAI_AGAIN') {
+            if (isRateLimitOrNetworkError) {
                 const delayTime = DELAY_MS * Math.pow(2, attempt);
+                // Log warning to Vercel console
                 console.warn(`RapidAPI Execution Warning for "${query}" (Attempt ${attempt + 1}/${MAX_RETRIES}): Status ${status || 'Network Error'}. Retrying in ${delayTime}ms...`);
                 
                 if (attempt < MAX_RETRIES - 1) {
@@ -57,9 +85,23 @@ async function fetchPriceData(store, query) {
                 }
             }
             
-            // Final failure: log to console and return structured error object
+            // Final failure: return structured error object
             const finalErrorMessage = `Request failed after ${MAX_RETRIES} attempts. Status: ${status || 'Network/Timeout'}.`;
-            console.error(`RapidAPI Execution Error for "${query}":`, finalErrorMessage);
+            
+            // Log final failure to Vercel console
+            console.error(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: 'CRITICAL',
+                tag: 'RAPID_FAILURE',
+                message: finalErrorMessage,
+                data: {
+                    store: store,
+                    query: query,
+                    status: status || 504, 
+                    details: error.message
+                }
+            }));
+
             return { 
                 error: { 
                     message: finalErrorMessage, 
