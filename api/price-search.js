@@ -16,20 +16,20 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
  * and does not depend on Vercel's request/response objects.
  * @param {string} store - The store to search ('Coles' or 'Woolworths').
  * @param {string} query - The product search query.
- * @returns {Promise<Array>} A promise that resolves to an array of product results.
+ * @returns {Promise<Object>} A promise that resolves to an object containing either 'results' (Array) or 'error' (Object).
  */
 async function fetchPriceData(store, query) {
     if (!RAPID_API_KEY) {
         console.error('Configuration Error: RAPIDAPI_KEY is not set.');
         // In a pure function, we throw the error instead of sending a response
-        throw new Error('Server configuration error: API key missing.');
+        return { error: { message: 'Server configuration error: API key missing.', status: 500 } };
     }
     if (!store || !query) {
-        throw new Error('Missing required parameters: store and query.');
+        return { error: { message: 'Missing required parameters: store and query.', status: 400 } };
     }
     const host = RAPID_API_HOSTS[store];
     if (!host) {
-        throw new Error('Invalid store specified. Must be "Coles" or "Woolworths".');
+        return { error: { message: 'Invalid store specified. Must be "Coles" or "Woolworths".', status: 400 } };
     }
 
     const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
@@ -39,35 +39,39 @@ async function fetchPriceData(store, query) {
             const rapidResp = await axios.get(endpointUrl, {
                 params: { query },
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
-                // Increased timeout from 15 to 30 seconds for better reliability
                 timeout: 30000 
             });
             // Success: return results
-            return rapidResp.data.results || [];
+            return { results: rapidResp.data.results || [] };
 
         } catch (error) {
-            // Axios wraps the native error, check for response status
             const status = error.response?.status;
             
             if (status === 429 || error.code === 'ECONNABORTED' || error.code === 'EAI_AGAIN') {
-                const delayTime = DELAY_MS * Math.pow(2, attempt); // Exponential backoff
+                const delayTime = DELAY_MS * Math.pow(2, attempt);
                 console.warn(`RapidAPI Execution Warning for "${query}" (Attempt ${attempt + 1}/${MAX_RETRIES}): Status ${status || 'Network Error'}. Retrying in ${delayTime}ms...`);
                 
                 if (attempt < MAX_RETRIES - 1) {
                     await delay(delayTime);
-                    continue; // Continue to the next attempt
+                    continue; 
                 }
             }
             
-            // Log the final failure and exit the loop/function
-            console.error(`RapidAPI Execution Error for "${query}" after ${MAX_RETRIES} attempts:`, error.message);
-            // Return an empty array on final failure to allow the orchestrator to continue.
-            return [];
+            // Final failure: log to console and return structured error object
+            const finalErrorMessage = `Request failed after ${MAX_RETRIES} attempts. Status: ${status || 'Network/Timeout'}.`;
+            console.error(`RapidAPI Execution Error for "${query}":`, finalErrorMessage);
+            return { 
+                error: { 
+                    message: finalErrorMessage, 
+                    status: status || 504, 
+                    details: error.message 
+                } 
+            };
         }
     }
     
-    // Should be unreachable if the final catch/return is correct, but added for safety
-    return [];
+    // Fallback for safety
+    return { error: { message: `Price search failed for unknown reason after ${MAX_RETRIES} attempts.`, status: 500 } };
 }
 
 /**
@@ -85,10 +89,13 @@ module.exports = async (req, res) => {
 
     try {
         const { store, query } = req.query;
-        const results = await fetchPriceData(store, query);
-        return res.status(200).json({ results });
+        const result = await fetchPriceData(store, query);
+        if (result.error) {
+            return res.status(result.error.status || 500).json(result.error);
+        }
+        return res.status(200).json({ results: result.results });
     } catch (error) {
-        return res.status(400).json({ error: error.message });
+        return res.status(500).json({ error: error.message });
     }
 };
 
