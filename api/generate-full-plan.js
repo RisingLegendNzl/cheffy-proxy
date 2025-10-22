@@ -6,7 +6,7 @@ const { fetchPriceData } = require('./price-search.js');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
-const MAX_CONCURRENCY = 5; // Added: Limit for price search parallelism
+const MAX_CONCURRENCY = 5; // Limit for price search parallelism
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
@@ -25,8 +25,8 @@ async function concurrentlyMap(array, limit, asyncMapper) {
     const results = [];
     const executing = [];
     for (const item of array) {
+        // Create a wrapper function to ensure the promise is removable from the 'executing' array
         const promise = asyncMapper(item).then(result => {
-            // When a promise finishes, remove it from the executing array
             executing.splice(executing.indexOf(promise), 1);
             return result;
         });
@@ -51,9 +51,9 @@ async function fetchWithRetry(url, options, log) {
             if (response.status < 500) {
                 return response;
             }
-            log(`[WARN] Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN');
+            log(`Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN', 'HTTP');
         } catch (error) {
-            log(`[WARN] Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN');
+            log(`Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
         }
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 1000;
@@ -82,7 +82,8 @@ const calculateUnitPrice = (price, size) => {
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
-    // Log function now captures logs as objects for better display on frontend
+    
+    // Log function now captures logs as objects for better display on frontend AND prints JSON to console
     const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
         const logEntry = {
             timestamp: new Date().toISOString(),
@@ -92,7 +93,9 @@ module.exports = async function handler(request, response) {
             data: data
         };
         logs.push(logEntry);
-        console.log(`[${logEntry.tag}][${logEntry.level}] ${logEntry.message}`);
+        // Console output: print the structured JSON for better debugging
+        console.log(JSON.stringify(logEntry));
+        return logEntry;
     };
     
     log("Orchestrator invoked.", 'INFO', 'SYSTEM');
@@ -118,6 +121,7 @@ module.exports = async function handler(request, response) {
         const calorieTarget = calculateCalorieTarget(formData);
         log(`Calculated daily calorie target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
         
+        // Include nutritionalTargets in the destructuring here, as it's returned by the LLM now
         const { ingredients: ingredientPlan, mealPlan, nutritionalTargets } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
         if (!ingredientPlan || ingredientPlan.length === 0) {
             throw new Error("Blueprint failed: LLM did not return an ingredient plan after retries.");
@@ -130,11 +134,20 @@ module.exports = async function handler(request, response) {
         log(`Fetching all product prices simultaneously with concurrency limit of ${MAX_CONCURRENCY}...`, 'INFO', 'HTTP');
         
         const priceResultsMapper = (item) => 
+            // fetchPriceData now returns { results: [...] } or { error: {...} }
             fetchPriceData(store, item.searchQuery)
-                .then(rawProducts => ({ item, rawProducts }))
+                .then(priceResult => {
+                    // Check if an error was returned by the price-search function
+                    if (priceResult.error) {
+                        log(`Price search failed for "${item.searchQuery}": ${priceResult.error.message}`, 'WARN', 'HTTP', priceResult.error);
+                        return { item, rawProducts: [], error: priceResult.error };
+                    }
+                    return { item, rawProducts: priceResult.results };
+                })
                 .catch(err => {
-                    log(`Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, 'CRITICAL', 'HTTP');
-                    return { item, rawProducts: [] }; // Ensure promise doesn't reject
+                    // This catch should only happen if fetchPriceData throws, which it shouldn't now
+                    log(`Price search failed catastrophically for "${item.searchQuery}" (unhandled): ${err.message}`, 'CRITICAL', 'HTTP');
+                    return { item, rawProducts: [], error: { message: err.message, status: 500 } }; 
                 });
                 
         const allPriceResults = await concurrentlyMap(ingredientPlan, MAX_CONCURRENCY, priceResultsMapper);
@@ -171,7 +184,7 @@ module.exports = async function handler(request, response) {
             const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
             
             const finalProducts = rawProducts
-                .filter(p => perfectMatchNames.has(p.product_name)) // Only keep products the AI approved
+                .filter(p => perfectMatchNames.has(p.product_name)) 
                 .map(p => ({
                     name: p.product_name,
                     brand: p.product_brand,
@@ -187,6 +200,7 @@ module.exports = async function handler(request, response) {
 
             finalResults[ingredientKey] = {
                 ...item,
+                // If products were found, use them. If not, use mock data and set a clear "failed" source.
                 allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
                 currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
                 userQuantity: 1,
@@ -200,18 +214,19 @@ module.exports = async function handler(request, response) {
         const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets };
         
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
-        // Filter out log objects that might have been accidentally left empty
-        const cleanLogs = logs.filter(l => l.message); 
-        return response.status(200).json({ ...finalResponseData, logs: cleanLogs });
+        
+        // Return the final data and the structured logs
+        return response.status(200).json({ ...finalResponseData, logs });
 
     } catch (error) {
-        log(`CRITICAL ERROR: ${error.message}`, 'CRITICAL', 'SYSTEM', error.stack);
+        log(`CRITICAL ERROR: ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack, name: error.name });
         console.error("ORCHESTRATOR CRITICAL ERROR STACK:", error);
-        return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message, logs });
+        // Only return the friendly message and the collected logs
+        return response.status(500).json({ message: "An unrecoverable error occurred during plan generation.", error: error.message, logs });
     }
 }
 
-// --- API-CALLING FUNCTIONS ---
+// --- API-CALLING FUNCTIONS (Unchanged from previous step) ---
 async function analyzeProductsInBatch(analysisData, log) {
     if (!analysisData || analysisData.length === 0) {
         log("Skipping product analysis: no data to analyze.", "INFO", 'LLM');
@@ -288,6 +303,7 @@ RULES:
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
+        // Added nutritionalTargets to the response schema here
         generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } }, "nutritionalTargets": { type: "OBJECT", properties: { "calories": { "type": "NUMBER" }, "protein": { "type": "NUMBER" }, "fat": { "type": "NUMBER" }, "carbs": { "type": "NUMBER" } } } } } }
     };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
