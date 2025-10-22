@@ -1,7 +1,6 @@
 // api/generate-full-plan.js
-// Calls Gemini to build the plan + ingredients, then hydrates prices via /api/price-search
-// and PREFILLS nutrition via /api/nutrition-search. Returns strict schema + structured logs.
-// Env required: GEMINI_API_KEY. Optional: GEMINI_MODEL (default: gemini-1.5-pro)
+// Gemini → price hydration → nutrition prefill. Strict schema + structured logs.
+// Env: GEMINI_API_KEY (required), GEMINI_MODEL optional (default: gemini-1.5-pro)
 
 const axios = require("axios");
 
@@ -66,9 +65,9 @@ async function httpGetWithRetries(url, params, logs, tries=4){
   const sleep = ms => new Promise(r=>setTimeout(r,ms));
   for(let i=0;i<tries;i++){
     try{
-      logs.push(L("INFO","HTTP","GET",{ url, params }));
+      logHttpStart(logs, "GET", url, { params });
       const r = await axios.get(url, { params, timeout: 15000 });
-      logs.push(L("SUCCESS","HTTP",`${r.status} OK`,{ url }));
+      logHttpEnd(logs, r.status, url, { count: Array.isArray(r.data?.products)? r.data.products.length : undefined });
       return r.data;
     }catch(err){
       const s = err.response?.status;
@@ -82,15 +81,14 @@ async function httpGetWithRetries(url, params, logs, tries=4){
   }
 }
 
-
 // ---------------- Gemini orchestration ----------------
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-pro";
 
 async function callGeminiStructured(input, logs){
   if(!GEMINI_API_KEY){
-    logs.push(L("WARN","LLM","GEMINI_API_KEY missing; using seed"));
-    return null; // caller will seed
+    logs.push(L("CRITICAL","LLM","GEMINI_API_KEY missing"));
+    throw new Error("gemini_key_missing");
   }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
@@ -107,43 +105,15 @@ async function callGeminiStructured(input, logs){
   const prompt = `${sys}\n${schemaHint}\nUser: ${JSON.stringify(user)}`;
   logs.push(L("INFO","LLM_PROMPT","Gemini prompt prepared", { model: GEMINI_MODEL, len: prompt.length }));
 
-  try{
-    const payload = { contents: [{ role: "user", parts: [{ text: prompt }]}], generationConfig: { temperature: 0.2 } };
-    logHttpStart(logs, "POST", url, { body: { _redacted: true, generationConfig: { temperature: 0.2 }}});
-    const r = await axios.post(url, payload, { timeout: 25000 });
-    logHttpEnd(logs, r.status, url, { });
-    const text = r.data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const jsonText = text.trim().replace(/^```json\n?|```$/g, "");
-    const parsed = JSON.parse(jsonText);
-    logs.push(L("SUCCESS","LLM","Gemini JSON parsed", { keys: Object.keys(parsed||{}) }));
-    return parsed;
-  }catch(err){
-    logs.push(L("WARN","LLM","Gemini failed; falling back to seed", { error: str(err.message) }));
-    return null;
-  }
-}
-
-function seedPlanAndIngredients(form){
-  const mpd = Number(form?.eatingOccasions||3);
-  const days = Math.max(1, Math.min(7, Number(form?.days||1)));
-  const plan = Array.from({length: days}, (_,i)=>({
-    day: i+1,
-    meals: [
-      { type:"breakfast", name:"Oats + Milk", description:"Rolled oats, milk, banana" },
-      { type:"lunch", name:"Chicken rice", description:"Chicken breast, rice, broccoli" },
-      { type:"dinner", name:"Beef pasta", description:"Lean beef, pasta, tomato" }
-    ].slice(0, mpd)
-  }));
-  const uniq = [
-    { originalIngredient:"Rolled oats", quantityUnits:"1 kg", category:"Pantry" },
-    { originalIngredient:"Full cream milk", quantityUnits:"2 L", category:"Dairy" },
-    { originalIngredient:"Chicken breast", quantityUnits:"1 kg", category:"Meat" },
-    { originalIngredient:"White rice", quantityUnits:"1 kg", category:"Pantry" },
-    { originalIngredient:"Broccoli", quantityUnits:"500 g", category:"Produce" },
-  ];
-  const queries = uniq.map(u=>({ ingredient: u.originalIngredient, searchQuery: `${u.originalIngredient} ${u.quantityUnits.replace(/\s+/g, "")}`.toLowerCase() }));
-  const nutritionalTargets = { calories: 3500, protein: 180, fat: 100, carbs: 450 };
-  return { mealPlan: plan, uniqueIngredients: uniq, queries, nutritionalTargets };
+  const payload = { contents: [{ role: "user", parts: [{ text: prompt }]}], generationConfig: { temperature: 0.2 } };
+  logHttpStart(logs, "POST", url, { body: { _redacted: true, generationConfig: { temperature: 0.2 }}});
+  const r = await axios.post(url, payload, { timeout: 25000 });
+  logHttpEnd(logs, r.status, url, {});
+  const text = r.data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const jsonText = text.trim().replace(/^```json\n?|```$/g, "");
+  const parsed = JSON.parse(jsonText);
+  logs.push(L("SUCCESS","LLM","Gemini JSON parsed", { keys: Object.keys(parsed||{}) }));
+  return parsed;
 }
 
 // ---------------- Main handler ----------------
@@ -159,8 +129,7 @@ module.exports = async (req, res) => {
 
     // 1) LLM plan
     logs.push(L("INFO","PHASE","LLM orchestration start"));
-    let llm = await callGeminiStructured(body, logs);
-    if(!llm) llm = seedPlanAndIngredients(body);
+    const llm = await callGeminiStructured(body, logs);
     logs.push(L("SUCCESS","PHASE","LLM orchestration finished"));
 
     // Normalize LLM outputs
@@ -203,7 +172,7 @@ module.exports = async (req, res) => {
       const url = `${base}/api/price-search`;
       let mapped = [];
       try{
-        const data = await httpGetWithRetries(url, { store, query: searchQuery }, logs, 2);
+        const data = await httpGetWithRetries(url, { store, query: searchQuery }, logs, 4);
         mapped = sortProducts((data?.products||[]).map(mapProductRaw).filter(Boolean));
       }catch(err){
         logs.push(L("WARN","HTTP","Price search failed for ingredient",{ ingredient: name, error: str(err.message) }));
