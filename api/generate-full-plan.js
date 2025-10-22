@@ -1,15 +1,38 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
+
+
+/// ===== IMPORTS-START ===== \\\\
+
 const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
 
+/// ===== IMPORTS-END ===== ////
+
 // --- CONFIGURATION ---
+
+/// ===== CONFIG-START ===== \\\\
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 const MAX_CONCURRENCY = 5; // Limit for price search parallelism
 
+
+/// ===== CONFIG-END ===== ////
+
+
+/// ===== MOCK-START ===== \\\\
+
+
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
+
+
+/// ===== MOCK-END ===== ////
+
+
+/// ===== HELPERS-START ===== \\\\
+
 
 // --- HELPERS ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -78,6 +101,13 @@ const calculateUnitPrice = (price, size) => {
     }
     return price;
 };
+
+
+/// ===== HELPERS-END ===== ////
+
+
+/// ===== ROUTE-HANDLER-START ===== \\\\
+
 
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
@@ -226,6 +256,13 @@ module.exports = async function handler(request, response) {
     }
 }
 
+
+/// ===== ROUTE-HANDLER-END ===== ////
+
+
+/// ===== API-CALLERS-START ===== \\\\
+
+
 // --- API-CALLING FUNCTIONS (Unchanged from previous step) ---
 async function analyzeProductsInBatch(analysisData, log) {
     if (!analysisData || analysisData.length === 0) {
@@ -342,3 +379,4 @@ function calculateCalorieTarget(formData) {
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
+/// ===== API-CALLERS-END ===== ////
