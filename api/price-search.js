@@ -6,6 +6,11 @@ const RAPID_API_HOSTS = {
 };
 const RAPID_API_KEY = process.env.RAPIDAPI_KEY;
 
+// --- CONFIGURATION FOR RETRY ---
+const MAX_RETRIES = 5;
+const DELAY_MS = 1000;
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
  * Core reusable logic for fetching price data. This function is "pure"
  * and does not depend on Vercel's request/response objects.
@@ -28,20 +33,41 @@ async function fetchPriceData(store, query) {
     }
 
     const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
+    
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+            const rapidResp = await axios.get(endpointUrl, {
+                params: { query },
+                headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
+                // Increased timeout from 15 to 30 seconds for better reliability
+                timeout: 30000 
+            });
+            // Success: return results
+            return rapidResp.data.results || [];
 
-    try {
-        const rapidResp = await axios.get(endpointUrl, {
-            params: { query },
-            headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
-            // Increased timeout from 15 to 30 seconds for better reliability
-            timeout: 30000 
-        });
-        return rapidResp.data.results || [];
-    } catch (error) {
-        console.error(`RapidAPI Execution Error for "${query}":`, error.message);
-        // Return an empty array on failure to allow the orchestrator to continue.
-        return [];
+        } catch (error) {
+            // Axios wraps the native error, check for response status
+            const status = error.response?.status;
+            
+            if (status === 429 || error.code === 'ECONNABORTED' || error.code === 'EAI_AGAIN') {
+                const delayTime = DELAY_MS * Math.pow(2, attempt); // Exponential backoff
+                console.warn(`RapidAPI Execution Warning for "${query}" (Attempt ${attempt + 1}/${MAX_RETRIES}): Status ${status || 'Network Error'}. Retrying in ${delayTime}ms...`);
+                
+                if (attempt < MAX_RETRIES - 1) {
+                    await delay(delayTime);
+                    continue; // Continue to the next attempt
+                }
+            }
+            
+            // Log the final failure and exit the loop/function
+            console.error(`RapidAPI Execution Error for "${query}" after ${MAX_RETRIES} attempts:`, error.message);
+            // Return an empty array on final failure to allow the orchestrator to continue.
+            return [];
+        }
     }
+    
+    // Should be unreachable if the final catch/return is correct, but added for safety
+    return [];
 }
 
 /**
@@ -68,5 +94,3 @@ module.exports = async (req, res) => {
 
 // Export the pure function for internal use by other scripts
 module.exports.fetchPriceData = fetchPriceData;
-
-
