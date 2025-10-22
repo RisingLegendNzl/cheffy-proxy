@@ -119,10 +119,18 @@ module.exports = async function handler(request, response) {
     // --- PART 1: INSTANT RESPONSE ---
     try {
         const formData = request.body;
+        // Get userId and appId from the frontend request
+        const { userId, appId } = formData;
+
+        if (!userId || !appId) {
+            console.error("CRITICAL: Missing userId or appId in request body.", formData);
+            return response.status(400).json({ message: "Missing required userId or appId." });
+        }
+
         const planId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const log = (logObject) => console.log(`${new Date().toISOString()} [${planId}] - [${logObject.level || 'INFO'}/${logObject.tag}] ${logObject.message}`);
         
-        log({ message: `Starting plan generation for ID: ${planId}`, tag: 'SYSTEM' });
+        log({ message: `Starting plan generation for ID: ${planId} for user: ${userId}`, tag: 'SYSTEM' });
 
         const nutritionalTargets = calculateNutritionalTargets(formData, log);
         const { ingredients, mealPlan } = await generateLLMPlanAndMeals(formData, nutritionalTargets, log);
@@ -138,7 +146,10 @@ module.exports = async function handler(request, response) {
             };
         });
 
-        const planDocRef = doc(db, 'plans', planId);
+        // Use the new, correct Firestore path
+        const planDocPath = `artifacts/${appId}/users/${userId}/plans`;
+        const planDocRef = doc(db, planDocPath, planId);
+        
         await setDoc(planDocRef, {
             id: planId,
             status: 'pending',
@@ -150,8 +161,11 @@ module.exports = async function handler(request, response) {
             createdAt: new Date().toISOString()
         });
         
-        log({ message: `Blueprint for ${planId} created in Firestore.`, level: 'SUCCESS', tag: 'DB' });
-        runMarketAnalysisInBackground(planId, formData.store, ingredients, log);
+        log({ message: `Blueprint for ${planId} created in Firestore at ${planDocPath}.`, level: 'SUCCESS', tag: 'DB' });
+        
+        // Pass userId and appId to the background task
+        runMarketAnalysisInBackground(appId, userId, planId, formData.store, ingredients, log);
+        
         return response.status(202).json({ planId });
 
     } catch (error) {
@@ -160,8 +174,13 @@ module.exports = async function handler(request, response) {
     }
 };
 
-async function runMarketAnalysisInBackground(planId, store, ingredients, log) {
-    // ... (implementation remains the same)
+// Added appId and userId to the function signature
+async function runMarketAnalysisInBackground(appId, userId, planId, store, ingredients, log) {
+    
+    // Define the correct path for updates
+    const planDocPath = `artifacts/${appId}/users/${userId}/plans`;
+    const planDocRef = doc(db, planDocPath, planId);
+
     try {
         log({ message: "Starting background Market Run...", tag: 'BACKGROUND' });
 
@@ -205,19 +224,19 @@ async function runMarketAnalysisInBackground(planId, store, ingredients, log) {
                 userQuantity: 1
             };
 
-            const planDocRef = doc(db, 'plans', planId);
+            // Use the correct doc ref
             await updateDoc(planDocRef, {
                 [`results.${ingredientKey.replace(/\./g, '')}`]: finalResult
             });
         }
-
-        const planDocRef = doc(db, 'plans', planId);
+        
+        // Use the correct doc ref
         await updateDoc(planDocRef, { status: 'complete' });
         log({ message: "Background Market Run complete.", level: 'SUCCESS', tag: 'BACKGROUND' });
 
     } catch (error) {
         log({ message: `Background task failed: ${error.message}`, level: 'CRITICAL', tag: 'BACKGROUND' });
-        const planDocRef = doc(db, 'plans', planId);
+        // Use the correct doc ref
         await updateDoc(planDocRef, { status: 'failed', error: error.message });
     }
 }
@@ -255,7 +274,7 @@ RULES:
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } }
+        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } } }
     };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
@@ -285,3 +304,5 @@ Classifications:
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     return jsonText ? (JSON.parse(jsonText).batchAnalysis || []) : [];
 }
+
+
