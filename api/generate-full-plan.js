@@ -62,20 +62,26 @@ function selfBaseUrl(req){
   return "http://localhost:3000"; // local dev
 }
 
-async function httpGetWithRetries(url, params, logs, tries=2){
+async function httpGetWithRetries(url, params, logs, tries=4){
+  const sleep = ms => new Promise(r=>setTimeout(r,ms));
   for(let i=0;i<tries;i++){
     try{
-      logHttpStart(logs, "GET", url, { params });
+      logs.push(L("INFO","HTTP","GET",{ url, params }));
       const r = await axios.get(url, { params, timeout: 15000 });
-      logHttpEnd(logs, r.status, url, { count: Array.isArray(r.data?.products)? r.data.products.length : undefined });
+      logs.push(L("SUCCESS","HTTP",`${r.status} OK`,{ url }));
       return r.data;
     }catch(err){
-      const code = err.response?.status || "net_error";
-      logs.push(L(i<tries-1?"WARN":"CRITICAL","HTTP",`GET failed (${code})`,{ url, params, error: str(err.message) }));
-      if(i===tries-1) throw err;
+      const s = err.response?.status;
+      const ra = Number(err.response?.headers?.["retry-after"]) * 1000;
+      const backoff = Math.min(2000 * 2**i, 12000) + Math.floor(Math.random()*400);
+      const waitMs = s===429 && ra ? ra : backoff;
+      logs.push(L(i<tries-1?"WARN":"CRITICAL","HTTP",`GET failed (${s||err.code}); retry in ${waitMs}ms`,{ url }));
+      if (i===tries-1 || !(s===429 || s===408 || (s>=500 && s<600))) throw err;
+      await sleep(waitMs);
     }
   }
 }
+
 
 // ---------------- Gemini orchestration ----------------
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
