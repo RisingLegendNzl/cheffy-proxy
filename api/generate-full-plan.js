@@ -1,52 +1,35 @@
-// --- ASYNCHRONOUS ORCHESTRATOR API for Cheffy V3 ---
+// --- ORCHESTRATOR API for Cheffy V3 ---
 const fetch = require('node-fetch');
-const { fetchPriceDataWithFallback } = require('./price-search.js');
-const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, setDoc, updateDoc } = require('firebase/firestore');
+const { fetchPriceData } = require('./price-search.js');
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 
-// --- ROBUST FIREBASE INITIALIZATION ---
-let db;
-let firebaseError = null;
-if (!process.env.FIREBASE_CONFIG) {
-    firebaseError = "CRITICAL: FIREBASE_CONFIG environment variable not set. Server cannot connect to the database.";
-    console.error(firebaseError);
-} else {
-    try {
-        const FIREBASE_CONFIG = JSON.parse(process.env.FIREBASE_CONFIG);
-        if (!FIREBASE_CONFIG.projectId) {
-            throw new Error('"projectId" is missing from the Firebase configuration.');
-        }
-        const app = initializeApp(FIREBASE_CONFIG);
-        db = getFirestore(app);
-        console.log("Firebase initialized successfully.");
-    } catch (e) {
-        firebaseError = `CRITICAL: Firebase initialization failed. Error: ${e.message}. Check the FIREBASE_CONFIG environment variable.`;
-        console.error(firebaseError);
-    }
-}
-
-
-// --- MOCK DATA & HELPERS ---
+// --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
+
+// --- HELPERS ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const response = await fetch(url, options);
-            if (response.status < 500) return response;
-            log({ message: `Attempt ${attempt}: Server error ${response.status}. Retrying...`, level: 'WARN', tag: 'HTTP' });
+            if (response.status < 500) {
+                return response;
+            }
+            log({ message: `Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, level: 'WARN', tag: 'HTTP' });
         } catch (error) {
-            log({ message: `Attempt ${attempt}: Network error: ${error.message}. Retrying...`, level: 'WARN', tag: 'HTTP' });
+            log({ message: `Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, level: 'WARN', tag: 'HTTP' });
         }
-        if (attempt < MAX_RETRIES) await delay(Math.pow(2, attempt - 1) * 1000);
+        if (attempt < MAX_RETRIES) {
+            const delayTime = Math.pow(2, attempt - 1) * 1000;
+            await delay(delayTime);
+        }
     }
-    throw new Error(`API call failed after ${MAX_RETRIES} attempts.`);
+    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
 }
 
 const calculateUnitPrice = (price, size) => {
@@ -65,8 +48,8 @@ const calculateUnitPrice = (price, size) => {
     return price;
 };
 
+// --- NUTRITION CALCULATION ENGINE ---
 function calculateNutritionalTargets(formData, log) {
-    // ... (implementation remains the same)
     const { weight, height, age, gender, activityLevel, goal, bodyFat } = formData;
     const weightKg = parseFloat(weight);
     const heightCm = parseFloat(height);
@@ -74,136 +57,141 @@ function calculateNutritionalTargets(formData, log) {
     const bodyFatPercent = parseFloat(bodyFat);
 
     if (!weightKg || !heightCm || !ageYears) {
+        log({ message: "Invalid user metrics, returning default targets.", level: 'WARN', tag: 'CALC' });
         return { calories: 2000, protein: 150, fat: 60, carbs: 215, method: 'defaults' };
     }
 
     let bmr;
+    let calculationMethod;
+
     if (bodyFatPercent && bodyFatPercent > 0) {
+        // Katch-McArdle Formula (more accurate if body fat is known)
         const leanBodyMass = weightKg * (1 - (bodyFatPercent / 100));
         bmr = 370 + (21.6 * leanBodyMass);
+        calculationMethod = `Katch-McArdle (LBM: ${leanBodyMass.toFixed(1)}kg)`;
     } else {
+        // Mifflin-St Jeor Formula (reliable for general population)
         bmr = (gender === 'male')
             ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
             : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
+        calculationMethod = 'Mifflin-St Jeor';
     }
-    
+    log({ message: `BMR calculated using ${calculationMethod}: ${Math.round(bmr)} kcal.`, tag: 'CALC' });
+
     const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
     const tdee = bmr * (activityMultipliers[activityLevel] || 1.55);
+    log({ message: `TDEE calculated: ${Math.round(tdee)} kcal (Activity: ${activityLevel}).`, tag: 'CALC' });
+
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
     const calorieTarget = tdee + (goalAdjustments[goal] || 0);
 
-    const proteinTargetGrams = Math.round(weightKg * 1.8);
-    const fatTargetGrams = Math.round((calorieTarget * 0.25) / 9);
+    // Science-based Macronutrient Calculation
+    const proteinTargetGrams = Math.round(weightKg * 1.8); // 1.8g per kg of bodyweight
+    const fatTargetGrams = Math.round((calorieTarget * 0.25) / 9); // 25% of calories from fat
+    
     const caloriesFromProtein = proteinTargetGrams * 4;
     const caloriesFromFat = fatTargetGrams * 9;
     const remainingCaloriesForCarbs = calorieTarget - caloriesFromProtein - caloriesFromFat;
     const carbsTargetGrams = Math.round(remainingCaloriesForCarbs / 4);
 
-    return { calories: Math.round(calorieTarget), protein: proteinTargetGrams, fat: fatTargetGrams, carbs: carbsTargetGrams };
+    const targets = {
+        calories: Math.round(calorieTarget),
+        protein: proteinTargetGrams,
+        fat: fatTargetGrams,
+        carbs: carbsTargetGrams,
+    };
+    log({ message: `Final nutritional targets set for goal "${goal}".`, data: targets, tag: 'CALC' });
+    return targets;
 }
 
 
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
-    // Fail-fast if Firebase isn't configured
-    if (firebaseError) {
-        return response.status(500).json({ message: "Firebase configuration error on the server.", error: firebaseError });
-    }
+    const logs = [];
+    const log = (logObject) => {
+        const entry = {
+            timestamp: new Date().toISOString(),
+            level: 'INFO', 
+            tag: 'GENERAL',
+            ...logObject
+        };
+        logs.push(entry);
+        console.log(`${entry.timestamp} - [${entry.level}/${entry.tag}] ${entry.message}`);
+    };
     
+    log({ message: "Orchestrator invoked.", tag: 'SYSTEM' });
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    if (request.method === 'OPTIONS') return response.status(200).end();
-    if (request.method !== 'POST') return response.status(405).json({ message: 'Method Not Allowed' });
 
-    // --- PART 1: INSTANT RESPONSE ---
+    if (request.method === 'OPTIONS') {
+        log({ message: "Handling OPTIONS pre-flight request.", tag: 'HTTP' });
+        return response.status(200).end();
+    }
+    
+    if (request.method !== 'POST') {
+        log({ message: `Method Not Allowed: ${request.method}`, level: 'WARN', tag: 'HTTP' });
+        return response.status(405).json({ message: 'Method Not Allowed', logs });
+    }
+
     try {
         const formData = request.body;
-        // Get userId and appId from the frontend request
-        const { userId, appId } = formData;
-
-        if (!userId || !appId) {
-            console.error("CRITICAL: Missing userId or appId in request body.", formData);
-            return response.status(400).json({ message: "Missing required userId or appId." });
-        }
-
-        const planId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const log = (logObject) => console.log(`${new Date().toISOString()} [${planId}] - [${logObject.level || 'INFO'}/${logObject.tag}] ${logObject.message}`);
+        const { store } = formData;
         
-        log({ message: `Starting plan generation for ID: ${planId} for user: ${userId}`, tag: 'SYSTEM' });
-
+        log({ message: "Phase 1: Generating Blueprint...", tag: 'PHASE' });
+        log({ message: `Received form data for store: ${store}`, data: formData, tag: 'DATA' });
+        
         const nutritionalTargets = calculateNutritionalTargets(formData, log);
-        const { ingredients, mealPlan } = await generateLLMPlanAndMeals(formData, nutritionalTargets, log);
         
-        const initialResults = {};
-        ingredients.forEach(item => {
-            initialResults[item.originalIngredient.replace(/\./g, '')] = { // Sanitize dots from keys
-                ...item,
-                status: 'searching',
-                allProducts: [],
-                currentSelectionURL: null,
-                userQuantity: 1
-            };
-        });
+        const { ingredients: ingredientPlan, mealPlan, llmPayload } = await generateLLMPlanAndMeals(formData, nutritionalTargets, log);
+        log({ message: 'LLM Blueprint Prompt', data: llmPayload, tag: 'LLM_PROMPT' });
 
-        // Use the new, correct Firestore path
-        const planDocPath = `artifacts/${appId}/users/${userId}/plans`;
-        const planDocRef = doc(db, planDocPath, planId);
-        
-        await setDoc(planDocRef, {
-            id: planId,
-            status: 'pending',
-            formData,
-            nutritionalTargets,
-            mealPlan,
-            uniqueIngredients: ingredients,
-            results: initialResults,
-            createdAt: new Date().toISOString()
-        });
-        
-        log({ message: `Blueprint for ${planId} created in Firestore at ${planDocPath}.`, level: 'SUCCESS', tag: 'DB' });
-        
-        // Pass userId and appId to the background task
-        runMarketAnalysisInBackground(appId, userId, planId, formData.store, ingredients, log);
-        
-        return response.status(202).json({ planId });
+        if (!ingredientPlan || ingredientPlan.length === 0) {
+            throw new Error("Blueprint failed: LLM did not return an ingredient plan after retries.");
+        }
+        log({ message: `Blueprint successful. ${ingredientPlan.length} ingredients found.`, level: 'SUCCESS', tag: 'LLM' });
 
-    } catch (error) {
-        console.error("ORCHESTRATOR CRITICAL ERROR:", error);
-        return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message });
-    }
-};
+        log({ message: "Phase 2: Executing Parallel Market Run...", tag: 'PHASE' });
+        log({ message: "Fetching all product prices simultaneously...", tag: 'HTTP' });
 
-// Added appId and userId to the function signature
-async function runMarketAnalysisInBackground(appId, userId, planId, store, ingredients, log) {
-    
-    // Define the correct path for updates
-    const planDocPath = `artifacts/${appId}/users/${userId}/plans`;
-    const planDocRef = doc(db, planDocPath, planId);
-
-    try {
-        log({ message: "Starting background Market Run...", tag: 'BACKGROUND' });
-
-        const pricePromises = ingredients.map(item =>
-            fetchPriceDataWithFallback(store, item.searchQuery)
-                .then(rawProducts => ({ item, rawProducts }))
+        const pricePromises = ingredientPlan.map(item =>
+            fetchPriceData(store, item.searchQuery)
+                .then(rawProducts => {
+                    log({ message: `Found ${rawProducts.length} candidates for "${item.searchQuery}"`, tag: 'DATA' });
+                    return { item, rawProducts };
+                })
+                .catch(err => {
+                    log({ message: `Price search failed catastrophically for "${item.searchQuery}": ${err.message}`, level: 'CRITICAL', tag: 'HTTP' });
+                    return { item, rawProducts: [] };
+                })
         );
         const allPriceResults = await Promise.all(pricePromises);
-        
+        log({ message: "All price searches complete.", level: 'SUCCESS', tag: 'HTTP' });
+
         const analysisPayload = allPriceResults
             .filter(result => result.rawProducts.length > 0)
             .map(result => ({
-                ingredientName: result.item.searchQuery,
+                ingredientName: result.item.searchQuery, // DEFINITIVE FIX: Use searchQuery as the reference
                 productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
             }));
 
         let fullAnalysis = [];
         if (analysisPayload.length > 0) {
-            fullAnalysis = await analyzeProductsInBatch(analysisPayload, log);
+            log({ message: `Sending single batch of ${analysisPayload.length} ingredients for AI product analysis...`, tag: 'LLM' });
+            log({ message: 'LLM Analysis Prompt', data: analysisPayload, tag: 'LLM_PROMPT' });
+            try {
+                fullAnalysis = await analyzeProductsInBatch(analysisPayload, log);
+                log({ message: "Product analysis successful.", level: 'SUCCESS', tag: 'LLM' });
+            } catch (err) {
+                 log({ message: `The single AI analysis batch failed. Reason: ${err.message}. Proceeding without matches.`, level: 'CRITICAL', tag: 'LLM' });
+            }
         }
-
-        for (const { item, rawProducts } of allPriceResults) {
+        
+        log({ message: "Assembling final results...", tag: 'SYSTEM' });
+        const finalResults = {};
+        allPriceResults.forEach(({ item, rawProducts }) => {
             const ingredientKey = item.originalIngredient;
+            // DEFINITIVE FIX: Find analysis using the same key we sent: searchQuery
             const analysisForItem = fullAnalysis.find(a => a.ingredientName === item.searchQuery);
             const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
             
@@ -213,37 +201,66 @@ async function runMarketAnalysisInBackground(appId, userId, planId, store, ingre
                     name: p.product_name, brand: p.product_brand, price: p.current_price, size: p.product_size, url: p.url, barcode: p.barcode,
                     unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
                 }));
-            
+
             const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
 
-            const finalResult = {
+            finalResults[ingredientKey] = {
                 ...item,
-                status: finalProducts.length > 0 ? 'found' : 'not_found',
                 allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
-                currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
-                userQuantity: 1
+                currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url, userQuantity: 1, source: finalProducts.length > 0 ? 'discovery' : 'failed'
             };
+        });
+        log({ message: "Market Run complete.", level: 'SUCCESS', tag: 'PHASE' });
 
-            // Use the correct doc ref
-            await updateDoc(planDocRef, {
-                [`results.${ingredientKey.replace(/\./g, '')}`]: finalResult
-            });
-        }
+        log({ message: "Phase 3: Assembling Final Response...", tag: 'PHASE' });
+        const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets };
         
-        // Use the correct doc ref
-        await updateDoc(planDocRef, { status: 'complete' });
-        log({ message: "Background Market Run complete.", level: 'SUCCESS', tag: 'BACKGROUND' });
+        log({ message: "Orchestrator finished successfully.", level: 'SUCCESS', tag: 'SYSTEM' });
+        return response.status(200).json({ ...finalResponseData, logs });
 
     } catch (error) {
-        log({ message: `Background task failed: ${error.message}`, level: 'CRITICAL', tag: 'BACKGROUND' });
-        // Use the correct doc ref
-        await updateDoc(planDocRef, { status: 'failed', error: error.message });
+        log({ message: `CRITICAL ERROR: ${error.message}`, level: 'CRITICAL', tag: 'SYSTEM' });
+        console.error("ORCHESTRATOR CRITICAL ERROR STACK:", error);
+        return response.status(500).json({ message: "An error occurred during plan generation.", error: error.message, logs });
     }
 }
 
+// --- API-CALLING FUNCTIONS ---
+async function analyzeProductsInBatch(analysisData, log) {
+    if (!analysisData || analysisData.length === 0) {
+        log({ message: "Skipping product analysis: no data to analyze.", tag: 'LLM' });
+        return [];
+    }
+    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
+    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to accurately classify product names returned by a grocery store search engine against the generic search query used to find them.
+CRITICAL RULE: The goal is to maximize successful ingredient matches. A "perfect" match must be returned if the product is fundamentally the correct food item for the search query.
+
+Classifications:
+- "perfect": The product is a **direct core ingredient match** for the search query. This includes common varieties, packaging differences, and quality descriptors.
+    - Examples of a "perfect" match:
+        - Search Query: "salmon" -> Product: "Woolworths Smoked Salmon Slices" (Perfect, it is salmon)
+        - Search Query: "beef mince" -> Product: "Deli Lean Ground Beef" (Perfect, it is beef mince)
+        - Search Query: "olive oil" -> Product: "Bertocchi Extra Virgin Olive Oil" (Perfect, it is olive oil)
+        - Search Query: "bell pepper" -> Product: "Red Capsicum" (Perfect, capsicum is a bell pepper)
+- "substitute": The product is a fundamentally different ingredient that could still work, but is not what was searched for.
+    - Example: Search Query: "chicken breast" -> Product: "Chicken Thighs" (Substitute)
+- "irrelevant": The product is completely wrong or cannot be used.
+    - Example: Search Query: "chicken breast" -> Product: "Beef Mince" (Irrelevant)
+
+Analyze the following list. For each search query (ingredientName), analyze its corresponding product candidates.`;
+    const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
+    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
+    const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
+    if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries. Body: ${errorBody}`);
+    }
+    const result = await response.json();
+    const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    return jsonText ? (JSON.parse(jsonText).batchAnalysis || []) : [];
+}
 
 async function generateLLMPlanAndMeals(formData, nutritionalTargets, log) {
-    // ... (implementation remains the same)
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = { '3': ['Breakfast', 'Lunch', 'Dinner'], '4': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1'], '5': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1', 'Snack 2'], };
@@ -255,54 +272,42 @@ async function generateLLMPlanAndMeals(formData, nutritionalTargets, log) {
 RULES:
 1.  Generate a complete meal plan for the specified number of days that STRICTLY adheres to the daily nutritional targets provided.
 2.  Generate a consolidated shopping list of unique ingredients required for the entire plan.
-3.  Provide a user-friendly 'quantityUnits' string.
+3.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
 4.  Estimate the total grams required for each ingredient across the entire plan.
-5.  CRITICAL RULE FOR 'searchQuery': The searchQuery MUST be the most generic, searchable keyword for the item. EXCLUDE preparations, packaging, and specifiers.
-    - EXAMPLE 1: 'Canned Tuna in Water' -> \`searchQuery\`: 'tuna'.
-    - EXAMPLE 2: 'Rolled Oats (dry)' -> \`searchQuery\`: 'rolled oats'.
-6.  Adhere strictly to all user-provided constraints.`;
+5.  CRITICAL RULE FOR 'searchQuery': The searchQuery MUST be the most generic, searchable keyword for the item.
+    - EXCLUDE PREPARATIONS: Remove words like \`canned\`, \`frozen\`, \`fresh\`, \`dried\`, \`raw\`, \`cooked\`.
+    - EXCLUDE PACKAGING: Remove descriptions like \`in water\`, \`in oil\`, \`in brine\`.
+    - EXCLUDE SPECIFIERS: Remove words like \`(dry)\`.
+    - EXAMPLE 1: If the ingredient is 'Canned Tuna in Water', the \`originalIngredient\` should be 'Canned Tuna' and the \`searchQuery\` MUST be 'tuna'.
+    - EXAMPLE 2: If the ingredient is 'Rolled Oats (dry)', the \`originalIngredient\` should be 'Rolled Oats' and the \`searchQuery\` MUST be 'rolled oats'.
+6.  Adhere strictly to all user-provided constraints (dietary, cost, variety, etc.).`;
     const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}.
 - User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
+- Activity: ${formData.activityLevel}.
 - Goal: ${goal}.
 - DAILY NUTRITIONAL TARGETS (Adhere Strictly):
   - Calories: ~${nutritionalTargets.calories} kcal
   - Protein: ~${nutritionalTargets.protein} g
   - Fat: ~${nutritionalTargets.fat} g
   - Carbohydrates: ~${nutritionalTargets.carbs} g
-- Other Constraints: ${eatingOccasions} meals/day, ${costPriority} spending, ${mealVariety} repetition, ${cuisineInstruction || 'any cuisine'}.
+- Meals Per Day: ${eatingOccasions} (${requiredMeals.join(', ')}).
+- Spending Priority: ${costPriority} (${costInstruction}).
+- Meal Repetition Allowed: A single meal can appear up to ${maxRepetitions} times max.
+- Cuisine Profile: ${cuisineInstruction}.
 - Grocery Store: ${store}.`;
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } } }
+        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } } } }
     };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
-    if (!response.ok) throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
+    if (!response.ok) {
+        throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
+    }
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!jsonText) throw new Error("LLM response was empty or malformed.");
-    return JSON.parse(jsonText);
-}
-
-async function analyzeProductsInBatch(analysisData, log) {
-    // ... (implementation remains the same)
-    if (!analysisData || analysisData.length === 0) return [];
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to accurately classify product names returned by a grocery store search engine against the generic search query used to find them.
-CRITICAL RULE: The goal is to maximize successful ingredient matches. A "perfect" match must be returned if the product is fundamentally the correct food item for the search query.
-
-Classifications:
-- "perfect": The product is a **direct core ingredient match** for the search query. This includes common varieties, packaging differences, and quality descriptors.
-    - Examples: query "salmon" -> product "Smoked Salmon Slices" (Perfect). query "beef mince" -> product "Lean Ground Beef" (Perfect).
-- "irrelevant": The product is completely wrong.`;
-    const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
-    // FIX: Added 'type:' before '"OBJECT"' in the 'analysis' items schema
-    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
-    const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
-    if (!response.ok) throw new Error(`Product Analysis LLM Error: HTTP ${response.status}`);
-    const result = await response.json();
-    const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-    return jsonText ? (JSON.parse(jsonText).batchAnalysis || []) : [];
+    return { ...JSON.parse(jsonText), llmPayload: { systemPrompt, userQuery } };
 }
 
 
