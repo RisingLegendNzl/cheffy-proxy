@@ -277,12 +277,11 @@ Classifications:
     - Examples: query "salmon" -> product "Smoked Salmon Slices" (Perfect). query "beef mince" -> product "Lean Ground Beef" (Perfect).
 - "irrelevant": The product is completely wrong.`;
     const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
-    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
+    // FIX: Added 'type:' before '"OBJECT"' in the 'analysis' items schema
+    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) throw new Error(`Product Analysis LLM Error: HTTP ${response.status}`);
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     return jsonText ? (JSON.parse(jsonText).batchAnalysis || []) : [];
 }
-
-
