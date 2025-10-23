@@ -403,7 +403,7 @@ RULES:
 - Goal: ${goal}.
 - Daily Calorie Target: ~${calorieTarget} kcal.
 - Dietary Needs: ${dietary}.
-- Meals Per Day: ${eatingOccasLons} (${requiredMeals.join(', ')}).
+- Meals Per Day: ${eatingOccasions} (${requiredMeals.join(', ')}).
 - Spending Priority: ${costPriority} (${costInstruction}).
 - Meal Repetition Allowed: A single meal can appear up to ${maxRepetitions} times max.
 - Cuisine Profile: ${cuisineInstruction}.
