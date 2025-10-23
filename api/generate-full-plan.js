@@ -1,15 +1,17 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// This file now implements the "Mark 7" pipeline:
-// 1. (Optional) Creative AI call for complex prompts.
-// 2. Technical AI call to get plan, queries, AND validationKeywords.
-// 3. Paginated price search (Page 1 first, then fallback).
-// 4. Local Validation to filter "false aspects" (e.g., Minced Garlic).
+// This file implements the "Mark 9" pipeline:
+// 1. (Optional) Creative AI call.
+// 2. Technical AI call (plan, queries, validationKeywords - NO nutrition).
+// 3. Paginated price search + Local Validation.
+// 4. Backend Nutrition Calculation using Open Food Facts.
 
 /// ===== IMPORTS-START ===== \\\\
 
 const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
+// Import the nutrition fetching function
+const { fetchNutritionData } = require('./nutrition-search.js');
 
 /// ===== IMPORTS-END ===== ////
 
@@ -20,7 +22,7 @@ const { fetchPriceData } = require('./price-search.js');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
-const MAX_CONCURRENCY = 5; // Limit for RapidAPI price search
+const MAX_CONCURRENCY = 5; // Limit for RapidAPI price search AND Nutrition search
 const MAX_PRICE_SEARCH_PAGES = 3; // Max pages to search for a valid product
 
 /// ===== CONFIG-END ===== ////
@@ -59,7 +61,7 @@ async function concurrentlyMap(array, limit, asyncMapper) {
             return result;
         });
         executing.push(promise);
-        
+
         results.push(promise);
 
         // If we reach the limit, wait for the oldest promise to finish
@@ -136,18 +138,19 @@ function isCreativePrompt(cuisinePrompt) {
         return false;
     }
     // Simple keywords that are NOT creative
-    const simpleKeywords = ['italian', 'mexican', 'chinese', 'thai', 'indian', 'spicy', 'mild', 'quick', 'easy', 'high protein'];
+    const simpleKeywords = ['italian', 'mexican', 'chinese', 'thai', 'indian', 'japanese', 'mediterranean', 'french', 'spanish', 'korean', 'vietnamese', 'greek', 'american', 'spicy', 'mild', 'quick', 'easy', 'high protein', 'low carb', 'low fat', 'vegetarian', 'vegan'];
     const promptLower = cuisinePrompt.toLowerCase();
-    
+
     // If the prompt is just a simple keyword, it's not creative
     if (simpleKeywords.some(kw => promptLower === kw)) {
         return false;
     }
-    
+
     // If the prompt is long (e.g., a sentence) or contains non-standard keywords,
     // it's considered creative.
-    return cuisinePrompt.length > 20; 
+    return cuisinePrompt.length > 20 || !simpleKeywords.some(kw => promptLower.includes(kw));
 }
+
 
 /**
  * Performs local validation to filter "false aspects"
@@ -156,8 +159,10 @@ function isCreativePrompt(cuisinePrompt) {
  * @returns {boolean} True if the product name contains all keywords.
  */
 function isMatch(productName, keywords) {
+    if (!productName) return false; // Handle null product names
     if (!keywords || keywords.length === 0) {
         // If no keywords are provided, default to true (no filter)
+        // This is a safety net in case the AI fails to provide keywords
         return true;
     }
     const nameLower = productName.toLowerCase();
@@ -175,7 +180,7 @@ function isMatch(productName, keywords) {
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
-    
+
     // Log function now captures logs as objects for better display on frontend AND prints JSON to console
     const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
         const logEntry = {
@@ -190,7 +195,7 @@ module.exports = async function handler(request, response) {
         console.log(JSON.stringify(logEntry));
         return logEntry;
     };
-    
+
     log("Orchestrator invoked.", 'INFO', 'SYSTEM');
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -200,7 +205,7 @@ module.exports = async function handler(request, response) {
         log("Handling OPTIONS pre-flight request.", 'INFO', 'HTTP');
         return response.status(200).end();
     }
-    
+
     if (request.method !== 'POST') {
         log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
         return response.status(405).json({ message: 'Method Not Allowed', logs });
@@ -209,7 +214,7 @@ module.exports = async function handler(request, response) {
     try {
         const formData = request.body;
         const { store, cuisine } = formData;
-        
+
         log("Phase 1: Creative Router...", 'INFO', 'PHASE');
         let creativeIdeas = null;
         if (isCreativePrompt(cuisine)) {
@@ -223,9 +228,10 @@ module.exports = async function handler(request, response) {
         log("Phase 2: Generating Technical Blueprint...", 'INFO', 'PHASE');
         const calorieTarget = calculateCalorieTarget(formData);
         log(`Calculated daily calorie target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
-        
-        const { ingredients: ingredientPlan, mealPlan, nutritionalTargets } = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
-        
+
+        // Note: nutritionalTargets is NOT expected from the AI anymore
+        const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
+
         // Robustness check: Ensure ingredients list exists
         if (!ingredientPlan || ingredientPlan.length === 0) {
             log("Blueprint failed: Technical AI did not return an ingredient plan.", 'CRITICAL', 'LLM');
@@ -235,34 +241,35 @@ module.exports = async function handler(request, response) {
 
         log("Phase 3: Executing Paginated Market Run...", 'INFO', 'PHASE');
 
-        // This is no longer a concurrent map, but a sequential loop
-        // to allow for the pagination fallback logic.
+        // This is a sequential loop to allow for pagination fallback.
         const finalResults = {};
         for (const ingredient of ingredientPlan) {
             const ingredientKey = ingredient.originalIngredient;
             const validationKeywords = ingredient.validationKeywords || [];
             log(`Fetching prices for: "${ingredientKey}" (Query: "${ingredient.searchQuery}")`, 'INFO', 'HTTP');
-            
+
             let allValidProducts = [];
             let totalPages = 1; // Start with 1, update after first fetch
 
             for (let page = 1; page <= MAX_PRICE_SEARCH_PAGES; page++) {
-                if (page > totalPages) {
+                if (page > totalPages && totalPages > 0) { // Check if totalPages has been set
                     log(`No more pages to search for "${ingredientKey}". Stopping.`, 'INFO', 'HTTP');
                     break; // Stop if we've exceeded the total pages available
                 }
 
                 log(`Fetching Page ${page} for "${ingredientKey}"...`, 'INFO', 'HTTP');
                 const priceData = await fetchPriceData(store, ingredient.searchQuery, page);
-                
-                // Update total pages from the first query
-                if (page === 1) {
+
+                // Update total pages from the first valid query response
+                if (page === 1 && priceData && !priceData.error) {
                     totalPages = priceData.total_pages || 1;
                 }
 
                 if (priceData.error || !priceData.results) {
                     log(`Failed to fetch Page ${page} for "${ingredientKey}": ${priceData.error?.message}`, 'WARN', 'HTTP');
-                    break; // Stop trying if the API call fails
+                    // Do not break here if page 1 fails, allow fallback to page 2/3
+                    if (page >= MAX_PRICE_SEARCH_PAGES) break;
+                    else continue;
                 }
 
                 // Log raw product names for debugging (as requested)
@@ -270,7 +277,7 @@ module.exports = async function handler(request, response) {
                 log(`Raw results for "${ingredientKey}" (Page ${page}):`, 'INFO', 'DATA', rawNames);
 
                 // Phase 4: Local Validation
-                const validProducts = priceData.results
+                const validProductsOnPage = priceData.results
                     .map(p => ({
                         name: p.product_name,
                         brand: p.product_brand,
@@ -281,12 +288,12 @@ module.exports = async function handler(request, response) {
                         unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
                     }))
                     .filter(p => p.price > 0 && isMatch(p.name, validationKeywords)); // Run validation
-                
-                if (validProducts.length > 0) {
-                    log(`Found ${validProducts.length} valid products for "${ingredientKey}" on Page ${page}.`, 'SUCCESS', 'DATA');
-                    allValidProducts.push(...validProducts);
+
+                if (validProductsOnPage.length > 0) {
+                    log(`Found ${validProductsOnPage.length} valid products for "${ingredientKey}" on Page ${page}.`, 'SUCCESS', 'DATA');
+                    allValidProducts.push(...validProductsOnPage);
                     // We found products, break the page loop (as requested)
-                    break; 
+                    break;
                 } else {
                     log(`No valid products found for "${ingredientKey}" on Page ${page}.`, 'WARN', 'DATA');
                     // Continue to the next page...
@@ -297,8 +304,8 @@ module.exports = async function handler(request, response) {
             const cheapest = allValidProducts.length > 0 ? allValidProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, allValidProducts[0]) : null;
 
             finalResults[ingredientKey] = {
-                ...ingredient,
-                allProducts: allValidProducts.length > 0 ? allValidProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
+                ...ingredient, // Includes searchQuery, validationKeywords, totalGramsRequired etc.
+                allProducts: allValidProducts.length > 0 ? allValidProducts : [{ ...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)` }],
                 currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
                 userQuantity: 1,
                 source: allValidProducts.length > 0 ? 'discovery' : 'failed'
@@ -306,17 +313,73 @@ module.exports = async function handler(request, response) {
         }
         log("Market Run complete.", 'SUCCESS', 'PHASE');
 
+        // --- NEW PHASE 4: Nutrition Calculation ---
+        log("Phase 4: Calculating Estimated Nutrition...", 'INFO', 'PHASE');
+        let calculatedTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+        
+        // Prepare list of items to fetch nutrition for
+        const itemsToFetch = Object.entries(finalResults)
+            .filter(([key, result]) => result.source === 'discovery' && result.currentSelectionURL)
+            .map(([key, result]) => {
+                const selectedProduct = result.allProducts.find(p => p.url === result.currentSelectionURL);
+                return {
+                    ingredientKey: key,
+                    barcode: selectedProduct?.barcode,
+                    query: selectedProduct?.name, // Fallback query using product name
+                    grams: result.totalGramsRequired || 0
+                };
+            });
+
+        if (itemsToFetch.length > 0) {
+            log(`Fetching nutrition data for ${itemsToFetch.length} selected products...`, 'INFO', 'HTTP');
+            
+            // Fetch nutrition data concurrently
+            const nutritionResults = await concurrentlyMap(itemsToFetch, MAX_CONCURRENCY, (item) => 
+                fetchNutritionData(item.barcode, item.query) // Use existing function
+                    .then(nutrition => ({ ...item, nutrition }))
+                    .catch(err => {
+                        log(`Nutrition fetch failed for ${item.ingredientKey}: ${err.message}`, 'WARN', 'HTTP');
+                        return { ...item, nutrition: { status: 'not_found' } }; // Handle fetch errors
+                    })
+            );
+
+            log("Nutrition data fetching complete.", 'SUCCESS', 'HTTP');
+
+            // Calculate totals
+            nutritionResults.forEach(item => {
+                if (item.nutrition && item.nutrition.status === 'found' && item.grams > 0) {
+                    const nutritionPer100g = item.nutrition;
+                    calculatedTotals.calories += (nutritionPer100g.calories / 100) * item.grams;
+                    calculatedTotals.protein += (nutritionPer100g.protein / 100) * item.grams;
+                    calculatedTotals.fat += (nutritionPer100g.fat / 100) * item.grams;
+                    calculatedTotals.carbs += (nutritionPer100g.carbs / 100) * item.grams;
+                } else {
+                    log(`Skipping nutrition calculation for ${item.ingredientKey}: Data not found or zero grams.`, 'INFO', 'CALC');
+                }
+            });
+
+             // Round the final totals
+             calculatedTotals.calories = Math.round(calculatedTotals.calories);
+             calculatedTotals.protein = Math.round(calculatedTotals.protein);
+             calculatedTotals.fat = Math.round(calculatedTotals.fat);
+             calculatedTotals.carbs = Math.round(calculatedTotals.carbs);
+
+            log("Estimated nutrition totals calculated.", 'SUCCESS', 'CALC', calculatedTotals);
+        } else {
+             log("No valid products found to calculate nutrition.", 'WARN', 'CALC');
+        }
+        // --- END NEW PHASE 4 ---
 
         log("Phase 5: Assembling Final Response...", 'INFO', 'PHASE');
-        const finalResponseData = { 
+        const finalResponseData = {
             mealPlan: mealPlan || [], // Handle optional mealPlan
-            uniqueIngredients: ingredientPlan, 
-            results: finalResults, 
-            nutritionalTargets: nutritionalTargets || { calories: 0, protein: 0, fat: 0, carbs: 0 } // Handle optional targets
+            uniqueIngredients: ingredientPlan,
+            results: finalResults,
+            nutritionalTargets: calculatedTotals // Use the calculated totals
         };
-        
+
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
-        
+
         // Return the final data and the structured logs
         return response.status(200).json({ ...finalResponseData, logs });
 
@@ -347,14 +410,14 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
     const userQuery = `Theme: "${cuisinePrompt}"
     
     Return a comma-separated list of meal names.`;
-    
+
     log("Creative AI Prompt", 'INFO', 'LLM_PROMPT', { userQuery });
-    
+
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
     };
-    
+
     try {
         const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
         if (!response.ok) {
@@ -365,17 +428,19 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
         if (!text) {
             throw new Error("Creative AI response was empty.");
         }
+        log("Creative AI Raw Response", 'INFO', 'LLM', { raw: text.substring(0, 500) }); // Log more of the response
         return text;
     } catch (error) {
         log("Creative AI failed.", 'CRITICAL', 'LLM', { error: error.message });
         // Fallback: return an empty string so the technician can proceed
-        return ""; 
+        return "";
     }
 }
 
 /**
  * AI Call #2: The "Technician"
  * Generates the full plan, queries, and validation keywords.
+ * NO LONGER generates nutritionalTargets.
  */
 async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
@@ -384,82 +449,82 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const requiredMeals = mealTypesMap[eatingOccasions] || mealTypesMap['3'];
     const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost, most basic ingredients (e.g., rice, beans, oats, basic vegetables). Avoid expensive meats, pre-packaged items, and specialty goods.", 'Quality Focus': "Prioritize premium quality, organic, free-range, and branded ingredients where appropriate. Cost is a secondary concern to quality and health benefits.", 'Best Value': "Balance unit cost with general quality. Use a mix of budget-friendly staples and good quality fresh produce and proteins. Avoid premium brands unless necessary." }[costPriority] || "Balance unit cost with general quality...";
     const maxRepetitions = { 'High Repetition': 3, 'Low Repetition': 1, 'Balanced Variety': 2 }[mealVariety] || 2;
-    
+
     // Use creative ideas if they exist, otherwise use the original cuisine prompt
-    const cuisineInstruction = creativeIdeas 
+    const cuisineInstruction = creativeIdeas
         ? `Use these creative meal ideas as inspiration: ${creativeIdeas}`
         : (cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.');
 
+    // --- REFINED PROMPT ---
     const systemPrompt = `You are an expert dietitian and chef creating a practical, cost-effective grocery and meal plan.
 RULES:
 1.  Generate a complete meal plan AND a consolidated shopping list.
-2.  For each ingredient, provide a 'searchQuery'. This query MUST be a hyper-specific, optimized search term (e.g., "chicken breast fillets", "traditional rolled oats").
-3.  For each ingredient, provide 'validationKeywords'. This MUST be an array of 2-3 essential lowercase keywords from the product name used to filter search results. (e.g., for "Lean Turkey Mince", keywords: ["turkey", "mince"]).
-4.  For produce, prioritize store-brand queries (e.g., "Coles bananas").
+2.  For each ingredient, provide a 'searchQuery'. This query MUST be an OPTIMIZED, slightly LESS specific search term suitable for a grocery store search engine (e.g., "chicken breast fillets", "traditional rolled oats", "lean beef mince"). AVOID hyper-specific queries with brands/sizes unless essential (like "Coles RSPCA... 2kg"). Prioritize getting relevant items on Page 1.
+3.  For each ingredient, provide 'validationKeywords'. This MUST be an array of 2-3 essential FLEXIBLE lowercase keywords from the product type (e.g., for "Lean Turkey Mince", keywords: ["turkey", "mince"]; for "Traditional Rolled Oats", keywords: ["oats", "rolled"]).
+4.  For produce, prioritize store-brand queries IF the generic query is too broad (e.g., "Coles bananas", but just "carrots" is okay).
 5.  Adhere strictly to all user-provided constraints.
-6.  The 'ingredients' array is MANDATORY. 'mealPlan' and 'nutritionalTargets' are OPTIONAL. If the creative request is too difficult, you MUST still return the 'ingredients' list, even if the meal plan is empty.`;
+6.  The 'ingredients' array is MANDATORY. The 'mealPlan' is OPTIONAL.
+7.  HOWEVER: You MUST make your best effort to generate a plausible 'mealPlan', even for creative requests. If the theme is impossible, generate a simple, healthy plan and note the difficulty in the meal descriptions. DO NOT leave mealPlan empty unless absolutely impossible.
+8.  DO NOT include 'nutritionalTargets' in the response.`;
+    // --- END REFINED PROMPT ---
+
 
     const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}.
 - User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
 - Activity: ${formData.activityLevel}.
 - Goal: ${goal}.
-- Daily Calorie Target: ~${calorieTarget} kcal.
+- Daily Calorie Target: ~${calorieTarget} kcal (for meal planning reference only, do not include targets in response).
 - Dietary Needs: ${dietary}.
 - Meals Per Day: ${eatingOccasions} (${requiredMeals.join(', ')}).
 - Spending Priority: ${costPriority} (${costInstruction}).
 - Meal Repetition Allowed: A single meal can appear up to ${maxRepetitions} times max.
 - Cuisine Profile: ${cuisineInstruction}.
 - Grocery Store: ${store}.`;
-    
+
     log("Technical AI Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
-    
+
+    // --- UPDATED SCHEMA (No nutritionalTargets) ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { 
-            responseMimeType: "application/json", 
-            responseSchema: { 
-                type: "OBJECT", 
-                properties: { 
-                    "ingredients": { 
-                        type: "ARRAY", 
-                        items: { 
-                            type: "OBJECT", 
-                            properties: { 
-                                "originalIngredient": { "type": "STRING" }, 
-                                "category": { "type": "STRING" }, 
+        generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: "OBJECT",
+                properties: {
+                    "ingredients": {
+                        type: "ARRAY",
+                        items: {
+                            type: "OBJECT",
+                            properties: {
+                                "originalIngredient": { "type": "STRING" },
+                                "category": { "type": "STRING" },
                                 "searchQuery": { "type": "STRING" },
-                                "validationKeywords": { type: "ARRAY", items: { type: "STRING" } }, // NEW
-                                "totalGramsRequired": { "type": "NUMBER" }, 
-                                "quantityUnits": { "type": "STRING" } 
+                                "validationKeywords": { type: "ARRAY", items: { type: "STRING" } },
+                                "totalGramsRequired": { "type": "NUMBER" },
+                                "quantityUnits": { "type": "STRING" }
                             },
-                            required: ["originalIngredient", "searchQuery", "validationKeywords"] // Make keywords mandatory
-                        } 
-                    }, 
-                    "mealPlan": { 
-                        type: "ARRAY", 
-                        items: { 
-                            type: "OBJECT", 
-                            properties: { 
-                                "day": { "type": "NUMBER" }, 
-                                "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } 
-                            } 
-                        } 
-                    }, 
-                    "nutritionalTargets": { 
-                        type: "OBJECT", 
-                        properties: { 
-                            "calories": { "type": "NUMBER" }, 
-                            "protein": { "type": "NUMBER" }, 
-                            "fat": { "type": "NUMBER" }, 
-                            "carbs": { "type": "NUMBER" } 
-                        } 
-                    } 
+                            required: ["originalIngredient", "searchQuery", "validationKeywords", "totalGramsRequired", "quantityUnits"] // Made grams/units required
+                        }
+                    },
+                    "mealPlan": {
+                        type: "ARRAY",
+                        items: {
+                            type: "OBJECT",
+                            properties: {
+                                "day": { "type": "NUMBER" },
+                                "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } }
+                            }
+                        }
+                    }
+                    // nutritionalTargets REMOVED from schema
                 },
                 required: ["ingredients"] // Only ingredients is mandatory
-            } 
+            }
         }
     };
+    // --- END UPDATED SCHEMA ---
+
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) {
         throw new Error(`Technical AI API HTTP error! Status: ${response.status}.`);
@@ -470,17 +535,21 @@ RULES:
         log("Technical AI returned no candidate text.", 'CRITICAL', 'LLM', result);
         throw new Error("LLM response was empty or malformed.");
     }
-    
+
     log("Technical AI Raw Response", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
 
     try {
         const parsed = JSON.parse(jsonText);
         // Enrich logs (as requested)
         log("Parsed Technical AI Response", 'INFO', 'DATA', {
-            hasIngredients: !!parsed.ingredients,
-            hasMealPlan: !!parsed.mealPlan,
-            hasTargets: !!parsed.nutritionalTargets
+            ingredientCount: parsed.ingredients?.length || 0,
+            hasMealPlan: !!parsed.mealPlan && parsed.mealPlan.length > 0
         });
+        // Ensure ingredients array exists, even if empty (schema should guarantee this)
+        if (!parsed.ingredients) {
+             parsed.ingredients = [];
+             log("Technical AI returned valid JSON but missing 'ingredients' array. Corrected.", 'WARN', 'LLM');
+        }
         return parsed;
     } catch (parseError) {
         log("Failed to parse Technical AI JSON response.", 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
@@ -503,3 +572,4 @@ function calculateCalorieTarget(formData) {
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
 /// ===== API-CALLERS-END ===== ////
+
