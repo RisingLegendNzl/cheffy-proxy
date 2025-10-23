@@ -1,9 +1,10 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// This file is now MUCH FASTER. It only:
-// 1. Gets the "Smarter Blueprint" (Meal Plan + Specific Search Queries)
-// 2. Gets the raw prices from RapidAPI.
-// It does NOT perform AI analysis. That is now handled on-demand by /api/analyze-ingredient.js
+// This file now implements the "Mark 7" pipeline:
+// 1. (Optional) Creative AI call for complex prompts.
+// 2. Technical AI call to get plan, queries, AND validationKeywords.
+// 3. Paginated price search (Page 1 first, then fallback).
+// 4. Local Validation to filter "false aspects" (e.g., Minced Garlic).
 
 /// ===== IMPORTS-START ===== \\\\
 
@@ -20,7 +21,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 const MAX_CONCURRENCY = 5; // Limit for RapidAPI price search
-
+const MAX_PRICE_SEARCH_PAGES = 3; // Max pages to search for a valid product
 
 /// ===== CONFIG-END ===== ////
 
@@ -125,6 +126,45 @@ const calculateUnitPrice = (price, size) => {
     return price;
 };
 
+/**
+ * Checks if a prompt is simple or complex (creative).
+ * @param {string} cuisinePrompt - The user's cuisine input.
+ * @returns {boolean} True if the prompt is considered creative.
+ */
+function isCreativePrompt(cuisinePrompt) {
+    if (!cuisinePrompt || cuisinePrompt.toLowerCase() === 'none') {
+        return false;
+    }
+    // Simple keywords that are NOT creative
+    const simpleKeywords = ['italian', 'mexican', 'chinese', 'thai', 'indian', 'spicy', 'mild', 'quick', 'easy', 'high protein'];
+    const promptLower = cuisinePrompt.toLowerCase();
+    
+    // If the prompt is just a simple keyword, it's not creative
+    if (simpleKeywords.some(kw => promptLower === kw)) {
+        return false;
+    }
+    
+    // If the prompt is long (e.g., a sentence) or contains non-standard keywords,
+    // it's considered creative.
+    return cuisinePrompt.length > 20; 
+}
+
+/**
+ * Performs local validation to filter "false aspects"
+ * @param {string} productName - The product name from the store.
+ * @param {string[]} keywords - The list of required keywords from the AI.
+ * @returns {boolean} True if the product name contains all keywords.
+ */
+function isMatch(productName, keywords) {
+    if (!keywords || keywords.length === 0) {
+        // If no keywords are provided, default to true (no filter)
+        return true;
+    }
+    const nameLower = productName.toLowerCase();
+    // Check if *every* keyword is present in the product name
+    return keywords.every(kw => nameLower.includes(kw.toLowerCase()));
+}
+
 
 /// ===== HELPERS-END ===== ////
 
@@ -168,86 +208,112 @@ module.exports = async function handler(request, response) {
 
     try {
         const formData = request.body;
-        const { store } = formData;
+        const { store, cuisine } = formData;
         
-        log("Phase 1: Generating Smarter Blueprint...", 'INFO', 'PHASE');
+        log("Phase 1: Creative Router...", 'INFO', 'PHASE');
+        let creativeIdeas = null;
+        if (isCreativePrompt(cuisine)) {
+            log(`Creative prompt detected: "${cuisine}". Calling Creative AI...`, 'INFO', 'LLM');
+            creativeIdeas = await generateCreativeIdeas(cuisine, log);
+            log(`Creative AI returned: "${creativeIdeas.substring(0, 100)}..."`, 'SUCCESS', 'LLM');
+        } else {
+            log("Simple prompt detected. Skipping Creative AI.", 'INFO', 'SYSTEM');
+        }
+
+        log("Phase 2: Generating Technical Blueprint...", 'INFO', 'PHASE');
         const calorieTarget = calculateCalorieTarget(formData);
         log(`Calculated daily calorie target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
         
-        // Include nutritionalTargets in the destructuring here, as it's returned by the LLM now
-        const { ingredients: ingredientPlan, mealPlan, nutritionalTargets } = await generateLLMPlanAndMeals(formData, calorieTarget, log);
+        const { ingredients: ingredientPlan, mealPlan, nutritionalTargets } = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
+        
+        // Robustness check: Ensure ingredients list exists
         if (!ingredientPlan || ingredientPlan.length === 0) {
+            log("Blueprint failed: Technical AI did not return an ingredient plan.", 'CRITICAL', 'LLM');
             throw new Error("Blueprint failed: LLM did not return an ingredient plan after retries.");
         }
         log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`, 'SUCCESS', 'PHASE');
 
-        log("Phase 2: Executing Parallel Market Run...", 'INFO', 'PHASE');
+        log("Phase 3: Executing Paginated Market Run...", 'INFO', 'PHASE');
 
-        // Step 1: Fetch all price data in parallel, but with limited concurrency.
-        log(`Fetching all product prices simultaneously with concurrency limit of ${MAX_CONCURRENCY}...`, 'INFO', 'HTTP');
-        
-        const priceResultsMapper = (item) => 
-            // fetchPriceData now returns { results: [...] } or { error: {...} }
-            fetchPriceData(store, item.searchQuery)
-                .then(priceResult => {
-                    // Check if an error was returned by the price-search function
-                    if (priceResult.error) {
-                        log(`Price search failed for "${item.searchQuery}": ${priceResult.error.message}`, 'WARN', 'HTTP', priceResult.error);
-                        return { item, rawProducts: [], error: priceResult.error };
-                    }
-                    return { item, rawProducts: priceResult.results };
-                })
-                .catch(err => {
-                    // This catch should only happen if fetchPriceData throws, which it shouldn't now
-                    log(`Price search failed catastrophically for "${item.searchQuery}" (unhandled): ${err.message}`, 'CRITICAL', 'HTTP');
-                    return { item, rawProducts: [], error: { message: err.message, status: 500 } }; 
-                });
-                
-        const allPriceResults = await concurrentlyMap(ingredientPlan, MAX_CONCURRENCY, priceResultsMapper);
-        log("All price searches complete.", 'SUCCESS', 'HTTP');
-
-        // ===- STEP 3: REMOVED -===
-        // The AI Analysis step is GONE. We are skipping straight to assembling the results
-        // based on the (now smarter) search queries.
-        log("AI analysis step skipped. Proceeding directly to results assembly.", 'INFO', 'SYSTEM');
-        
-        // Step 4: Assemble final results without AI analysis.
-        log("Assembling final results...", 'INFO', 'SYSTEM');
+        // This is no longer a concurrent map, but a sequential loop
+        // to allow for the pagination fallback logic.
         const finalResults = {};
-        allPriceResults.forEach(({ item, rawProducts }) => {
-            const ingredientKey = item.originalIngredient;
+        for (const ingredient of ingredientPlan) {
+            const ingredientKey = ingredient.originalIngredient;
+            const validationKeywords = ingredient.validationKeywords || [];
+            log(`Fetching prices for: "${ingredientKey}" (Query: "${ingredient.searchQuery}")`, 'INFO', 'HTTP');
             
-            // We no longer have `perfectMatchNames`. We just process all raw products.
-            const finalProducts = rawProducts
-                .map(p => ({
-                    name: p.product_name,
-                    brand: p.product_brand,
-                    price: p.current_price,
-                    size: p.product_size,
-                    url: p.url,
-                    barcode: p.barcode, 
-                    unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
-                })).filter(p => p.price > 0); // Still filter out items with no price
+            let allValidProducts = [];
+            let totalPages = 1; // Start with 1, update after first fetch
 
-            // Determine the "dumb" cheapest product from the raw (but better-queried) list
-            const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
+            for (let page = 1; page <= MAX_PRICE_SEARCH_PAGES; page++) {
+                if (page > totalPages) {
+                    log(`No more pages to search for "${ingredientKey}". Stopping.`, 'INFO', 'HTTP');
+                    break; // Stop if we've exceeded the total pages available
+                }
+
+                log(`Fetching Page ${page} for "${ingredientKey}"...`, 'INFO', 'HTTP');
+                const priceData = await fetchPriceData(store, ingredient.searchQuery, page);
+                
+                // Update total pages from the first query
+                if (page === 1) {
+                    totalPages = priceData.total_pages || 1;
+                }
+
+                if (priceData.error || !priceData.results) {
+                    log(`Failed to fetch Page ${page} for "${ingredientKey}": ${priceData.error?.message}`, 'WARN', 'HTTP');
+                    break; // Stop trying if the API call fails
+                }
+
+                // Log raw product names for debugging (as requested)
+                const rawNames = priceData.results.map(p => p.product_name);
+                log(`Raw results for "${ingredientKey}" (Page ${page}):`, 'INFO', 'DATA', rawNames);
+
+                // Phase 4: Local Validation
+                const validProducts = priceData.results
+                    .map(p => ({
+                        name: p.product_name,
+                        brand: p.product_brand,
+                        price: p.current_price,
+                        size: p.product_size,
+                        url: p.url,
+                        barcode: p.barcode,
+                        unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
+                    }))
+                    .filter(p => p.price > 0 && isMatch(p.name, validationKeywords)); // Run validation
+                
+                if (validProducts.length > 0) {
+                    log(`Found ${validProducts.length} valid products for "${ingredientKey}" on Page ${page}.`, 'SUCCESS', 'DATA');
+                    allValidProducts.push(...validProducts);
+                    // We found products, break the page loop (as requested)
+                    break; 
+                } else {
+                    log(`No valid products found for "${ingredientKey}" on Page ${page}.`, 'WARN', 'DATA');
+                    // Continue to the next page...
+                }
+            }
+
+            // After page loop, assemble results
+            const cheapest = allValidProducts.length > 0 ? allValidProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, allValidProducts[0]) : null;
 
             finalResults[ingredientKey] = {
-                ...item,
-                // allProducts is now the FULL raw list for the frontend to analyze on-demand
-                allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
-                // currentSelectionURL is the "dumb" cheapest
+                ...ingredient,
+                allProducts: allValidProducts.length > 0 ? allValidProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
                 currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
                 userQuantity: 1,
-                // Source is 'discovery' if we found *anything*, 'failed' if not.
-                source: finalProducts.length > 0 ? 'discovery' : 'failed'
+                source: allValidProducts.length > 0 ? 'discovery' : 'failed'
             };
-        });
-
+        }
         log("Market Run complete.", 'SUCCESS', 'PHASE');
 
-        log("Phase 3: Assembling Final Response...", 'INFO', 'PHASE');
-        const finalResponseData = { mealPlan, uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets };
+
+        log("Phase 5: Assembling Final Response...", 'INFO', 'PHASE');
+        const finalResponseData = { 
+            mealPlan: mealPlan || [], // Handle optional mealPlan
+            uniqueIngredients: ingredientPlan, 
+            results: finalResults, 
+            nutritionalTargets: nutritionalTargets || { calories: 0, protein: 0, fat: 0, carbs: 0 } // Handle optional targets
+        };
         
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
         
@@ -271,31 +337,67 @@ module.exports = async function handler(request, response) {
 
 // --- API-CALLING FUNCTIONS ---
 
-// REMOVED `analyzeSingleIngredientProducts` function. It now lives in /api/analyze-ingredient.js
+/**
+ * AI Call #1: The "Creative"
+ * Brainstorms meal ideas for complex prompts.
+ */
+async function generateCreativeIdeas(cuisinePrompt, log) {
+    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
+    const systemPrompt = `You are a creative chef and pop-culture expert. A user wants a meal plan based on a theme. Brainstorm a simple list of 10-15 meal names that fit the theme. Return *only* a simple, comma-separated list of the meal names. Do not add any other text.`;
+    const userQuery = `Theme: "${cuisinePrompt}"
+    
+    Return a comma-separated list of meal names.`;
+    
+    log("Creative AI Prompt", 'INFO', 'LLM_PROMPT', { userQuery });
+    
+    const payload = {
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+    };
+    
+    try {
+        const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
+        if (!response.ok) {
+            throw new Error(`Creative AI API HTTP error! Status: ${response.status}.`);
+        }
+        const result = await response.json();
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) {
+            throw new Error("Creative AI response was empty.");
+        }
+        return text;
+    } catch (error) {
+        log("Creative AI failed.", 'CRITICAL', 'LLM', { error: error.message });
+        // Fallback: return an empty string so the technician can proceed
+        return ""; 
+    }
+}
 
-async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
+/**
+ * AI Call #2: The "Technician"
+ * Generates the full plan, queries, and validation keywords.
+ */
+async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = { '3': ['Breakfast', 'Lunch', 'Dinner'], '4': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1'], '5': ['Breakfast', 'Lunch', 'Dinner', 'Snack 1', 'Snack 2'], };
     const requiredMeals = mealTypesMap[eatingOccasions] || mealTypesMap['3'];
     const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost, most basic ingredients (e.g., rice, beans, oats, basic vegetables). Avoid expensive meats, pre-packaged items, and specialty goods.", 'Quality Focus': "Prioritize premium quality, organic, free-range, and branded ingredients where appropriate. Cost is a secondary concern to quality and health benefits.", 'Best Value': "Balance unit cost with general quality. Use a mix of budget-friendly staples and good quality fresh produce and proteins. Avoid premium brands unless necessary." }[costPriority] || "Balance unit cost with general quality...";
     const maxRepetitions = { 'High Repetition': 3, 'Low Repetition': 1, 'Balanced Variety': 2 }[mealVariety] || 2;
-    const cuisineInstruction = cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.';
     
-    // ===- MODIFIED PROMPT -===
-    // The prompt is now much smarter about the 'searchQuery'.
+    // Use creative ideas if they exist, otherwise use the original cuisine prompt
+    const cuisineInstruction = creativeIdeas 
+        ? `Use these creative meal ideas as inspiration: ${creativeIdeas}`
+        : (cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.');
+
     const systemPrompt = `You are an expert dietitian and chef creating a practical, cost-effective grocery and meal plan.
 RULES:
-1.  Generate a complete meal plan for the specified number of days.
-2.  Generate a consolidated shopping list of unique ingredients required for the entire plan.
-3.  For each ingredient, provide a 'searchQuery'. This query is CRITICAL. It MUST be a hyper-specific, optimized search term guaranteed to return the correct product type from a grocery store search engine.
-    - BAD (too generic): "chicken", "rice", "oats", "tomatoes"
-    - GOOD (specific): "chicken breast fillets", "medium grain white rice", "traditional rolled oats", "canned diced tomatoes 400g"
-4.  For produce (fruits, vegetables), prioritize store-brand queries if appropriate (e.g., "Woolworths bananas", "Coles carrots").
-5.  Estimate the total grams required for each ingredient across the entire plan.
-6.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
-7.  Adhere strictly to all user-provided constraints (dietary, cost, variety, etc.).`;
-    // ===- END MODIFIED PROMPT -===
+1.  Generate a complete meal plan AND a consolidated shopping list.
+2.  For each ingredient, provide a 'searchQuery'. This query MUST be a hyper-specific, optimized search term (e.g., "chicken breast fillets", "traditional rolled oats").
+3.  For each ingredient, provide 'validationKeywords'. This MUST be an array of 2-3 essential lowercase keywords from the product name used to filter search results. (e.g., for "Lean Turkey Mince", keywords: ["turkey", "mince"]).
+4.  For produce, prioritize store-brand queries (e.g., "Coles bananas").
+5.  Adhere strictly to all user-provided constraints.
+6.  The 'ingredients' array is MANDATORY. 'mealPlan' and 'nutritionalTargets' are OPTIONAL. If the creative request is too difficult, you MUST still return the 'ingredients' list, even if the meal plan is empty.`;
 
     const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}.
 - User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
@@ -309,38 +411,79 @@ RULES:
 - Cuisine Profile: ${cuisineInstruction}.
 - Grocery Store: ${store}.`;
     
-    // Log the prompt payload
-    log("Plan Generation LLM Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
+    log("Technical AI Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
     
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        // Added nutritionalTargets to the response schema here
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { 
-            // ===- TYPO FIX HERE -===
-            type: "OBJECT", 
-            // ===- END TYPO FIX -===
-            properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } }, "nutritionalTargets": { type: "OBJECT", properties: { "calories": { "type": "NUMBER" }, "protein": { "type": "NUMBER" }, "fat": { "type": "NUMBER" }, "carbs": { "type": "NUMBER" } } } } } }
+        generationConfig: { 
+            responseMimeType: "application/json", 
+            responseSchema: { 
+                type: "OBJECT", 
+                properties: { 
+                    "ingredients": { 
+                        type: "ARRAY", 
+                        items: { 
+                            type: "OBJECT", 
+                            properties: { 
+                                "originalIngredient": { "type": "STRING" }, 
+                                "category": { "type": "STRING" }, 
+                                "searchQuery": { "type": "STRING" },
+                                "validationKeywords": { type: "ARRAY", items: { type: "STRING" } }, // NEW
+                                "totalGramsRequired": { "type": "NUMBER" }, 
+                                "quantityUnits": { "type": "STRING" } 
+                            },
+                            required: ["originalIngredient", "searchQuery", "validationKeywords"] // Make keywords mandatory
+                        } 
+                    }, 
+                    "mealPlan": { 
+                        type: "ARRAY", 
+                        items: { 
+                            type: "OBJECT", 
+                            properties: { 
+                                "day": { "type": "NUMBER" }, 
+                                "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } 
+                            } 
+                        } 
+                    }, 
+                    "nutritionalTargets": { 
+                        type: "OBJECT", 
+                        properties: { 
+                            "calories": { "type": "NUMBER" }, 
+                            "protein": { "type": "NUMBER" }, 
+                            "fat": { "type": "NUMBER" }, 
+                            "carbs": { "type": "NUMBER" } 
+                        } 
+                    } 
+                },
+                required: ["ingredients"] // Only ingredients is mandatory
+            } 
+        }
     };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) {
-        // This will now only be hit if fetchWithRetry fails all retries
-        throw new Error(`LLM API HTTP error! Status: ${response.status} after all retries.`);
+        throw new Error(`Technical AI API HTTP error! Status: ${response.status}.`);
     }
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!jsonText) {
-        log("LLM returned no candidate text for plan generation. Response object:", 'CRITICAL', 'LLM', result);
+        log("Technical AI returned no candidate text.", 'CRITICAL', 'LLM', result);
         throw new Error("LLM response was empty or malformed.");
     }
     
-    // Log the raw LLM response (first 1000 chars)
-    log("Plan Generation LLM Raw Response", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
+    log("Technical AI Raw Response", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
 
     try {
-        return JSON.parse(jsonText);
+        const parsed = JSON.parse(jsonText);
+        // Enrich logs (as requested)
+        log("Parsed Technical AI Response", 'INFO', 'DATA', {
+            hasIngredients: !!parsed.ingredients,
+            hasMealPlan: !!parsed.mealPlan,
+            hasTargets: !!parsed.nutritionalTargets
+        });
+        return parsed;
     } catch (parseError) {
-        log("Failed to parse LLM JSON response for plan generation.", 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
+        log("Failed to parse Technical AI JSON response.", 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
         throw new Error(`Failed to parse LLM JSON response: ${parseError.message}`);
     }
 }
@@ -360,5 +503,3 @@ function calculateCalorieTarget(formData) {
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
 /// ===== API-CALLERS-END ===== ////
-
-
