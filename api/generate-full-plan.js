@@ -13,7 +13,7 @@ const { fetchPriceData } = require('./price-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+const GEMINI_API_URL_BASE = 'https://generativelace.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 const MAX_CONCURRENCY = 5; // Limit for price search parallelism
 
@@ -183,7 +183,7 @@ module.exports = async function handler(request, response) {
         const allPriceResults = await concurrentlyMap(ingredientPlan, MAX_CONCURRENCY, priceResultsMapper);
         log("All price searches complete.", 'SUCCESS', 'HTTP');
 
-        // Step 2: Prepare one single payload for AI analysis.
+        // Step 2: Prepare payload for AI analysis.
         const analysisPayload = allPriceResults
             .filter(result => result.rawProducts.length > 0)
             .map(result => ({
@@ -191,23 +191,34 @@ module.exports = async function handler(request, response) {
                 productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
             }));
 
-        // Step 3: Make a single, consolidated call to the AI for analysis.
+        // ===- STEP 3: REFACTORED -===
+        // Step 3: Make CONCURRENT calls to the AI for analysis, one for each ingredient.
         let fullAnalysis = [];
         if (analysisPayload.length > 0) {
-            try {
-                log("Sending single batch for AI product analysis...", 'INFO', 'LLM');
-                fullAnalysis = await analyzeProductsInBatch(analysisPayload, log);
-                log("Product analysis successful.", 'SUCCESS', 'LLM');
-            } catch (err) {
-                log(`The single AI analysis batch failed. Reason: ${err.message}. Proceeding without intelligent matching.`, 'CRITICAL', 'LLM');
-            }
+            log(`Sending ${analysisPayload.length} AI product analysis requests in parallel (limit ${MAX_CONCURRENCY})...`, 'INFO', 'LLM');
+            
+            const analysisMapper = (payloadItem) => 
+                analyzeSingleIngredientProducts(payloadItem.ingredientName, payloadItem.productCandidates, log)
+                    .catch(err => {
+                        // This catch block ensures one failed analysis doesn't stop all others
+                        log(`AI analysis failed for "${payloadItem.ingredientName}": ${err.message}`, 'CRITICAL', 'LLM');
+                        // Return a fallback structure so `fullAnalysis.find` doesn't break
+                        return { ingredientName: payloadItem.ingredientName, analysis: [] };
+                    });
+
+            fullAnalysis = await concurrentlyMap(analysisPayload, MAX_CONCURRENCY, analysisMapper);
+            log("All product analyses complete.", 'SUCCESS', 'LLM');
         }
+        // ===- END OF REFACTORED STEP 3 -===
         
         // Step 4: Assemble final results without nutrition data.
         log("Assembling final results...", 'INFO', 'SYSTEM');
         const finalResults = {};
         allPriceResults.forEach(({ item, rawProducts }) => {
             const ingredientKey = item.originalIngredient;
+            
+            // This logic remains the same. It finds the analysis for the specific ingredient
+            // in the `fullAnalysis` array that we built with concurrentlyMap.
             const analysisForItem = fullAnalysis.find(a => a.ingredientName === ingredientKey);
             
             // Filter to only include 'perfect' matches from AI analysis
@@ -263,12 +274,22 @@ module.exports = async function handler(request, response) {
 /// ===== API-CALLERS-START ===== \\\\
 
 
-// --- API-CALLING FUNCTIONS (Unchanged from previous step) ---
-async function analyzeProductsInBatch(analysisData, log) {
-    if (!analysisData || analysisData.length === 0) {
-        log("Skipping product analysis: no data to analyze.", "INFO", 'LLM');
-        return [];
+// --- API-CALLING FUNCTIONS ---
+
+/**
+ * Analyzes a list of product candidates for a SINGLE ingredient.
+ * This is designed to be called concurrentlyMap.
+ * @param {string} ingredientName - The name of the ingredient (e.g., "Chicken Breast").
+ * @param {string[]} productCandidates - An array of product names (e.g., ["Woolworths Chicken...", "Steggles Chicken..."]).
+ * @param {Function} log - The logger function.
+ * @returns {Promise<Object>} A promise that resolves to { ingredientName, analysis: [...] }.
+ */
+async function analyzeSingleIngredientProducts(ingredientName, productCandidates, log) {
+    if (!productCandidates || productCandidates.length === 0) {
+        log(`Skipping product analysis for "${ingredientName}": no candidates.`, "INFO", 'LLM');
+        return { ingredientName: ingredientName, analysis: [] };
     }
+    
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to determine if a given product name is a "perfect match" for a required grocery ingredient.
 Classifications:
@@ -276,35 +297,67 @@ Classifications:
 - "substitute": The product is a reasonable alternative but not an exact match (e.g., ingredient "Chicken Breast" and product "Chicken Thighs").
 - "irrelevant": The product is completely wrong (e.g., ingredient "Chicken Breast" and product "Beef Mince").
 
-Analyze the following list of grocery items and provide a JSON response. For each ingredient, analyze its corresponding product candidates.`;
-    const userQuery = `Analyze and classify the products for each item:\n${JSON.stringify(analysisData, null, 2)}`;
+Analyze the following grocery item and its product candidates. Provide a JSON response.`;
+    
+    const userQuery = `Analyze and classify the products for this single ingredient:\n${JSON.stringify({ ingredientName, productCandidates }, null, 2)}`;
     
     // Log the prompt payload
-    log("Product Analysis LLM Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
+    log(`Product Analysis LLM Prompt for "${ingredientName}"`, 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
     
-    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "batchAnalysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "ingredientName": { "type": "STRING" }, "analysis": { type: "ARRAY", items: { type: "OBJECT", properties: { "productName": { "type": "STRING" }, "classification": { "type": "STRING" }, "reason": { "type": "STRING" } } } } } } } } } } };
+    // The schema is now for a SINGLE analysis object, not a batch
+    const payload = { 
+        contents: [{ parts: [{ text: userQuery }] }], 
+        systemInstruction: { parts: [{ text: systemPrompt }] }, 
+        generationConfig: { 
+            responseMimeType: "application/json", 
+            responseSchema: { 
+                type: "OBJECT", 
+                properties: { 
+                    "ingredientName": { "type": "STRING" }, 
+                    "analysis": { 
+                        type: "ARRAY", 
+                        items: { 
+                            type: "OBJECT", 
+                            properties: { 
+                                "productName": { "type": "STRING" }, 
+                                "classification": { "type": "STRING" }, 
+                                "reason": { "type": "STRING" } 
+                            } 
+                        } 
+                    } 
+                } 
+            } 
+        } 
+    };
+
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
+    
     if (!response.ok) {
         const errorBody = await response.text();
+        log(`Product Analysis LLM Error for "${ingredientName}": HTTP ${response.status}`, 'WARN', 'LLM', { error: errorBody });
         throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries. Body: ${errorBody}`);
     }
+    
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    
     if (!jsonText) {
-        log("LLM returned no candidate text. Response object:", 'CRITICAL', 'LLM', result);
+        log(`LLM returned no candidate text for "${ingredientName}".`, 'CRITICAL', 'LLM', result);
         throw new Error("LLM response was empty or malformed.");
     }
     
     // Log the raw LLM response (first 1000 chars)
-    log("Product Analysis LLM Raw Response", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
+    log(`Product Analysis LLM Raw Response for "${ingredientName}"`, 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
     
     try {
-        return JSON.parse(jsonText).batchAnalysis || [];
+        // The response is now the object itself, not wrapped in `batchAnalysis`
+        return JSON.parse(jsonText); 
     } catch (parseError) {
-        log("Failed to parse LLM JSON response.", 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
+        log(`Failed to parse LLM JSON response for "${ingredientName}".`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
         throw new Error(`Failed to parse LLM JSON response: ${parseError.message}`);
     }
 }
+
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
@@ -380,3 +433,4 @@ function calculateCalorieTarget(formData) {
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
 /// ===== API-CALLERS-END ===== ////
+
