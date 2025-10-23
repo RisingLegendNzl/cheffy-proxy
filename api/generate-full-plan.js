@@ -13,10 +13,10 @@ const { fetchPriceData } = require('./price-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// Corrected the typo from 'generativelace' to 'generativelanguage'
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
-const MAX_CONCURRENCY = 5; // Limit for price search parallelism
+const MAX_CONCURRENCY = 5; // Limit for RapidAPI price search
+const MAX_AI_CONCURRENCY = 2; // Separate, lower limit for Gemini calls to avoid 429s
 
 
 /// ===== CONFIG-END ===== ////
@@ -73,7 +73,6 @@ async function fetchWithRetry(url, options, log) {
         try {
             const response = await fetch(url, options);
 
-            // ===- MODIFIED LOGIC -===
             // Success: (200-299)
             if (response.ok) {
                 return response;
@@ -90,7 +89,6 @@ async function fetchWithRetry(url, options, log) {
                 log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from ${url}.`, 'CRITICAL', 'HTTP', { body: errorBody });
                 throw new Error(`API call to ${url} failed with client error ${response.status}. Body: ${errorBody}`);
             }
-            // ===- END OF MODIFIED LOGIC -===
 
         } catch (error) {
             // This will catch network errors (fetch failed) or the error we just threw
@@ -99,7 +97,8 @@ async function fetchWithRetry(url, options, log) {
 
         // Wait with exponential backoff if this isn't the last attempt
         if (attempt < MAX_RETRIES) {
-            const delayTime = Math.pow(2, attempt - 1) * 1000;
+            // Increased base delay from 1000ms to 2000ms for a safer backoff (2s, 4s)
+            const delayTime = Math.pow(2, attempt - 1) * 2000;
             await delay(delayTime);
         }
     }
@@ -216,7 +215,8 @@ module.exports = async function handler(request, response) {
         // Step 3: Make CONCURRENT calls to the AI for analysis, one for each ingredient.
         let fullAnalysis = [];
         if (analysisPayload.length > 0) {
-            log(`Sending ${analysisPayload.length} AI product analysis requests in parallel (limit ${MAX_CONCURRENCY})...`, 'INFO', 'LLM');
+            // Using the new, lower concurrency limit for AI calls
+            log(`Sending ${analysisPayload.length} AI product analysis requests in parallel (limit ${MAX_AI_CONCURRENCY})...`, 'INFO', 'LLM');
             
             const analysisMapper = (payloadItem) => 
                 analyzeSingleIngredientProducts(payloadItem.ingredientName, payloadItem.productCandidates, log)
@@ -227,7 +227,8 @@ module.exports = async function handler(request, response) {
                         return { ingredientName: payloadItem.ingredientName, analysis: [] };
                     });
 
-            fullAnalysis = await concurrentlyMap(analysisPayload, MAX_CONCURRENCY, analysisMapper);
+            // Using the new, lower concurrency limit for AI calls
+            fullAnalysis = await concurrentlyMap(analysisPayload, MAX_AI_CONCURRENCY, analysisMapper);
             log("All product analyses complete.", 'SUCCESS', 'LLM');
         }
         // ===- END OF REFACTORED STEP 3 -===
@@ -318,34 +319,30 @@ Classifications:
 - "substitute": The product is a reasonable alternative but not an exact match (e.g., ingredient "Chicken Breast" and product "Chicken Thighs").
 - "irrelevant": The product is completely wrong (e.g., ingredient "Chicken Breast" and product "Beef Mince").
 
-Analyze the following grocery item and its product candidates. Provide a JSON response.`;
+Analyze the following grocery item's product candidates. Provide a JSON response *as an array* of your analysis.`;
     
-    const userQuery = `Analyze and classify the products for this single ingredient:\n${JSON.stringify({ ingredientName, productCandidates }, null, 2)}`;
+    const userQuery = `Analyze and classify the products for: "${ingredientName}"\nCandidates:\n${JSON.stringify(productCandidates, null, 2)}`;
     
     // Log the prompt payload
     log(`Product Analysis LLM Prompt for "${ingredientName}"`, 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
     
-    // The schema is now for a SINGLE analysis object, not a batch
+    // The schema is now for an ARRAY only, not an object.
+    // This makes the AI's job simpler and prevents JSON corruption.
     const payload = { 
         contents: [{ parts: [{ text: userQuery }] }], 
         systemInstruction: { parts: [{ text: systemPrompt }] }, 
         generationConfig: { 
             responseMimeType: "application/json", 
             responseSchema: { 
-                type: "OBJECT", 
-                properties: { 
-                    "ingredientName": { "type": "STRING" }, 
-                    "analysis": { 
-                        type: "ARRAY", 
-                        items: { 
-                            type: "OBJECT", 
-                            properties: { 
-                                "productName": { "type": "STRING" }, 
-                                "classification": { "type": "STRING" }, 
-                                "reason": { "type": "STRING" } 
-                            } 
-                        } 
-                    } 
+                type: "ARRAY", 
+                items: { 
+                    type: "OBJECT", 
+                    properties: { 
+                        "productName": { "type": "STRING" }, 
+                        "classification": { "type": "STRING" }, 
+                        "reason": { "type": "STRING" } 
+                    },
+                    "required": ["productName", "classification", "reason"]
                 } 
             } 
         } 
@@ -372,8 +369,10 @@ Analyze the following grocery item and its product candidates. Provide a JSON re
     log(`Product Analysis LLM Raw Response for "${ingredientName}"`, 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
     
     try {
-        // The response is now the object itself, not wrapped in `batchAnalysis`
-        return JSON.parse(jsonText); 
+        // jsonText is now *just* the array
+        const analysisArray = JSON.parse(jsonText); 
+        // Manually re-wrap it into the object the route handler expects
+        return { ingredientName: ingredientName, analysis: analysisArray || [] };
     } catch (parseError) {
         log(`Failed to parse LLM JSON response for "${ingredientName}".`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
         throw new Error(`Failed to parse LLM JSON response: ${parseError.message}`);
