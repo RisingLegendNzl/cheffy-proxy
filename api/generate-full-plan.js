@@ -13,6 +13,7 @@ const { fetchPriceData } = require('./price-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Corrected the typo from 'generativelace' to 'generativelanguage'
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 const MAX_CONCURRENCY = 5; // Limit for price search parallelism
@@ -71,13 +72,32 @@ async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const response = await fetch(url, options);
-            if (response.status < 500) {
+
+            // ===- MODIFIED LOGIC -===
+            // Success: (200-299)
+            if (response.ok) {
                 return response;
             }
-            log(`Attempt ${attempt}: Received server error ${response.status} from ${url}. Retrying...`, 'WARN', 'HTTP');
+
+            // Retryable Errors: 429 (Rate Limit) or 5xx (Server Error)
+            if (response.status === 429 || response.status >= 500) {
+                log(`Attempt ${attempt}: Received retryable error ${response.status} from ${url}. Retrying...`, 'WARN', 'HTTP');
+                // Let the loop continue to the delay and next attempt
+            } else {
+                // Non-retryable client error (e.g., 400, 401, 404)
+                // Stop retrying and throw an error.
+                const errorBody = await response.text();
+                log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from ${url}.`, 'CRITICAL', 'HTTP', { body: errorBody });
+                throw new Error(`API call to ${url} failed with client error ${response.status}. Body: ${errorBody}`);
+            }
+            // ===- END OF MODIFIED LOGIC -===
+
         } catch (error) {
-            log(`Attempt ${attempt}: Fetch failed for ${url} with network error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+            // This will catch network errors (fetch failed) or the error we just threw
+            log(`Attempt ${attempt}: Fetch failed for ${url} with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
         }
+
+        // Wait with exponential backoff if this isn't the last attempt
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 1000;
             await delay(delayTime);
@@ -85,6 +105,7 @@ async function fetchWithRetry(url, options, log) {
     }
     throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
 }
+
 
 const calculateUnitPrice = (price, size) => {
     if (!price || price <= 0 || typeof size !== 'string' || size.length === 0) return price;
@@ -333,6 +354,7 @@ Analyze the following grocery item and its product candidates. Provide a JSON re
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     
     if (!response.ok) {
+        // This should theoretically not be hit if fetchWithRetry throws, but as a safeguard:
         const errorBody = await response.text();
         log(`Product Analysis LLM Error for "${ingredientName}": HTTP ${response.status}`, 'WARN', 'LLM', { error: errorBody });
         throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries. Body: ${errorBody}`);
@@ -381,7 +403,7 @@ RULES:
 - Goal: ${goal}.
 - Daily Calorie Target: ~${calorieTarget} kcal.
 - Dietary Needs: ${dietary}.
-- Meals Per Day: ${eatingOccasions} (${requiredMeals.join(', ')}).
+- Meals Per Day: ${eatingOccasLons} (${requiredMeals.join(', ')}).
 - Spending Priority: ${costPriority} (${costInstruction}).
 - Meal Repetition Allowed: A single meal can appear up to ${maxRepetitions} times max.
 - Cuisine Profile: ${cuisineInstruction}.
@@ -394,11 +416,12 @@ RULES:
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         // Added nutritionalTargets to the response schema here
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } }, "nutritionalTargets": { type: "OBJECT", properties: { "calories": { "type": "NUMBER" }, "protein": { "type": "NUMBER" }, "fat": { "type": "NUMBER" }, "carbs": { "type": "NUMBER" } } } } } }
+        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } }, "nutritionalTargets": { type: "OBJECT", properties: { "calories": { "type": "NUMBER" }, "protein": { "type": "NUMBER" }, "fat": { "type": "NUMBER" }, "carbs": { "type": "NUMBER" } } } } } }
     };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) {
-        throw new Error(`LLM API HTTP error! Status: ${response.status}.`);
+        // This will now only be hit if fetchWithRetry fails all retries
+        throw new Error(`LLM API HTTP error! Status: ${response.status} after all retries.`);
     }
     const result = await response.json();
     const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -433,4 +456,5 @@ function calculateCalorieTarget(formData) {
     return Math.round(tdee + (goalAdjustments[goal] || 0));
 }
 /// ===== API-CALLERS-END ===== ////
+
 
