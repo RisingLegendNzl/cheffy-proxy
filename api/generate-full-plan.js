@@ -13,7 +13,7 @@ const { fetchPriceData } = require('./price-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL_BASE = 'https://generativelace.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 const MAX_CONCURRENCY = 5; // Limit for price search parallelism
 
