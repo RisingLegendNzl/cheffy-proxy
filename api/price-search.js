@@ -12,13 +12,14 @@ const DELAY_MS = 2000; // Increased base delay to 2 seconds for more aggressive 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * Core reusable logic for fetching price data. This function is "pure"
- * and does not depend on Vercel's request/response objects.
+ * Core reusable logic for fetching price data.
+ * Now accepts a 'page' argument.
  * @param {string} store - The store to search ('Coles' or 'Woolworths').
  * @param {string} query - The product search query.
- * @returns {Promise<Object>} A promise that resolves to an object containing either 'results' (Array) or 'error' (Object).
+ * @param {number} [page=1] - The page number to fetch.
+ * @returns {Promise<Object>} A promise that resolves to the full API response (including results, total_pages, etc.).
  */
-async function fetchPriceData(store, query) {
+async function fetchPriceData(store, query, page = 1) {
     if (!RAPID_API_KEY) {
         console.error('Configuration Error: RAPIDAPI_KEY is not set.');
         return { error: { message: 'Server configuration error: API key missing.', status: 500 } };
@@ -33,16 +34,24 @@ async function fetchPriceData(store, query) {
 
     const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
     
+    // Define params for the API call, including pagination
+    const apiParams = {
+        query,
+        page: page.toString(),
+        page_size: '20' // Fetch 20 items per page
+    };
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         // --- Log the specific request details before execution (as requested) ---
         console.log(JSON.stringify({
             timestamp: new Date().toISOString(),
             level: 'INFO',
             tag: 'RAPID_REQUEST',
-            message: `Attempt ${attempt + 1}/${MAX_RETRIES}: Requesting product data.`,
+            message: `Attempt ${attempt + 1}/${MAX_RETRIES}: Requesting product data (Page ${page}).`,
             data: {
                 store: store,
                 query: query,
+                page: page,
                 endpoint: endpointUrl,
                 host: host
             }
@@ -50,7 +59,7 @@ async function fetchPriceData(store, query) {
         
         try {
             const rapidResp = await axios.get(endpointUrl, {
-                params: { query },
+                params: apiParams, // Use the new params object
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
                 timeout: 30000 
             });
@@ -60,15 +69,17 @@ async function fetchPriceData(store, query) {
                 timestamp: new Date().toISOString(),
                 level: 'SUCCESS',
                 tag: 'RAPID_RESPONSE',
-                message: `Successfully fetched products for "${query}".`,
+                message: `Successfully fetched products for "${query}" (Page ${page}).`,
                 data: {
                     count: rapidResp.data.results ? rapidResp.data.results.length : 0,
-                    status: rapidResp.status
+                    status: rapidResp.status,
+                    currentPage: rapidResp.data.current_page,
+                    totalPages: rapidResp.data.total_pages
                 }
             }));
             
-            // Success: return results
-            return { results: rapidResp.data.results || [] };
+            // Success: return the *full* data object
+            return rapidResp.data;
 
         } catch (error) {
             const status = error.response?.status;
@@ -77,7 +88,7 @@ async function fetchPriceData(store, query) {
             if (isRateLimitOrNetworkError) {
                 const delayTime = DELAY_MS * Math.pow(2, attempt);
                 // Log warning to Vercel console
-                console.warn(`RapidAPI Execution Warning for "${query}" (Attempt ${attempt + 1}/${MAX_RETRIES}): Status ${status || 'Network Error'}. Retrying in ${delayTime}ms...`);
+                console.warn(`RapidAPI Execution Warning for "${query}" (Page ${page}, Attempt ${attempt + 1}/${MAX_RETRIES}): Status ${status || 'Network Error'}. Retrying in ${delayTime}ms...`);
                 
                 if (attempt < MAX_RETRIES - 1) {
                     await delay(delayTime);
@@ -97,23 +108,32 @@ async function fetchPriceData(store, query) {
                 data: {
                     store: store,
                     query: query,
+                    page: page,
                     status: status || 504, 
                     details: error.message
                 }
             }));
 
+            // Return an error object that matches the structure of a successful response
+            // This simplifies error handling in the orchestrator
             return { 
                 error: { 
                     message: finalErrorMessage, 
                     status: status || 504, 
                     details: error.message 
-                } 
+                },
+                results: [],
+                total_pages: 0
             };
         }
     }
     
     // Fallback for safety
-    return { error: { message: `Price search failed for unknown reason after ${MAX_RETRIES} attempts.`, status: 500 } };
+    return { 
+        error: { message: `Price search failed for unknown reason after ${MAX_RETRIES} attempts.`, status: 500 },
+        results: [],
+        total_pages: 0
+    };
 }
 
 /**
@@ -130,12 +150,15 @@ module.exports = async (req, res) => {
     }
 
     try {
-        const { store, query } = req.query;
-        const result = await fetchPriceData(store, query);
+        const { store, query, page } = req.query;
+        // Pass all query params to the function
+        const result = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1);
+        
         if (result.error) {
             return res.status(result.error.status || 500).json(result.error);
         }
-        return res.status(200).json({ results: result.results });
+        // Return the full result object
+        return res.status(200).json(result);
     } catch (error) {
         return res.status(500).json({ error: error.message });
     }
