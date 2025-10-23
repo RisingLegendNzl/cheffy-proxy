@@ -1,5 +1,9 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
+// This file is now MUCH FASTER. It only:
+// 1. Gets the "Smarter Blueprint" (Meal Plan + Specific Search Queries)
+// 2. Gets the raw prices from RapidAPI.
+// It does NOT perform AI analysis. That is now handled on-demand by /api/analyze-ingredient.js
 
 /// ===== IMPORTS-START ===== \\\\
 
@@ -16,7 +20,6 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3;
 const MAX_CONCURRENCY = 5; // Limit for RapidAPI price search
-const MAX_AI_CONCURRENCY = 2; // Separate, lower limit for Gemini calls to avoid 429s
 
 
 /// ===== CONFIG-END ===== ////
@@ -167,7 +170,7 @@ module.exports = async function handler(request, response) {
         const formData = request.body;
         const { store } = formData;
         
-        log("Phase 1: Generating Blueprint...", 'INFO', 'PHASE');
+        log("Phase 1: Generating Smarter Blueprint...", 'INFO', 'PHASE');
         const calorieTarget = calculateCalorieTarget(formData);
         log(`Calculated daily calorie target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
         
@@ -203,51 +206,19 @@ module.exports = async function handler(request, response) {
         const allPriceResults = await concurrentlyMap(ingredientPlan, MAX_CONCURRENCY, priceResultsMapper);
         log("All price searches complete.", 'SUCCESS', 'HTTP');
 
-        // Step 2: Prepare payload for AI analysis.
-        const analysisPayload = allPriceResults
-            .filter(result => result.rawProducts.length > 0)
-            .map(result => ({
-                ingredientName: result.item.originalIngredient,
-                productCandidates: result.rawProducts.map(p => p.product_name || "Unknown")
-            }));
-
-        // ===- STEP 3: REFACTORED -===
-        // Step 3: Make CONCURRENT calls to the AI for analysis, one for each ingredient.
-        let fullAnalysis = [];
-        if (analysisPayload.length > 0) {
-            // Using the new, lower concurrency limit for AI calls
-            log(`Sending ${analysisPayload.length} AI product analysis requests in parallel (limit ${MAX_AI_CONCURRENCY})...`, 'INFO', 'LLM');
-            
-            const analysisMapper = (payloadItem) => 
-                analyzeSingleIngredientProducts(payloadItem.ingredientName, payloadItem.productCandidates, log)
-                    .catch(err => {
-                        // This catch block ensures one failed analysis doesn't stop all others
-                        log(`AI analysis failed for "${payloadItem.ingredientName}": ${err.message}`, 'CRITICAL', 'LLM');
-                        // Return a fallback structure so `fullAnalysis.find` doesn't break
-                        return { ingredientName: payloadItem.ingredientName, analysis: [] };
-                    });
-
-            // Using the new, lower concurrency limit for AI calls
-            fullAnalysis = await concurrentlyMap(analysisPayload, MAX_AI_CONCURRENCY, analysisMapper);
-            log("All product analyses complete.", 'SUCCESS', 'LLM');
-        }
-        // ===- END OF REFACTORED STEP 3 -===
+        // ===- STEP 3: REMOVED -===
+        // The AI Analysis step is GONE. We are skipping straight to assembling the results
+        // based on the (now smarter) search queries.
+        log("AI analysis step skipped. Proceeding directly to results assembly.", 'INFO', 'SYSTEM');
         
-        // Step 4: Assemble final results without nutrition data.
+        // Step 4: Assemble final results without AI analysis.
         log("Assembling final results...", 'INFO', 'SYSTEM');
         const finalResults = {};
         allPriceResults.forEach(({ item, rawProducts }) => {
             const ingredientKey = item.originalIngredient;
             
-            // This logic remains the same. It finds the analysis for the specific ingredient
-            // in the `fullAnalysis` array that we built with concurrentlyMap.
-            const analysisForItem = fullAnalysis.find(a => a.ingredientName === ingredientKey);
-            
-            // Filter to only include 'perfect' matches from AI analysis
-            const perfectMatchNames = new Set((analysisForItem?.analysis || []).filter(r => r.classification === 'perfect').map(r => r.productName));
-            
+            // We no longer have `perfectMatchNames`. We just process all raw products.
             const finalProducts = rawProducts
-                .filter(p => perfectMatchNames.has(p.product_name)) 
                 .map(p => ({
                     name: p.product_name,
                     brand: p.product_brand,
@@ -256,17 +227,19 @@ module.exports = async function handler(request, response) {
                     url: p.url,
                     barcode: p.barcode, 
                     unit_price_per_100: calculateUnitPrice(p.current_price, p.product_size),
-                })).filter(p => p.price > 0);
+                })).filter(p => p.price > 0); // Still filter out items with no price
 
-            // Determine the cheapest of the approved products
+            // Determine the "dumb" cheapest product from the raw (but better-queried) list
             const cheapest = finalProducts.length > 0 ? finalProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, finalProducts[0]) : null;
 
             finalResults[ingredientKey] = {
                 ...item,
-                // If products were found, use them. If not, use mock data and set a clear "failed" source.
+                // allProducts is now the FULL raw list for the frontend to analyze on-demand
                 allProducts: finalProducts.length > 0 ? finalProducts : [{...MOCK_PRODUCT_TEMPLATE, name: `${ingredientKey} (Not Found)`}],
+                // currentSelectionURL is the "dumb" cheapest
                 currentSelectionURL: cheapest ? cheapest.url : MOCK_PRODUCT_TEMPLATE.url,
                 userQuantity: 1,
+                // Source is 'discovery' if we found *anything*, 'failed' if not.
                 source: finalProducts.length > 0 ? 'discovery' : 'failed'
             };
         });
@@ -298,87 +271,7 @@ module.exports = async function handler(request, response) {
 
 // --- API-CALLING FUNCTIONS ---
 
-/**
- * Analyzes a list of product candidates for a SINGLE ingredient.
- * This is designed to be called concurrentlyMap.
- * @param {string} ingredientName - The name of the ingredient (e.g., "Chicken Breast").
- * @param {string[]} productCandidates - An array of product names (e.g., ["Woolworths Chicken...", "Steggles Chicken..."]).
- * @param {Function} log - The logger function.
- * @returns {Promise<Object>} A promise that resolves to { ingredientName, analysis: [...] }.
- */
-async function analyzeSingleIngredientProducts(ingredientName, productCandidates, log) {
-    if (!productCandidates || productCandidates.length === 0) {
-        log(`Skipping product analysis for "${ingredientName}": no candidates.`, "INFO", 'LLM');
-        return { ingredientName: ingredientName, analysis: [] };
-    }
-    
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const systemPrompt = `You are a specialized AI Grocery Analyst. Your task is to determine if a given product name is a "perfect match" for a required grocery ingredient.
-Classifications:
-- "perfect": The product is exactly what was asked for (e.g., ingredient "Chicken Breast" and product "Woolworths RSPCA Approved Chicken Breast Fillets"). Brand names, sizes, or minor descriptors like "fresh" or "frozen" are acceptable.
-- "substitute": The product is a reasonable alternative but not an exact match (e.g., ingredient "Chicken Breast" and product "Chicken Thighs").
-- "irrelevant": The product is completely wrong (e.g., ingredient "Chicken Breast" and product "Beef Mince").
-
-Analyze the following grocery item's product candidates. Provide a JSON response *as an array* of your analysis.`;
-    
-    const userQuery = `Analyze and classify the products for: "${ingredientName}"\nCandidates:\n${JSON.stringify(productCandidates, null, 2)}`;
-    
-    // Log the prompt payload
-    log(`Product Analysis LLM Prompt for "${ingredientName}"`, 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
-    
-    // The schema is now for an ARRAY only, not an object.
-    // This makes the AI's job simpler and prevents JSON corruption.
-    const payload = { 
-        contents: [{ parts: [{ text: userQuery }] }], 
-        systemInstruction: { parts: [{ text: systemPrompt }] }, 
-        generationConfig: { 
-            responseMimeType: "application/json", 
-            responseSchema: { 
-                type: "ARRAY", 
-                items: { 
-                    type: "OBJECT", 
-                    properties: { 
-                        "productName": { "type": "STRING" }, 
-                        "classification": { "type": "STRING" }, 
-                        "reason": { "type": "STRING" } 
-                    },
-                    "required": ["productName", "classification", "reason"]
-                } 
-            } 
-        } 
-    };
-
-    const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
-    
-    if (!response.ok) {
-        // This should theoretically not be hit if fetchWithRetry throws, but as a safeguard:
-        const errorBody = await response.text();
-        log(`Product Analysis LLM Error for "${ingredientName}": HTTP ${response.status}`, 'WARN', 'LLM', { error: errorBody });
-        throw new Error(`Product Analysis LLM Error: HTTP ${response.status} after all retries. Body: ${errorBody}`);
-    }
-    
-    const result = await response.json();
-    const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-    
-    if (!jsonText) {
-        log(`LLM returned no candidate text for "${ingredientName}".`, 'CRITICAL', 'LLM', result);
-        throw new Error("LLM response was empty or malformed.");
-    }
-    
-    // Log the raw LLM response (first 1000 chars)
-    log(`Product Analysis LLM Raw Response for "${ingredientName}"`, 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
-    
-    try {
-        // jsonText is now *just* the array
-        const analysisArray = JSON.parse(jsonText); 
-        // Manually re-wrap it into the object the route handler expects
-        return { ingredientName: ingredientName, analysis: analysisArray || [] };
-    } catch (parseError) {
-        log(`Failed to parse LLM JSON response for "${ingredientName}".`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message });
-        throw new Error(`Failed to parse LLM JSON response: ${parseError.message}`);
-    }
-}
-
+// REMOVED `analyzeSingleIngredientProducts` function. It now lives in /api/analyze-ingredient.js
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
@@ -388,14 +281,22 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, log) {
     const costInstruction = { 'Extreme Budget': "STRICTLY prioritize the lowest unit cost, most basic ingredients (e.g., rice, beans, oats, basic vegetables). Avoid expensive meats, pre-packaged items, and specialty goods.", 'Quality Focus': "Prioritize premium quality, organic, free-range, and branded ingredients where appropriate. Cost is a secondary concern to quality and health benefits.", 'Best Value': "Balance unit cost with general quality. Use a mix of budget-friendly staples and good quality fresh produce and proteins. Avoid premium brands unless necessary." }[costPriority] || "Balance unit cost with general quality...";
     const maxRepetitions = { 'High Repetition': 3, 'Low Repetition': 1, 'Balanced Variety': 2 }[mealVariety] || 2;
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus recipes around: ${cuisine}.` : 'Maintain a neutral, balanced global flavor profile.';
+    
+    // ===- MODIFIED PROMPT -===
+    // The prompt is now much smarter about the 'searchQuery'.
     const systemPrompt = `You are an expert dietitian and chef creating a practical, cost-effective grocery and meal plan.
 RULES:
 1.  Generate a complete meal plan for the specified number of days.
 2.  Generate a consolidated shopping list of unique ingredients required for the entire plan.
-3.  For each ingredient, provide a 'searchQuery' which MUST be a simple, generic term suitable for a grocery store search engine (e.g., "chicken breast", "rolled oats", "mixed berries"). DO NOT include quantities or brands in the searchQuery.
-4.  Estimate the total grams required for each ingredient across the entire plan.
-5.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
-6.  Adhere strictly to all user-provided constraints (dietary, cost, variety, etc.).`;
+3.  For each ingredient, provide a 'searchQuery'. This query is CRITICAL. It MUST be a hyper-specific, optimized search term guaranteed to return the correct product type from a grocery store search engine.
+    - BAD (too generic): "chicken", "rice", "oats", "tomatoes"
+    - GOOD (specific): "chicken breast fillets", "medium grain white rice", "traditional rolled oats", "canned diced tomatoes 400g"
+4.  For produce (fruits, vegetables), prioritize store-brand queries if appropriate (e.g., "Woolworths bananas", "Coles carrots").
+5.  Estimate the total grams required for each ingredient across the entire plan.
+6.  Provide a user-friendly 'quantityUnits' string (e.g., "1 Large Jar", "500g Bag", "2 Cans").
+7.  Adhere strictly to all user-provided constraints (dietary, cost, variety, etc.).`;
+    // ===- END MODIFIED PROMPT -===
+
     const userQuery = `Generate the ${days}-day plan for ${name || 'Guest'}.
 - User Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg.
 - Activity: ${formData.activityLevel}.
@@ -415,7 +316,7 @@ RULES:
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         // Added nutritionalTargets to the response schema here
-        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } }, "nutritionalTargets": { type: "OBJECT", properties: { "calories": { "type": "NUMBER" }, "protein": { "type": "NUMBER" }, "fat": { "type": "NUMBER" }, "carbs": { "type": "NUMBER" } } } } } }
+        generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "searchQuery": { "type": "STRING" }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } } } }, "mealPlan": { type: "ARRAY", items: { type:T: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { "type": "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } }, "nutritionalTargets": { type: "OBJECT", properties: { "calories": { "type": "NUMBER" }, "protein": { "type": "NUMBER" }, "fat": { "type": "NUMBER" }, "carbs": { "type": "NUMBER" } } } } } }
     };
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
     if (!response.ok) {
