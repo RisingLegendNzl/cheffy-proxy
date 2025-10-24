@@ -10,7 +10,8 @@ const CACHE_PREFIX_NUTRI = 'nutri';
 
 // --- CONSTANT FOR UNIT CORRECTION ---
 const KJ_TO_KCAL_FACTOR = 4.184;
-const KCAL_CONVERSION_THRESHOLD = 100.0; // Assume anything >100 kcal/100g is a mislabeled kJ for low-fat items.
+// --- MODIFICATION: Removed faulty threshold ---
+// const KCAL_CONVERSION_THRESHOLD = 100.0; 
 // ---
 
 // Keep track of ongoing background refreshes within this invocation
@@ -67,25 +68,26 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
         const data = await apiResponse.json();
         const product = barcode ? data.product : (data.products && data.products[0]);
 
-        if (product && product.nutriments && product.nutriments['energy-kcal_100g']) {
+        // --- MODIFICATION START: Robust calorie logic ---
+        if (product && product.nutriments) {
             const nutriments = product.nutriments;
             let calories = parseFloat(nutriments['energy-kcal_100g'] || 0);
-            
-            // --- NEW: PROACTIVE UNIT CONVERSION GUARD ---
-            // If the calorie value is suspiciously high (>100 kcal/100g for a standard product),
-            // assume it's a mislabeled kJ value and correct it.
-            if (calories > KCAL_CONVERSION_THRESHOLD) {
-                const convertedCalories = calories / KJ_TO_KCAL_FACTOR;
-                log(`Suspect Calorie Value (${calories} kcal/100g). Applying kJ conversion: ${convertedCalories.toFixed(1)} kcal/100g.`, 'WARN', 'CALORIE_CONVERT', { original: calories, converted: convertedCalories });
-                calories = convertedCalories;
+
+            // If kcal is missing or 0, try to calculate from kJ
+            if (!calories || calories === 0) {
+                const kj = parseFloat(nutriments['energy-kj_100g'] || 0);
+                if (kj && kj > 0) {
+                    calories = kj / KJ_TO_KCAL_FACTOR;
+                    log(`Used kJ fallback for ${identifierType}: ${identifier}. ${kj}kJ -> ${calories.toFixed(0)}kcal`, 'INFO', 'CALORIE_CONVERT');
+                }
             }
-            // --- END NEW GUARD ---
+            // --- MODIFICATION END ---
 
             log(`Successfully fetched nutrition for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
             return {
                 status: 'found',
                 servingUnit: product.nutrition_data_per || '100g',
-                calories: calories, // Use the potentially corrected value
+                calories: calories, // Use the new robust value
                 protein: parseFloat(nutriments.proteins_100g || 0),
                 fat: parseFloat(nutriments.fat_100g || 0),
                 saturatedFat: parseFloat(nutriments['saturated-fat_100g'] || 0),
@@ -93,7 +95,6 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
                 sugars: parseFloat(nutriments.sugars_100g || 0),
                 fiber: parseFloat(nutriments.fiber_100g || 0),
                 sodium: parseFloat(nutriments.sodium_100g || 0),
-                // --- MODIFICATION: Added ingredients list ---
                 ingredientsText: product.ingredients_text || null
             };
         } else {
@@ -122,7 +123,7 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
     // Fire and forget
     (async () => {
         try {
-            const freshData = await _fetchNutritionDataFromApi( barcode, query, log);
+            const freshData = await _fetchNutritionDataFromApi(barcode, query, log);
             // Cache both 'found' and 'not_found' results
             if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
                 await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
@@ -250,4 +251,5 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
+
 
