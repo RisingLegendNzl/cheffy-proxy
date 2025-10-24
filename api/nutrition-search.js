@@ -8,6 +8,11 @@ const TTL_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 7;    // 7 days
 const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;     // Stale While Revalidate after 2 days
 const CACHE_PREFIX_NUTRI = 'nutri';
 
+// --- CONSTANT FOR UNIT CORRECTION ---
+const KJ_TO_KCAL_FACTOR = 4.184;
+const KCAL_CONVERSION_THRESHOLD = 100.0; // Assume anything >100 kcal/100g is a mislabeled kJ for low-fat items.
+// ---
+
 // Keep track of ongoing background refreshes within this invocation
 const inflightRefreshes = new Set();
 
@@ -64,11 +69,23 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
 
         if (product && product.nutriments && product.nutriments['energy-kcal_100g']) {
             const nutriments = product.nutriments;
+            let calories = parseFloat(nutriments['energy-kcal_100g'] || 0);
+            
+            // --- NEW: PROACTIVE UNIT CONVERSION GUARD ---
+            // If the calorie value is suspiciously high (>100 kcal/100g for a standard product),
+            // assume it's a mislabeled kJ value and correct it.
+            if (calories > KCAL_CONVERSION_THRESHOLD) {
+                const convertedCalories = calories / KJ_TO_KCAL_FACTOR;
+                log(`Suspect Calorie Value (${calories} kcal/100g). Applying kJ conversion: ${convertedCalories.toFixed(1)} kcal/100g.`, 'WARN', 'CALORIE_CONVERT', { original: calories, converted: convertedCalories });
+                calories = convertedCalories;
+            }
+            // --- END NEW GUARD ---
+
             log(`Successfully fetched nutrition for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
             return {
                 status: 'found',
                 servingUnit: product.nutrition_data_per || '100g',
-                calories: parseFloat(nutriments['energy-kcal_100g'] || 0),
+                calories: calories, // Use the potentially corrected value
                 protein: parseFloat(nutriments.proteins_100g || 0),
                 fat: parseFloat(nutriments.fat_100g || 0),
                 saturatedFat: parseFloat(nutriments['saturated-fat_100g'] || 0),
