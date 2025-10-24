@@ -1,10 +1,10 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 20 Pipeline + ENHANCED LOGGING + Typo Fix
+// Mark 21 Pipeline + AI NUTRITION FALLBACK
 // 1. Creative AI (Optional)
-// 2. Technical AI (Plan, 3 Queries, Keywords, Size, Total Grams) - Log full output
+// 2. Technical AI (Plan, 3 Queries, Keywords, Size, Total Grams, AI Nutrition Est.) - Log full output
 // 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist) - Log queries, raw results, checklist reasons
-// 4. Nutrition Calculation - Log weekly totals & days
+// 4. Nutrition Calculation (with AI Fallback) - Log weekly totals & days
 
 /// ===== IMPORTS-START ===== \\\\
 
@@ -373,6 +373,7 @@ module.exports = async function handler(request, response) {
             // Add try-catch within the mapped function for better error isolation
             try {
                 const ingredientKey = ingredient.originalIngredient;
+                // --- PASS AI NUTRITION DATA THROUGH ---
                 const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
                 let foundProduct = null;
                 let bestScoreSoFar = -1;
@@ -495,6 +496,7 @@ module.exports = async function handler(request, response) {
         log("Phase 4: Nutrition Calculation...", 'INFO', 'PHASE');
         let calculatedTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
         const itemsToFetchNutrition = [];
+        
         for (const key in finalResults) {
             const result = finalResults[key];
             // Ensure result exists and is not an error object before accessing properties
@@ -505,37 +507,82 @@ module.exports = async function handler(request, response) {
                         ingredientKey: key,
                         barcode: selected.barcode,
                         query: selected.name, // Use selected product name for OFF query
-                        grams: result.totalGramsRequired >= 0 ? result.totalGramsRequired : 0 // Ensure grams is non-negative
+                        grams: result.totalGramsRequired >= 0 ? result.totalGramsRequired : 0, // Ensure grams is non-negative
+                        // --- ADD AI FALLBACK DATA TO THE PAYLOAD ---
+                        aiEstCaloriesPer100g: result.aiEstCaloriesPer100g,
+                        aiEstProteinPer100g: result.aiEstProteinPer100g,
+                        aiEstFatPer100g: result.aiEstFatPer100g,
+                        aiEstCarbsPer100g: result.aiEstCarbsPer100g
                     });
                 }
+            }
+            // --- NEW: Add failed items to nutrition calc if they have AI fallback data ---
+            else if (result && (result.source === 'failed' || result.source === 'error')) {
+                 if (result.totalGramsRequired > 0 && typeof result.aiEstCaloriesPer100g === 'number') {
+                     log(`[${key}] Market Run failed, adding to nutrition queue with AI fallback.`, 'WARN', 'MARKET_RUN');
+                     itemsToFetchNutrition.push({
+                         ingredientKey: key,
+                         barcode: null, // No barcode, will force fallback
+                         query: null, // No query, will force fallback
+                         grams: result.totalGramsRequired,
+                         aiEstCaloriesPer100g: result.aiEstCaloriesPer100g,
+                         aiEstProteinPer100g: result.aiEstProteinPer100g,
+                         aiEstFatPer100g: result.aiEstFatPer100g,
+                         aiEstCarbsPer100g: result.aiEstCarbsPer100g
+                     });
+                 }
             }
         }
 
 
         if (itemsToFetchNutrition.length > 0) {
-            log(`Fetching nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
+            log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) =>
+                // --- Only fetch if we have a barcode or query ---
+                (item.barcode || item.query) ? 
                 fetchNutritionData(item.barcode, item.query) // Query OFF using barcode first, then name
                     .then(nut => ({ ...item, nut }))
                     .catch(err => {
                         log(`Nutri fetch fail ${item.ingredientKey}: ${err.message}`, 'WARN', 'HTTP');
                         return { ...item, nut: { status: 'not_found' } }; // Ensure nut object exists on error
                     })
+                : Promise.resolve({ ...item, nut: { status: 'not_found' } }) // --- Instantly resolve if no barcode/query (i.e., failed market run item)
             );
-            log("Nutrition fetch complete.", 'SUCCESS', 'HTTP');
+            log("Nutrition fetch/calc complete.", 'SUCCESS', 'HTTP');
 
             let weeklyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+            
             nutritionResults.forEach(item => {
-                // Add null check for item.nut
-                if (item.nut?.status === 'found' && item.grams > 0) {
-                    const nut = item.nut;
-                    // Add checks for potentially null/undefined nutrition fields from OFF
+                // Skip if no grams
+                if (!item.grams || item.grams <= 0) return; 
+
+                const nut = item.nut;
+
+                if (nut?.status === 'found') {
+                    // --- 1. Use Live Data (Priority 1) ---
                     weeklyTotals.calories += ((nut.calories || 0) / 100) * item.grams;
                     weeklyTotals.protein += ((nut.protein || 0) / 100) * item.grams;
                     weeklyTotals.fat += ((nut.fat || 0) / 100) * item.grams;
                     weeklyTotals.carbs += ((nut.carbs || 0) / 100) * item.grams;
-                } else if (item.grams > 0) { // Only log skip if grams > 0
-                    log(`Skipping nutrition for ${item.ingredientKey}: Data not found/zero grams.`, 'INFO', 'CALC');
+                } else if (
+                    // --- 2. Use AI Fallback Data (Priority 2) ---
+                    typeof item.aiEstCaloriesPer100g === 'number' &&
+                    typeof item.aiEstProteinPer100g === 'number' &&
+                    typeof item.aiEstFatPer100g === 'number' &&
+                    typeof item.aiEstCarbsPer100g === 'number'
+                ) {
+                    log(`Using AI nutrition fallback for ${item.ingredientKey}.`, 'WARN', 'CALC', { 
+                        item: item.ingredientKey, 
+                        grams: item.grams,
+                        source: nut?.status ? `OFF status: ${nut.status}` : 'Market Run Fail' 
+                    });
+                    weeklyTotals.calories += (item.aiEstCaloriesPer100g / 100) * item.grams;
+                    weeklyTotals.protein += (item.aiEstProteinPer100g / 100) * item.grams;
+                    weeklyTotals.fat += (item.aiEstFatPer100g / 100) * item.grams;
+                    weeklyTotals.carbs += (item.aiEstCarbsPer100g / 100) * item.grams;
+                } else {
+                    // --- 3. Skip (No Live, No Fallback) ---
+                    log(`Skipping nutrition for ${item.ingredientKey}: Data not found and no AI fallback.`, 'INFO', 'CALC');
                 }
             });
 
@@ -588,15 +635,71 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (Mark 19) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Null if impossible. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[2-4] ESSENTIAL, CORE, lowercase keywords for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"]). 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). Empty array ok. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. NO 'nutritionalTargets'.`;
+    // --- PROMPT (Mark 21 - AI Nutrition Fallback) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Null if impossible. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[2-4] ESSENTIAL, CORE, lowercase keywords for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"]). 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). Empty array ok. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. 10. NO 'nutritionalTargets'.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
-    // Schema (Mark 19)
-    const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] }, generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "tightQuery": { "type": "STRING", nullable: true }, "normalQuery": { "type": "STRING" }, "wideQuery": { "type": "STRING", nullable: true }, "requiredWords": { type: "ARRAY", items: { "type": "STRING" } }, "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } }, "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } }, required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "totalGramsRequired", "quantityUnits"] } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } }, required: ["ingredients"] } } };
+    // Schema (Mark 21 - Added AI Nutrition fields)
+    const payload = { 
+        contents: [{ parts: [{ text: userQuery }] }], 
+        systemInstruction: { parts: [{ text: systemPrompt }] }, 
+        generationConfig: { 
+            responseMimeType: "application/json", 
+            responseSchema: { 
+                type: "OBJECT", 
+                properties: { 
+                    "ingredients": { 
+                        type: "ARRAY", 
+                        items: { 
+                            type: "OBJECT", 
+                            properties: { 
+                                "originalIngredient": { "type": "STRING" }, 
+                                "category": { "type": "STRING" }, 
+                                "tightQuery": { "type": "STRING", nullable: true }, 
+                                "normalQuery": { "type": "STRING" }, 
+                                "wideQuery": { "type": "STRING", nullable: true }, 
+                                "requiredWords": { type: "ARRAY", items: { "type": "STRING" } }, 
+                                "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } }, 
+                                "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true }, 
+                                "totalGramsRequired": { "type": "NUMBER" }, 
+                                "quantityUnits": { "type": "STRING" },
+                                // --- NEW FALLBACK FIELDS ---
+                                "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true }, 
+                                "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
+                                "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
+                                "aiEstCarbsPer100g": { "type": "NUMBER", nullable: true }
+                            }, 
+                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "totalGramsRequired", "quantityUnits"] 
+                        } 
+                    }, 
+                    "mealPlan": { 
+                        type: "ARRAY", 
+                        items: { 
+                            type: "OBJECT", 
+                            properties: { 
+                                "day": { "type": "NUMBER" }, 
+                                "meals": { 
+                                    type: "ARRAY", 
+                                    items: { 
+                                        type: "OBJECT", 
+                                        properties: { 
+                                            "type": { "type": "STRING" }, 
+                                            "name": { "type": "STRING" }, 
+                                            "description": { "type": "STRING" } 
+                                        } 
+                                    } 
+                                } 
+                            } 
+                        } 
+                    } 
+                }, 
+                required: ["ingredients"] 
+            } 
+        } 
+    };
 
     try {
         const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
@@ -623,6 +726,8 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
                  if (!Array.isArray(firstIng?.requiredWords) || firstIng?.requiredWords.length === 0) { log("Validation WARN: First ingredient missing/empty 'requiredWords'.", 'WARN', 'LLM', firstIng); }
                  if (!Array.isArray(firstIng?.negativeKeywords)) { log("Validation WARN: First ingredient missing 'negativeKeywords'.", 'WARN', 'LLM', firstIng); } // Check new field
                  if (typeof firstIng?.totalGramsRequired !== 'number') {log("Validation WARN: First ingredient missing/invalid 'totalGramsRequired'.", 'WARN', 'LLM', firstIng); }
+                 // --- NEW: Add validation warning for AI nutrition fallback ---
+                 if (typeof firstIng?.aiEstCaloriesPer100g !== 'number') {log("Validation WARN: First ingredient missing 'aiEstCaloriesPer100g'. Fallback may fail.", 'WARN', 'LLM', firstIng); }
              }
              // Ensure mealPlan is an array if it exists but is null/malformed
              if (parsed.mealPlan && !Array.isArray(parsed.mealPlan)) {
@@ -653,7 +758,8 @@ function calculateCalorieTarget(formData) {
     const ageYears = parseInt(age, 10);
     // Add validation for inputs
     if (isNaN(weightKg) || isNaN(heightCm) || isNaN(ageYears) || !gender || !activityLevel || !goal) {
-        log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', { weight, height, age, gender, activityLevel, goal});
+        // --- log function is not defined in this scope, use console.warn ---
+        console.warn("Missing or invalid profile data for calorie calculation, using default 2000.", { weight, height, age, gender, activityLevel, goal});
         return 2000;
     }
     let bmr = (gender === 'male')
@@ -661,16 +767,16 @@ function calculateCalorieTarget(formData) {
         : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
     const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
     // Use activityLevel from formData correctly here
-    const multiplier = activityMultipliers[activityLevel];
+    let multiplier = activityMultipliers[activityLevel]; // Changed to let
      if (!multiplier) {
-         log(`Invalid activityLevel "${activityLevel}", using default 1.55.`, 'WARN', 'CALC');
+         console.warn(`Invalid activityLevel "${activityLevel}", using default 1.55.`);
          multiplier = 1.55;
      }
     const tdee = bmr * multiplier;
     const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
-    const adjustment = goalAdjustments[goal];
+    let adjustment = goalAdjustments[goal]; // Changed to let
     if (adjustment === undefined) {
-         log(`Invalid goal "${goal}", using default 0 adjustment.`, 'WARN', 'CALC');
+         console.warn(`Invalid goal "${goal}", using default 0 adjustment.`);
          adjustment = 0;
     }
     // Ensure calculation results in a sensible number, prevent negative calories
