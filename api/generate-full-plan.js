@@ -625,7 +625,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
         const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!jsonText) {
             log("Technical AI returned no JSON text.", 'CRITICAL', 'LLM', result);
-            throw.new Error("LLM response was empty or contained no text part.");
+            throw new Error("LLM response was empty or contained no text part.");
         }
         log("Technical Raw", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
         try {
