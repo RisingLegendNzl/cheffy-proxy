@@ -572,7 +572,7 @@ module.exports = async function handler(request, response) {
 
         // --- Phase 4: Nutrition Calculation ---
         log("Phase 4: Nutrition Calculation...", 'INFO', 'PHASE');
-        let calculatedTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+        let finalDailyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
         const itemsToFetchNutrition = [];
 
         for (const key in finalResults) {
@@ -621,38 +621,49 @@ module.exports = async function handler(request, response) {
             nutritionResults.forEach(item => {
                 if (!item.grams || item.grams <= 0) return;
                 const nut = item.nut;
+                
+                let proteinG = 0;
+                let fatG = 0;
+                let carbsG = 0;
 
                 if (nut?.status === 'found') {
-                    weeklyTotals.calories += ((nut.calories || 0) / 100) * item.grams;
-                    weeklyTotals.protein += ((nut.protein || 0) / 100) * item.grams;
-                    weeklyTotals.fat += ((nut.fat || 0) / 100) * item.grams;
-                    weeklyTotals.carbs += ((nut.carbs || 0) / 100) * item.grams;
+                    proteinG = ((nut.protein || 0) / 100) * item.grams;
+                    fatG = ((nut.fat || 0) / 100) * item.grams;
+                    carbsG = ((nut.carbs || 0) / 100) * item.grams;
                 } else if (
-                    typeof item.aiEstCaloriesPer100g === 'number' && typeof item.aiEstProteinPer100g === 'number' &&
-                    typeof item.aiEstFatPer100g === 'number' && typeof item.aiEstCarbsPer100g === 'number'
+                    // Check for AI fallbacks for macros
+                    typeof item.aiEstProteinPer100g === 'number' &&
+                    typeof item.aiEstFatPer100g === 'number' &&
+                    typeof item.aiEstCarbsPer100g === 'number'
                 ) {
                     log(`Using AI nutrition fallback for ${item.ingredientKey}.`, 'WARN', 'CALC', {
                         item: item.ingredientKey, grams: item.grams,
                         source: nut?.status ? `OFF status: ${nut.status}` : 'Market Run Fail'
                     });
-                    weeklyTotals.calories += (item.aiEstCaloriesPer100g / 100) * item.grams;
-                    weeklyTotals.protein += (item.aiEstProteinPer100g / 100) * item.grams;
-                    weeklyTotals.fat += (item.aiEstFatPer100g / 100) * item.grams;
-                    weeklyTotals.carbs += (item.aiEstCarbsPer100g / 100) * item.grams;
+                    proteinG = (item.aiEstProteinPer100g / 100) * item.grams;
+                    fatG = (item.aiEstFatPer100g / 100) * item.grams;
+                    carbsG = (item.aiEstCarbsPer100g / 100) * item.grams;
                 } else {
                     log(`Skipping nutrition for ${item.ingredientKey}: Data not found and no AI fallback.`, 'INFO', 'CALC');
                 }
+                
+                weeklyTotals.protein += proteinG;
+                weeklyTotals.fat += fatG;
+                weeklyTotals.carbs += carbsG;
             });
 
-            log("Calculated WEEKLY nutrition totals:", 'DEBUG', 'CALC', weeklyTotals);
+            // Calculate calories FROM macros for consistency
+            weeklyTotals.calories = (weeklyTotals.protein * 4) + (weeklyTotals.fat * 9) + (weeklyTotals.carbs * 4);
+            log("Calculated WEEKLY nutrition totals (Calories derived from macros):", 'DEBUG', 'CALC', weeklyTotals);
+            
             const validNumDays = (numDays >= 1 && numDays <= 7) ? numDays : 1;
             log(`Number of days for averaging: ${validNumDays}`, 'DEBUG', 'CALC');
 
-            calculatedTotals.calories = Math.round(weeklyTotals.calories / validNumDays);
-            calculatedTotals.protein = Math.round(weeklyTotals.protein / validNumDays);
-            calculatedTotals.fat = Math.round(weeklyTotals.fat / validNumDays);
-            calculatedTotals.carbs = Math.round(weeklyTotals.carbs / validNumDays);
-            log("DAILY nutrition totals calculated.", 'SUCCESS', 'CALC', calculatedTotals);
+            finalDailyTotals.calories = Math.round(weeklyTotals.calories / validNumDays);
+            finalDailyTotals.protein = Math.round(weeklyTotals.protein / validNumDays);
+            finalDailyTotals.fat = Math.round(weeklyTotals.fat / validNumDays);
+            finalDailyTotals.carbs = Math.round(weeklyTotals.carbs / validNumDays);
+            log("DAILY nutrition totals calculated.", 'SUCCESS', 'CALC', finalDailyTotals);
         } else {
             log("No valid products with required grams found for nutrition calculation.", 'WARN', 'CALC');
         }
@@ -660,7 +671,7 @@ module.exports = async function handler(request, response) {
 
         // --- Phase 5: Assembling Final Response ---
         log("Phase 5: Final Response...", 'INFO', 'PHASE');
-        const finalResponseData = { mealPlan: mealPlan || [], uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets: calculatedTotals };
+        const finalResponseData = { mealPlan: mealPlan || [], uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets: finalDailyTotals };
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
         return response.status(200).json({ ...finalResponseData, logs });
 
@@ -831,7 +842,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
 }
 
 
-// CORRECTED calculateCalorieTarget function (passes log)
+// --- MODIFICATION START: Updated calorie calculation logic ---
 function calculateCalorieTarget(formData, log = console.log) {
     const { weight, height, age, gender, activityLevel, goal } = formData;
     const weightKg = parseFloat(weight);
@@ -852,12 +863,27 @@ function calculateCalorieTarget(formData, log = console.log) {
          multiplier = 1.55;
      }
     const tdee = bmr * multiplier;
-    const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
+    
+    // Updated goal adjustments based on user specification
+    const goalAdjustments = {
+        maintain: 0,
+        cut_moderate: - (tdee * 0.15), // ~15% deficit
+        cut_aggressive: - (tdee * 0.25), // 25% deficit
+        bulk_lean: + (tdee * 0.15),    // ~15% surplus
+        bulk_aggressive: + (tdee * 0.25)     // 25% surplus
+    };
+    
     let adjustment = goalAdjustments[goal];
     if (adjustment === undefined) {
-         log(`Invalid goal "${goal}", using default 0 adjustment.`, 'WARN', 'CALC');
-         adjustment = 0;
+         log(`Invalid goal "${goal}", using default 'maintain' (0 adjustment).`, 'WARN', 'CALC');
+         adjustment = 0; // Default to maintain if goal key is invalid
     }
+    
+    log(`Calorie Calc: BMR=${bmr.toFixed(0)}, TDEE=${tdee.toFixed(0)}, Goal=${goal}, Adjustment=${adjustment.toFixed(0)}`, 'INFO', 'CALC');
+    
     return Math.max(1200, Math.round(tdee + adjustment));
 }
+// --- MODIFICATION END ---
 /// ===== API-CALLERS-END ===== ////
+
+
