@@ -1,6 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 33: Corrected Gemini API URL
+// Mark 34: Removed manual API key appending from URL
+// + Mark 33: Corrected Gemini API URL typo
 // + Mark 32: Conditional Australian Terminology
 // + Mark 31: Explicit Portion Sizes in Prompt
 // + Mark 30: Explicit Macro Targeting
@@ -24,10 +25,11 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 
 /// ===== CONFIG-START ===== \\\\
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// --- MODIFICATION START: Corrected API URL ---
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+// --- MODIFICATION START: Removed API Key from URL Base usage ---
+// We no longer need GEMINI_API_KEY here as it's handled by the environment
+// const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // --- MODIFICATION END ---
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
@@ -98,7 +100,10 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            const response = await fetch(url, options);
+            // --- MODIFICATION START: Log the URL being fetched (without key) ---
+            log(`Attempt ${attempt}: Fetching from ${url} (Key handled by environment)`, 'DEBUG', 'HTTP');
+            // --- MODIFICATION END ---
+            const response = await fetch(url, options); // Key is handled automatically
             if (response.ok) {
                 return response; // Success
             }
@@ -734,7 +739,9 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
-    const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
+    // --- MODIFICATION START: Use base URL only ---
+    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    // --- MODIFICATION END ---
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -759,7 +766,9 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
+    // --- MODIFICATION START: Use base URL only ---
+    const GEMINI_API_URL = GEMINI_API_URL_BASE;
+    // --- MODIFICATION END ---
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
