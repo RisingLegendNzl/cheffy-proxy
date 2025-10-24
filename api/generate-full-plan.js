@@ -1,6 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 35: Corrected API key handling for environment
+// Mark 36: Reverted API key handling - Rely solely on environment injection
+// + Mark 35: Attempted ?key= fix (Incorrect)
 // + Mark 34: Removed incorrect manual API key appending
 // + Mark 33: Corrected Gemini API URL typo
 // + Mark 32: Conditional Australian Terminology
@@ -97,8 +98,8 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            log(`Attempt ${attempt}: Fetching from URL (key handled by environment)`, 'DEBUG', 'HTTP', { url: url.split('?')[0] }); // Log base URL without key
-            const response = await fetch(url, options); // URL now includes ?key=
+            log(`Attempt ${attempt}: Fetching from API URL (key handled by environment)`, 'DEBUG', 'HTTP', { url: url }); // Log base URL
+            const response = await fetch(url, options); // URL should NOT include ?key=
             if (response.ok) {
                 return response; // Success
             }
@@ -734,8 +735,8 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
-    // --- MODIFICATION START: Use base URL + ?key= ---
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=`; 
+    // --- MODIFICATION START: Use base URL only, relying on environment injection ---
+    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
     // --- MODIFICATION END ---
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
@@ -761,8 +762,8 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    // --- MODIFICATION START: Use base URL + ?key= ---
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=`;
+    // --- MODIFICATION START: Use base URL only, relying on environment injection ---
+    const GEMINI_API_URL = GEMINI_API_URL_BASE;
     // --- MODIFICATION END ---
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
