@@ -617,10 +617,24 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
     // Schema (Mark 25)
-    const payload = { /* ... payload including schema with allowedCategories ... */ };
+    const payload = {
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+            responseMimeType: "application/json",
+        }
+    };
 
     try {
-        const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', /*...*/ }, log);
+        const response = await fetchWithRetry(
+            GEMINI_API_URL, 
+            { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload) 
+            }, 
+            log
+        );
         const result = await response.json();
         const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!jsonText) {
