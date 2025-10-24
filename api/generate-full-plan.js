@@ -1,11 +1,11 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 23 Pipeline + Refined AI Query/Keyword Rules based on ChatGPT Data
+// Mark 24 Pipeline + CRITICAL False Positive Fix (Negative Keywords)
 // + Phase 1 Cache Implementation (Vercel KV)
 // 1. Creative AI (Optional)
-// 2. Technical AI (Plan, 3 Queries, Keywords, Size, Total Grams, AI Nutrition Est.) - Log full output
-// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist, CACHED) - Log queries, raw results, checklist reasons
-// 4. Nutrition Calculation (with AI Fallback, CACHED) - Log weekly totals & days
+// 2. Technical AI (Plan, Queries, Keywords, Size, Grams, AI Nutrition Est.) - Enhanced Rules
+// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist, CACHED)
+// 4. Nutrition Calculation (with AI Fallback, CACHED)
 
 /// ===== IMPORTS-START ===== \\\\
 
@@ -25,9 +25,9 @@ const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/mo
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
-const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip']; // Expanded further
+const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Expanded further including common personal care/cleaning
 const SIZE_TOLERANCE = 0.6; // +/- 60%
-const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60% - KEEPING at 0.6 for now, adjust if needed later
+const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60%
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Score needed on tight query to skip normal/wide
 
 /// ===== CONFIG-END ===== ////
@@ -188,6 +188,7 @@ function runSmarterChecklist(product, ingredientData, log) {
     let score = 0;
 
     // --- 1. Excludes Banned Words (Global Filter) ---
+    // Using the expanded BANNED_KEYWORDS list
     const bannedWordFound = BANNED_KEYWORDS.find(kw => productNameLower.includes(kw));
     if (bannedWordFound) {
         log(`${checkLogPrefix}: FAIL (Global Banned: '${bannedWordFound}')`, 'DEBUG', 'CHECKLIST');
@@ -226,13 +227,11 @@ function runSmarterChecklist(product, ingredientData, log) {
                 return { pass: false, score: score };
             }
         } else if (productSizeParsed) {
-            // Log unit mismatch only if needed for debugging
              log(`${checkLogPrefix}: WARN (Size Unit Mismatch ${productSizeParsed.unit} vs ${targetSize.unit})`, 'DEBUG', 'CHECKLIST');
         } else {
-             // Log parse failure only if needed for debugging
              log(`${checkLogPrefix}: WARN (Size Parse Fail "${product.product_size}")`, 'DEBUG', 'CHECKLIST');
         }
-    } // No penalty if units mismatch, parse fails, or target size is missing
+    }
 
     log(`${checkLogPrefix}: PASS (Score: ${score.toFixed(2)})`, 'DEBUG', 'CHECKLIST');
     return { pass: true, score: score };
@@ -241,14 +240,10 @@ function runSmarterChecklist(product, ingredientData, log) {
 
 function isCreativePrompt(cuisinePrompt) {
     if (!cuisinePrompt || cuisinePrompt.toLowerCase() === 'none') return false;
-    // Expanded list of simple keywords
     const simpleKeywords = ['italian', 'mexican', 'chinese', 'thai', 'indian', 'japanese', 'mediterranean', 'french', 'spanish', 'korean', 'vietnamese', 'greek', 'american', 'british', 'german', 'russian', 'brazilian', 'caribbean', 'african', 'middle eastern', 'spicy', 'mild', 'sweet', 'sour', 'savoury', 'quick', 'easy', 'simple', 'fast', 'budget', 'cheap', 'healthy', 'low carb', 'keto', 'low fat', 'high protein', 'high fiber', 'vegetarian', 'vegan', 'gluten free', 'dairy free', 'pescatarian', 'paleo'];
     const promptLower = cuisinePrompt.toLowerCase().trim();
-    // Check if the prompt *exactly* matches a simple keyword
     if (simpleKeywords.some(kw => promptLower === kw)) return false;
-    // Check common patterns for simple requests
     if (promptLower.startsWith("high ") || promptLower.startsWith("low ")) return false;
-    // Consider prompts with structure words or longer length as potentially creative
     return cuisinePrompt.length > 30 || cuisinePrompt.includes(' like ') || cuisinePrompt.includes(' inspired by ') || cuisinePrompt.includes(' themed ');
 }
 
@@ -276,8 +271,8 @@ module.exports = async function handler(request, response) {
             logs.push(logEntry);
             // Also log simple version to Vercel console
             console.log(`[${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
-            if (data && (level === 'ERROR' || level === 'CRITICAL')) {
-                 console.error("Log Data:", data); // Log full data on errors
+            if (data && (level === 'ERROR' || level === 'CRITICAL' || level === 'WARN')) { // Log data for Warn too
+                 console.warn("Log Data:", data);
             }
             return logEntry;
         } catch (error) {
@@ -374,15 +369,14 @@ module.exports = async function handler(request, response) {
                     if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
 
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
-                     // --- PASS LOG TO fetchPriceData ---
-                    const priceData = await fetchPriceData(store, query, 1, log);
+                    const priceData = await fetchPriceData(store, query, 1, log); // Pass log
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0, rawCount: 0, bestScore: 0});
                     const currentAttemptLog = result.searchAttempts.at(-1);
 
                     if (priceData.error) {
                         log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
                         currentAttemptLog.status = 'fetch_error';
-                        continue; // Continue even if cache/fetch failed for one type
+                        continue;
                     }
 
                     const rawProducts = priceData.results || [];
@@ -392,8 +386,7 @@ module.exports = async function handler(request, response) {
                     const validProductsOnPage = [];
                     let pageBestScore = -1;
                     for (const rawProduct of rawProducts) {
-                         // --- PASS LOG TO runSmarterChecklist ---
-                        const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
+                        const checklistResult = runSmarterChecklist(rawProduct, ingredient, log); // Pass log
                         if (checklistResult.pass) {
                              validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size), }, score: checklistResult.score });
                              pageBestScore = Math.max(pageBestScore, checklistResult.score);
@@ -493,17 +486,15 @@ module.exports = async function handler(request, response) {
 
         if (itemsToFetchNutrition.length > 0) {
             log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
-             // --- Wrap the fetchNutritionData call in the mapper ---
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) =>
                 (item.barcode || item.query) ?
-                // --- PASS LOG TO fetchNutritionData ---
-                fetchNutritionData(item.barcode, item.query, log)
-                    .then(nut => ({ ...item, nut })) // Combine item info with nutrition result
-                    .catch(err => { // Catch should ideally not happen if fetchNutritionData handles errors
+                fetchNutritionData(item.barcode, item.query, log) // Pass log
+                    .then(nut => ({ ...item, nut }))
+                    .catch(err => {
                         log(`Unhandled Nutri fetch error ${item.ingredientKey}: ${err.message}`, 'CRITICAL', 'HTTP');
                         return { ...item, nut: { status: 'not_found', error: 'Unhandled fetch error' } };
                     })
-                : Promise.resolve({ ...item, nut: { status: 'not_found' } }) // Skip fetch for failed market items
+                : Promise.resolve({ ...item, nut: { status: 'not_found' } })
             );
 
             log("Nutrition fetch/calc complete.", 'SUCCESS', 'HTTP');
@@ -512,7 +503,7 @@ module.exports = async function handler(request, response) {
 
             nutritionResults.forEach(item => {
                 if (!item.grams || item.grams <= 0) return;
-                const nut = item.nut; // This now comes from the resolved promise
+                const nut = item.nut;
 
                 if (nut?.status === 'found') {
                     weeklyTotals.calories += ((nut.calories || 0) / 100) * item.grams;
@@ -570,7 +561,25 @@ module.exports = async function handler(request, response) {
 /// ===== API-CALLERS-START ===== \\\\
 
 
-async function generateCreativeIdeas(cuisinePrompt, log) { /* no change */ const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;const sysPrompt=`Creative chef... comma-separated list.`;const userQuery=`Theme: "${cuisinePrompt}"...`;log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};try{const res=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log);if(!res.ok)throw new Error(`Creative AI HTTP ${res.status}.`);const result=await res.json();const text=result.candidates?.[0]?.content?.parts?.[0]?.text;if(!text)throw new Error("Creative AI empty.");log("Creative Raw",'INFO','LLM',{raw:text.substring(0,500)});return text;}catch(e){log("Creative AI failed.",'CRITICAL','LLM',{error:e.message});return"";}}
+async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
+    const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
+    const sysPrompt=`Creative chef... comma-separated list.`;
+    const userQuery=`Theme: "${cuisinePrompt}"...`;
+    log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
+    const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};
+    try{
+        const res=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log); // Pass log
+        // fetchWithRetry now handles non-ok responses internally
+        const result=await res.json();
+        const text=result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if(!text)throw new Error("Creative AI empty.");
+        log("Creative Raw",'INFO','LLM',{raw:text.substring(0,500)});
+        return text;
+    } catch(e){
+        log(`Creative AI failed: ${e.message}`,'CRITICAL','LLM'); // Pass error message
+        return ""; // Return empty string on failure
+    }
+}
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
@@ -580,8 +589,8 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (Mark 23 - Refined Rules based on ChatGPT Data) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'.`;
+    // --- PROMPT (Mark 24 - Added CRITICAL rule for non-food negatives) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). CRITICAL SAFETY RULE: If the ingredient is commonly used as a flavour in NON-FOOD items (e.g., mint, lemon, vanilla, coconut), you MUST include common non-food product types in negativeKeywords (e.g., for 'Fresh Mint', add ["mouthwash", "toothpaste", "gum", "floss", "tea"]; for 'Lemon', add ["cleaner", "spray", "polish", "detergent", "soap"]; for 'Coconut Oil', add ["shampoo", "lotion", "conditioner"]). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
@@ -612,7 +621,6 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
                                 "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
                                 "totalGramsRequired": { "type": "NUMBER" },
                                 "quantityUnits": { "type": "STRING" },
-                                // --- NEW FALLBACK FIELDS ---
                                 "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
@@ -719,5 +727,4 @@ function calculateCalorieTarget(formData, log = console.log) { // Added log defa
     return Math.max(1200, Math.round(tdee + adjustment));
 }
 /// ===== API-CALLERS-END ===== ////
-
 
