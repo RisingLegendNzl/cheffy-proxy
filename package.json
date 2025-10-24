@@ -3,8 +3,9 @@
   "version": "2.0.0",
   "description": "Unified proxy and orchestrator for Cheffy.",
   "dependencies": {
-    "@vercel/kv": "^2.0.0", // Added Vercel KV
+    "@vercel/kv": "^2.0.0",
     "axios": "^1.7.2",
     "node-fetch": "^2.7.0"
   }
 }
+
