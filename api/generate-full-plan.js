@@ -323,7 +323,10 @@ module.exports = async function handler(request, response) {
     if (request.method !== 'POST') { /* ... */ }
 
     try {
-        if (!request.body) { /* ... */ }
+        if (!request.body) {
+            log("Orchestrator fail: Received empty request body.", 'CRITICAL', 'SYSTEM');
+            throw new Error("Request body is missing or invalid.");
+        }
         const formData = request.body;
         const { store, cuisine, days } = formData;
         if (!store || !days) { /* ... */ }
@@ -646,4 +649,3 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
 // CORRECTED calculateCalorieTarget function (passes log)
 function calculateCalorieTarget(formData, log = console.log) { /* ... */ }
 /// ===== API-CALLERS-END ===== ////
-
