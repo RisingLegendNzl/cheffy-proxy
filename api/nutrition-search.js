@@ -92,7 +92,9 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
                 carbs: parseFloat(nutriments.carbohydrates_100g || 0),
                 sugars: parseFloat(nutriments.sugars_100g || 0),
                 fiber: parseFloat(nutriments.fiber_100g || 0),
-                sodium: parseFloat(nutriments.sodium_100g || 0)
+                sodium: parseFloat(nutriments.sodium_100g || 0),
+                // --- MODIFICATION: Added ingredients list ---
+                ingredientsText: product.ingredients_text || null
             };
         } else {
             log(`Nutrition data not found in response for ${identifierType}: ${identifier}`, 'INFO', 'OFF_RESPONSE', { latency_ms: latencyMs });
