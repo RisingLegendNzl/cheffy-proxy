@@ -1,6 +1,8 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 29 Pipeline + CRITICAL FIX: Ensure userQuery is never empty before Gemini Call.
+// Mark 31: Explicit Portion Sizes in Prompt
+// + Mark 30: Explicit Macro Targeting
+// + Mark 29 Pipeline + CRITICAL FIX: Ensure userQuery is never empty before Gemini Call.
 // + TypeError Fixes for LLM Results (Mark 28)
 // + Ladder Telemetry Logging (Step 5)
 // + Checklist Upgrades (Step 4)
@@ -21,7 +23,7 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+const GEMINI_API_URL_BASE = 'https://generativelace.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
@@ -299,6 +301,45 @@ function isCreativePrompt(cuisinePrompt) {
     return cuisinePrompt.length > 30 || cuisinePrompt.includes(' like ') || cuisinePrompt.includes(' inspired by ') || cuisinePrompt.includes(' themed ');
 }
 
+/**
+ * Calculates suggested macro targets in grams based on calorie target and goal.
+ */
+function calculateMacroTargets(calorieTarget, goal, log) {
+    let pPercent = 0.30, fPercent = 0.30, cPercent = 0.40; // Default (Maintain)
+
+    switch (goal) {
+        case 'cut_moderate':
+        case 'cut_aggressive':
+            pPercent = 0.35; // Higher protein for muscle preservation
+            fPercent = 0.25;
+            cPercent = 0.40;
+            break;
+        case 'bulk_lean':
+            pPercent = 0.30;
+            fPercent = 0.25;
+            cPercent = 0.45; // Higher carbs
+            break;
+        case 'bulk_aggressive':
+            pPercent = 0.25; // Slightly lower protein % as calories increase
+            fPercent = 0.25; 
+            cPercent = 0.50; // Higher carbs, matching user feedback
+            break;
+        case 'maintain':
+        default:
+             // Use default percentages
+             break;
+    }
+
+    const proteinGrams = Math.round((calorieTarget * pPercent) / 4);
+    const fatGrams = Math.round((calorieTarget * fPercent) / 9);
+    const carbGrams = Math.round((calorieTarget * cPercent) / 4);
+
+    log(`Calculated Macro Targets (Goal: ${goal}, Cals: ${calorieTarget}): P ${proteinGrams}g (${(pPercent * 100).toFixed(0)}%), F ${fatGrams}g (${(fPercent * 100).toFixed(0)}%), C ${carbGrams}g (${(cPercent * 100).toFixed(0)}%)`, 'INFO', 'CALC');
+
+    return { proteinGrams, fatGrams, carbGrams };
+}
+
+
 /// ===== HELPERS-END ===== ////
 
 
@@ -365,12 +406,12 @@ module.exports = async function handler(request, response) {
             throw new Error("Request body is missing or invalid.");
         }
         const formData = request.body;
-        const { store, cuisine, days } = formData;
+        const { store, cuisine, days, goal } = formData; // Destructure goal
         
         // Ensure critical fields are present/valid before proceeding
-        if (!store || !days || isNaN(parseFloat(formData.weight)) || isNaN(parseFloat(formData.height))) { 
-             log("CRITICAL: Missing core form data (store, days, weight, or height). Cannot calculate plan.", 'CRITICAL', 'INPUT', formData);
-             throw new Error("Missing critical profile data required for plan generation (store, days, weight, height).");
+        if (!store || !days || !goal || isNaN(parseFloat(formData.weight)) || isNaN(parseFloat(formData.height))) { // Added goal check
+             log("CRITICAL: Missing core form data (store, days, goal, weight, or height). Cannot calculate plan.", 'CRITICAL', 'INPUT', formData);
+             throw new Error("Missing critical profile data required for plan generation (store, days, goal, weight, height).");
         }
         
         const numDays = parseInt(days, 10);
@@ -392,11 +433,11 @@ module.exports = async function handler(request, response) {
         log("Phase 2: Technical Blueprint...", 'INFO', 'PHASE');
         const calorieTarget = calculateCalorieTarget(formData, log);
         log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
+        const { proteinGrams, fatGrams, carbGrams } = calculateMacroTargets(calorieTarget, goal, log); 
 
-        // --- FIX 2: Robust LLM Call & Validation ---
         let llmResult;
         try {
-            llmResult = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
+            llmResult = await generateLLMPlanAndMeals(formData, calorieTarget, proteinGrams, fatGrams, carbGrams, creativeIdeas, log);
         } catch (llmError) {
             log(`Error during generateLLMPlanAndMeals call: ${llmError.message}`, 'CRITICAL', 'LLM_CALL');
             throw llmError;
@@ -404,7 +445,6 @@ module.exports = async function handler(request, response) {
 
         const { ingredients, mealPlan = [] } = llmResult || {};
         const rawIngredientPlan = Array.isArray(ingredients) ? ingredients : [];
-        // --- END FIX 2 ---
 
 
         // Validate rawIngredientPlan (array exists, might be empty)
@@ -700,14 +740,12 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
         const result = await res.json();
         const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
-        // --- FIX 1: Stricter check before substring ---
         if (typeof text !== 'string' || text.length === 0) {
-             log("Creative AI returned non-string or empty text.", 'WARN', 'LLM', { result }); // More specific log
-             throw new Error("Creative AI empty or invalid text."); // More specific error
+             log("Creative AI returned non-string or empty text.", 'WARN', 'LLM', { result });
+             throw new Error("Creative AI empty or invalid text.");
          }
-         // --- END FIX 1 ---
 
-        log("Creative Raw",'INFO','LLM',{raw:text.substring(0,500)}); // Safe to call substring now
+        log("Creative Raw",'INFO','LLM',{raw:text.substring(0,500)});
         return text;
     } catch(e){
         log(`Creative AI failed: ${e.message}`,'CRITICAL','LLM');
@@ -715,7 +753,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
     }
 }
 
-async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) { // Pass log
+async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
@@ -723,24 +761,25 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (Mark 25) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). CRITICAL SAFETY RULE: If the ingredient is commonly used as a flavour in NON-FOOD items (e.g., mint, lemon, vanilla, coconut), you MUST include common non-food product types in negativeKeywords (e.g., for 'Fresh Mint', add ["mouthwash", "toothpaste", "gum", "floss", "tea"]; for 'Lemon', add ["cleaner", "spray", "polish", "detergent", "soap"]; for 'Coconut Oil', add ["shampoo", "lotion", "conditioner"]). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'. 14. CATEGORY (Optional): Optionally provide 'allowedCategories' string array (e.g., ["dairy", "cheese"], ["fruit", "veg"]). Use simple, broad terms. This helps filter out items from incorrect aisles (e.g., "cheese snacks" vs "cheese block"). Null if not needed.`;
-
-    // CRITICAL FIX: Ensure template literals resolve to a string, or provide fallback
-    const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
+    // --- MODIFICATION START: Updated System Prompt ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED, robust. c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase. NO simple adjectives. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types if applicable. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM meal portions precisely. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' generic form. 'requiredWords' = noun. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS: For each meal in 'mealPlan.description', you MUST specify clear portion sizes for key ingredients in grams or common units (e.g., '...with 150g grilled chicken breast and 1 cup cooked brown rice...'). 16. CRITICAL ADHERENCE RULE: The portion sizes listed in the 'mealPlan' descriptions MUST logically sum up to the 'totalGramsRequired' you specify for each ingredient. Furthermore, the total estimated Calories, Protein, Fat, and Carbs derived from ALL 'ingredients' and their 'totalGramsRequired' MUST closely match the provided targets within +/- 10%. Double-check your calculations. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets, unless dietary preferences dictate otherwise.`;
+    // --- MODIFICATION END ---
 
 
-    // --- Check userQuery before passing to payload ---
+    // Added macro targets to User Query
+    const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
+
+
+    // Check userQuery before passing to payload
     if (userQuery.trim().length < 50) {
         log("Critical Input Failure: User query is too short/empty due to missing form data or invalid template resolution.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery: userQuery, formData: formData });
         throw new Error("Cannot generate plan: Invalid input data caused an empty prompt.");
     }
-    // --- End Check ---
 
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
-    // Schema (Mark 25)
+    // Schema (Mark 25 - Remains Valid)
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -764,7 +803,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
                                 "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
                                 "totalGramsRequired": { "type": "NUMBER" },
                                 "quantityUnits": { "type": "STRING" },
-                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }, // NEW
+                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }, 
                                 "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
@@ -820,7 +859,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
             const parsed = JSON.parse(jsonText);
             log("Parsed Technical", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
 
-            // Basic validation (can be expanded)
+            // Basic validation
             if (!parsed || typeof parsed !== 'object') {
                  log("Validation Error: Root response is not an object.", 'CRITICAL', 'LLM', parsed);
                  throw new Error("LLM response was not a valid object.");
@@ -828,7 +867,6 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
              if (parsed.ingredients && !Array.isArray(parsed.ingredients)) {
                  log("Validation Error: 'ingredients' exists but is not an array.", 'CRITICAL', 'LLM', parsed);
              }
-             // Add more validation checks here if needed...
 
             return parsed; // Return the parsed object
         } catch (e) {
@@ -842,7 +880,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
 }
 
 
-// --- MODIFICATION START: Updated calorie calculation logic ---
+// Updated calorie calculation function with percentage-based adjustments
 function calculateCalorieTarget(formData, log = console.log) {
     const { weight, height, age, gender, activityLevel, goal } = formData;
     const weightKg = parseFloat(weight);
@@ -883,7 +921,6 @@ function calculateCalorieTarget(formData, log = console.log) {
     
     return Math.max(1200, Math.round(tdee + adjustment));
 }
-// --- MODIFICATION END ---
 /// ===== API-CALLERS-END ===== ////
 
 
