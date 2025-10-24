@@ -1,6 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 36: Reverted API key handling - Rely solely on environment injection
+// Mark 37: Reverted API key handling to original method (manual append)
+// + Mark 36: Attempted environment injection fix (Incorrect)
 // + Mark 35: Attempted ?key= fix (Incorrect)
 // + Mark 34: Removed incorrect manual API key appending
 // + Mark 33: Corrected Gemini API URL typo
@@ -27,6 +28,9 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 
 /// ===== CONFIG-START ===== \\\\
 
+// --- MODIFICATION START: Reinstate GEMINI_API_KEY constant ---
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// --- MODIFICATION END ---
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
@@ -98,8 +102,10 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            log(`Attempt ${attempt}: Fetching from API URL (key handled by environment)`, 'DEBUG', 'HTTP', { url: url }); // Log base URL
-            const response = await fetch(url, options); // URL should NOT include ?key=
+            // Log the URL but obscure the key
+             const urlToLog = url.replace(/key=([^&]*)/, 'key=REDACTED');
+            log(`Attempt ${attempt}: Fetching from ${urlToLog}`, 'DEBUG', 'HTTP');
+            const response = await fetch(url, options); // URL now includes the key
             if (response.ok) {
                 return response; // Success
             }
@@ -130,7 +136,9 @@ async function fetchWithRetry(url, options, log) {
     }
     // If all retries fail
     log(`API call failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
-    throw new Error(`API call failed after ${MAX_RETRIES} attempts.`); // Generic error message for safety
+     // Obscure key in final error message
+     const urlToLogFinal = url.replace(/key=([^&]*)/, 'key=REDACTED');
+    throw new Error(`API call to ${urlToLogFinal} failed after ${MAX_RETRIES} attempts.`);
 }
 
 
@@ -735,8 +743,8 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
-    // --- MODIFICATION START: Use base URL only, relying on environment injection ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    // --- MODIFICATION START: Reverted to original URL construction ---
+    const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`; 
     // --- MODIFICATION END ---
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
@@ -762,8 +770,8 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    // --- MODIFICATION START: Use base URL only, relying on environment injection ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE;
+    // --- MODIFICATION START: Reverted to original URL construction ---
+    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     // --- MODIFICATION END ---
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
