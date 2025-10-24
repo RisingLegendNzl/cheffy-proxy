@@ -372,20 +372,20 @@ module.exports = async function handler(request, response) {
             throw llmError; // Propagate the error
         }
 
-        // Now, explicitly check if llmResult is valid BEFORE destructuring
-        if (!llmResult || typeof llmResult !== 'object' || !Array.isArray(llmResult.ingredients)) {
-            log("Blueprint fail: generateLLMPlanAndMeals returned invalid/unexpected structure.", 'CRITICAL', 'LLM_RESULT', { result: llmResult });
-            throw new Error("Blueprint fail: AI function returned invalid data structure. Check LLM logs.");
-        }
+        // --- FIX 2 (Modified): Destructure with defaults to prevent TypeError ---
+        // We also use `llmResult || {}` to guard against llmResult itself being null.
+        const { ingredients, mealPlan = [] } = llmResult || {};
 
-        // If we get here, llmResult is valid, safe to destructure
-        const { ingredients: rawIngredientPlan, mealPlan = [] } = llmResult;
+        // Now, check 'ingredients' and default to [] if it's not a valid array.
+        // This handles null, undefined, or any other invalid type.
+        const rawIngredientPlan = Array.isArray(ingredients) ? ingredients : [];
         // --- END FIX 2 ---
 
 
         // Validate rawIngredientPlan (array exists, might be empty)
         if (rawIngredientPlan.length === 0) {
-            log("Blueprint fail: No ingredients returned by Technical AI (array was empty).", 'CRITICAL', 'LLM');
+            // This check will now catch both "ingredients: []" and "ingredients: null" or missing ingredients
+            log("Blueprint fail: No ingredients returned by Technical AI (array was empty or invalid).", 'CRITICAL', 'LLM', { result: llmResult });
             throw new Error("Blueprint fail: AI did not return any ingredients.");
         }
 
