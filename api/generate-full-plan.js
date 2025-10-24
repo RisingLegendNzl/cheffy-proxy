@@ -1,17 +1,17 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 24 Pipeline + CRITICAL False Positive Fix (Negative Keywords)
-// + Phase 1 Cache Implementation (Vercel KV)
+// Mark 25 Pipeline + Checklist Upgrades (Category & Price Guards)
 // + SWR-lite Caching (Step 3)
+// + Token Bucket (Step 1)
 // 1. Creative AI (Optional)
-// 2. Technical AI (Plan, Queries, Keywords, Size, Grams, AI Nutrition Est.) - Enhanced Rules
-// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist, CACHED w/ SWR)
+// 2. Technical AI (Plan, Queries, Keywords, Size, Grams, AI Nutrition Est., Allowed Categories) - Enhanced Rules
+// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist v2, CACHED w/ SWR)
 // 4. Nutrition Calculation (with AI Fallback, CACHED w/ SWR)
 
 /// ===== IMPORTS-START ===== \\\\
 
 const fetch = require('node-fetch');
-// Now importing the CACHE-WRAPPED versions with SWR
+// Now importing the CACHE-WRAPPED versions with SWR and Token Buckets
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
 
@@ -30,6 +30,7 @@ const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog
 const SIZE_TOLERANCE = 0.6; // +/- 60%
 const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60%
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Score needed on tight query to skip normal/wide
+const PRICE_OUTLIER_Z_SCORE = 2.0; // Products with unit price z-score > 2 will be demoted
 
 /// ===== CONFIG-END ===== ////
 
@@ -172,8 +173,58 @@ function calculateRequiredWordScore(productNameLower, requiredWords) {
     return wordsFound / requiredWords.length;
 }
 
+// --- Statistical Helper Functions ---
+const mean = (arr) => arr.reduce((acc, val) => acc + val, 0) / arr.length;
+const stdev = (arr) => {
+    if (arr.length < 2) return 0; // Standard deviation requires at least 2 data points
+    const m = mean(arr);
+    const variance = arr.reduce((acc, val) => acc + Math.pow(val - m, 2), 0) / (arr.length - 1); // Use n-1 for sample stdev
+    return Math.sqrt(variance);
+};
+
 /**
- * Smarter Checklist function - WITH DETAILED LOGGING ENABLED.
+ * Applies a price outlier guard to a list of products.
+ * @param {Array<Object>} products - List of valid product objects (must have `unit_price_per_100`).
+ * @param {Function} log - The logger function.
+ * @param {string} ingredientKey - The name of the ingredient for logging.
+ * @returns {Array<Object>} The filtered list of products, excluding outliers.
+ */
+function applyPriceOutlierGuard(products, log, ingredientKey) {
+    // Need at least 3 products to perform meaningful outlier detection
+    if (products.length < 3) {
+        return products;
+    }
+
+    const prices = products.map(p => p.product.unit_price_per_100).filter(p => p > 0); // Get valid unit prices
+    if (prices.length < 3) {
+        return products;
+    }
+
+    const m = mean(prices);
+    const s = stdev(prices);
+
+    // If standard deviation is 0 (all prices are identical), don't filter
+    if (s === 0) {
+        return products;
+    }
+
+    const filteredProducts = products.filter(p => {
+        const price = p.product.unit_price_per_100;
+        if (price <= 0) return true; // Keep items with no price (e.g., in-store only)
+        
+        const zScore = (price - m) / s;
+        if (zScore > PRICE_OUTLIER_Z_SCORE) {
+            log(`[${ingredientKey}] Demoting Price Outlier: "${p.product.name}" ($${price.toFixed(2)}/100) vs avg $${m.toFixed(2)}/100 (z=${zScore.toFixed(2)})`, 'INFO', 'PRICE_OUTLIER');
+            return false;
+        }
+        return true;
+    });
+
+    return filteredProducts;
+}
+
+/**
+ * Smarter Checklist function - NOW INCLUDES CATEGORY GUARD (Step 4)
  */
 function runSmarterChecklist(product, ingredientData, log) {
     const productNameLower = product.product_name?.toLowerCase() || '';
@@ -183,13 +234,11 @@ function runSmarterChecklist(product, ingredientData, log) {
         return { pass: false, score: 0 };
     }
 
-
-    const { originalIngredient, requiredWords = [], negativeKeywords = [], targetSize } = ingredientData;
+    const { originalIngredient, requiredWords = [], negativeKeywords = [], targetSize, allowedCategories = [] } = ingredientData;
     const checkLogPrefix = `Checklist [${originalIngredient}] for "${product.product_name}"`;
     let score = 0;
 
     // --- 1. Excludes Banned Words (Global Filter) ---
-    // Using the expanded BANNED_KEYWORDS list
     const bannedWordFound = BANNED_KEYWORDS.find(kw => productNameLower.includes(kw));
     if (bannedWordFound) {
         log(`${checkLogPrefix}: FAIL (Global Banned: '${bannedWordFound}')`, 'DEBUG', 'CHECKLIST');
@@ -197,7 +246,6 @@ function runSmarterChecklist(product, ingredientData, log) {
     }
 
     // --- 2. Excludes Negative Keywords (AI Filter) ---
-    // Ensure negativeKeywords is treated as an array even if missing/null from AI
     if (negativeKeywords && negativeKeywords.length > 0) {
         const negativeWordFound = negativeKeywords.find(kw => productNameLower.includes(kw.toLowerCase()));
         if (negativeWordFound) {
@@ -207,22 +255,32 @@ function runSmarterChecklist(product, ingredientData, log) {
     }
 
     // --- 3. Required Words Score ---
-    // Ensure requiredWords is treated as an array
     score = calculateRequiredWordScore(productNameLower, requiredWords || []);
     if (score < REQUIRED_WORD_SCORE_THRESHOLD) {
         log(`${checkLogPrefix}: FAIL (Score ${score.toFixed(2)} < ${REQUIRED_WORD_SCORE_THRESHOLD} vs [${(requiredWords || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
         return { pass: false, score: score };
     }
+    
+    // --- 4. Category Allowlist Check (NEW) ---
+    // Check if the AI provided categories and if the product has a category
+    const productCategory = product.product_category?.toLowerCase() || '';
+    if (allowedCategories && allowedCategories.length > 0 && productCategory) {
+        // Check if any of the product's categories match any of the allowed categories
+        // RapidAPI category string can be "Fruit & Veg > Fruit > Apples"
+        const hasCategoryMatch = allowedCategories.some(allowedCat => productCategory.includes(allowedCat.toLowerCase()));
+        
+        if (!hasCategoryMatch) {
+            log(`${checkLogPrefix}: FAIL (Category Mismatch: Product category "${productCategory}" not in allowlist [${allowedCategories.join(', ')}])`, 'DEBUG', 'CHECKLIST');
+            return { pass: false, score: score };
+        }
+    }
 
-    // --- 4. Size sanity check ---
-    // Check targetSize, value, unit, and product_size exist before proceeding
+    // --- 5. Size sanity check ---
     if (targetSize?.value && targetSize.unit && product.product_size) {
         const productSizeParsed = parseSize(product.product_size);
-        // Only compare if parsing succeeded and units match
         if (productSizeParsed && productSizeParsed.unit === targetSize.unit) {
             const lowerBound = targetSize.value * (1 - SIZE_TOLERANCE);
             const upperBound = targetSize.value * (1 + SIZE_TOLERANCE);
-            // Check if product size is outside the tolerance range
             if (productSizeParsed.value < lowerBound || productSizeParsed.value > upperBound) {
                 log(`${checkLogPrefix}: FAIL (Size ${productSizeParsed.value}${productSizeParsed.unit} outside ${lowerBound.toFixed(0)}-${upperBound.toFixed(0)}${targetSize.unit})`, 'DEBUG', 'CHECKLIST');
                 return { pass: false, score: score };
@@ -385,22 +443,47 @@ module.exports = async function handler(request, response) {
                     currentAttemptLog.rawCount = rawProducts.length;
                     log(`[${ingredientKey}] Raw results (${type}, ${rawProducts.length}):`, 'DEBUG', 'DATA', rawProducts.map(p => p.product_name));
 
-                    const validProductsOnPage = [];
+                    const validProductsOnPage = []; // Holds products that pass initial checks
                     let pageBestScore = -1;
                     for (const rawProduct of rawProducts) {
-                        const checklistResult = runSmarterChecklist(rawProduct, ingredient, log); // Pass log
+                        // RapidAPI data structure includes product_category
+                        const productWithCategory = { ...rawProduct, product_category: rawProduct.product_category };
+                        const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log); // Pass log
+                        
                         if (checklistResult.pass) {
-                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size), }, score: checklistResult.score });
+                             validProductsOnPage.push({ 
+                                product: { 
+                                    name: rawProduct.product_name, 
+                                    brand: rawProduct.product_brand, 
+                                    price: rawProduct.current_price, 
+                                    size: rawProduct.product_size, 
+                                    url: rawProduct.url, 
+                                    barcode: rawProduct.barcode, 
+                                    unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size),
+                                }, 
+                                score: checklistResult.score 
+                            });
                              pageBestScore = Math.max(pageBestScore, checklistResult.score);
                         }
                     }
-                    currentAttemptLog.foundCount = validProductsOnPage.length;
-                    currentAttemptLog.bestScore = pageBestScore;
+                    
+                    // --- NEW: Apply Price Outlier Guard ---
+                    const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
+                    // ---
 
-                    if (validProductsOnPage.length > 0) {
-                        log(`[${ingredientKey}] Found ${validProductsOnPage.length} valid (${type}, Score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
+                    currentAttemptLog.foundCount = filteredProducts.length;
+                    currentAttemptLog.bestScore = pageBestScore; // Note: bestScore is from *before* price filtering
+
+                    if (filteredProducts.length > 0) {
+                        log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}, Score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
                         const currentUrls = new Set(result.allProducts.map(p => p.url));
-                        validProductsOnPage.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); currentUrls.add(vp.product.url); } });
+                        // Add the *price-filtered* products
+                        filteredProducts.forEach(vp => { 
+                            if (!currentUrls.has(vp.product.url)) { 
+                                result.allProducts.push(vp.product); 
+                                currentUrls.add(vp.product.url); 
+                            } 
+                        });
 
                         foundProduct = result.allProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, result.allProducts[0]);
                         result.currentSelectionURL = foundProduct.url;
@@ -412,7 +495,7 @@ module.exports = async function handler(request, response) {
                             log(`[${ingredientKey}] Skip heuristic hit (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
                             break;
                         }
-                        // This break; is what enforces the "speed" mode (Step 2)
+                        // This break; is what enforces the "speed" mode (Step 2 is skipped)
                         break; // Stop after first successful query type
 
                     } else {
@@ -593,15 +676,15 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (Mark 24 - Added CRITICAL rule for non-food negatives) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). CRITICAL SAFETY RULE: If the ingredient is commonly used as a flavour in NON-FOOD items (e.g., mint, lemon, vanilla, coconut), you MUST include common non-food product types in negativeKeywords (e.g., for 'Fresh Mint', add ["mouthwash", "toothpaste", "gum", "floss", "tea"]; for 'Lemon', add ["cleaner", "spray", "polish", "detergent", "soap"]; for 'Coconut Oil', add ["shampoo", "lotion", "conditioner"]). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'.`;
+    // --- PROMPT (Mark 25 - Added Category Allowlist rule) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). CRITICAL SAFETY RULE: If the ingredient is commonly used as a flavour in NON-FOOD items (e.g., mint, lemon, vanilla, coconut), you MUST include common non-food product types in negativeKeywords (e.g., for 'Fresh Mint', add ["mouthwash", "toothpaste", "gum", "floss", "tea"]; for 'Lemon', add ["cleaner", "spray", "polish", "detergent", "soap"]; for 'Coconut Oil', add ["shampoo", "lotion", "conditioner"]). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'. 14. CATEGORY (Optional): Optionally provide 'allowedCategories' string array (e.g., ["dairy", "cheese"], ["fruit", "veg"]). Use simple, broad terms. This helps filter out items from incorrect aisles (e.g., "cheese snacks" vs "cheese block"). Null if not needed.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
-    // Schema (Mark 21 - Added AI Nutrition fields) - Schema remains the same
+    // Schema (Mark 25 - Added allowedCategories)
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -625,6 +708,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
                                 "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
                                 "totalGramsRequired": { "type": "NUMBER" },
                                 "quantityUnits": { "type": "STRING" },
+                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }, // NEW
                                 "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
@@ -731,4 +815,5 @@ function calculateCalorieTarget(formData, log = console.log) { // Added log defa
     return Math.max(1200, Math.round(tdee + adjustment));
 }
 /// ===== API-CALLERS-END ===== ////
+
 
