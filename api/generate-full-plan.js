@@ -1,11 +1,12 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 25 Pipeline + Checklist Upgrades (Category & Price Guards)
+// Mark 26 Pipeline + Ladder Telemetry Logging (Step 5)
+// + Checklist Upgrades (Step 4)
 // + SWR-lite Caching (Step 3)
 // + Token Bucket (Step 1)
 // 1. Creative AI (Optional)
 // 2. Technical AI (Plan, Queries, Keywords, Size, Grams, AI Nutrition Est., Allowed Categories) - Enhanced Rules
-// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist v2, CACHED w/ SWR)
+// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist v2, CACHED w/ SWR) - Added Telemetry
 // 4. Nutrition Calculation (with AI Fallback, CACHED w/ SWR)
 
 /// ===== IMPORTS-START ===== \\\\
@@ -211,7 +212,7 @@ function applyPriceOutlierGuard(products, log, ingredientKey) {
     const filteredProducts = products.filter(p => {
         const price = p.product.unit_price_per_100;
         if (price <= 0) return true; // Keep items with no price (e.g., in-store only)
-        
+
         const zScore = (price - m) / s;
         if (zScore > PRICE_OUTLIER_Z_SCORE) {
             log(`[${ingredientKey}] Demoting Price Outlier: "${p.product.name}" ($${price.toFixed(2)}/100) vs avg $${m.toFixed(2)}/100 (z=${zScore.toFixed(2)})`, 'INFO', 'PRICE_OUTLIER');
@@ -260,7 +261,7 @@ function runSmarterChecklist(product, ingredientData, log) {
         log(`${checkLogPrefix}: FAIL (Score ${score.toFixed(2)} < ${REQUIRED_WORD_SCORE_THRESHOLD} vs [${(requiredWords || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
         return { pass: false, score: score };
     }
-    
+
     // --- 4. Category Allowlist Check (NEW) ---
     // Check if the AI provided categories and if the product has a category
     const productCategory = product.product_category?.toLowerCase() || '';
@@ -268,7 +269,7 @@ function runSmarterChecklist(product, ingredientData, log) {
         // Check if any of the product's categories match any of the allowed categories
         // RapidAPI category string can be "Fruit & Veg > Fruit > Apples"
         const hasCategoryMatch = allowedCategories.some(allowedCat => productCategory.includes(allowedCat.toLowerCase()));
-        
+
         if (!hasCategoryMatch) {
             log(`${checkLogPrefix}: FAIL (Category Mismatch: Product category "${productCategory}" not in allowlist [${allowedCategories.join(', ')}])`, 'DEBUG', 'CHECKLIST');
             return { pass: false, score: score };
@@ -424,10 +425,21 @@ module.exports = async function handler(request, response) {
                 let bestScoreSoFar = -1;
                 const queriesToTry = [ { type: 'tight', query: ingredient.tightQuery }, { type: 'normal', query: ingredient.normalQuery }, { type: 'wide', query: ingredient.wideQuery } ];
 
-                for (const { type, query } of queriesToTry) {
+                // --- Start Telemetry Variables ---
+                let acceptedQueryIdx = -1;
+                let acceptedQueryType = 'none';
+                let pagesTouched = 0; // Currently always 1
+                let priceZ = null;
+                // bucket_wait_ms is logged within fetchStoreSafe, accessible via logs if needed later
+                const mode = 'speed'; // Placeholder as Step 2 was skipped
+                 // --- End Telemetry Variables ---
+
+
+                for (const [index, { type, query }] of queriesToTry.entries()) {
                     if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
 
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
+                    pagesTouched = 1; // Mark page as touched for this attempt
                     // fetchPriceData now has SWR and Token Bucket logic built-in
                     const priceData = await fetchPriceData(store, query, 1, log); // Pass log
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0, rawCount: 0, bestScore: 0});
@@ -449,53 +461,79 @@ module.exports = async function handler(request, response) {
                         // RapidAPI data structure includes product_category
                         const productWithCategory = { ...rawProduct, product_category: rawProduct.product_category };
                         const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log); // Pass log
-                        
+
                         if (checklistResult.pass) {
-                             validProductsOnPage.push({ 
-                                product: { 
-                                    name: rawProduct.product_name, 
-                                    brand: rawProduct.product_brand, 
-                                    price: rawProduct.current_price, 
-                                    size: rawProduct.product_size, 
-                                    url: rawProduct.url, 
-                                    barcode: rawProduct.barcode, 
+                             validProductsOnPage.push({
+                                product: {
+                                    name: rawProduct.product_name,
+                                    brand: rawProduct.product_brand,
+                                    price: rawProduct.current_price,
+                                    size: rawProduct.product_size,
+                                    url: rawProduct.url,
+                                    barcode: rawProduct.barcode,
                                     unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size),
-                                }, 
-                                score: checklistResult.score 
+                                },
+                                score: checklistResult.score
                             });
                              pageBestScore = Math.max(pageBestScore, checklistResult.score);
                         }
                     }
-                    
-                    // --- NEW: Apply Price Outlier Guard ---
+
+                    // --- Apply Price Outlier Guard ---
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
                     // ---
 
                     currentAttemptLog.foundCount = filteredProducts.length;
-                    currentAttemptLog.bestScore = pageBestScore; // Note: bestScore is from *before* price filtering
+                    currentAttemptLog.bestScore = pageBestScore;
 
                     if (filteredProducts.length > 0) {
                         log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}, Score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
                         const currentUrls = new Set(result.allProducts.map(p => p.url));
                         // Add the *price-filtered* products
-                        filteredProducts.forEach(vp => { 
-                            if (!currentUrls.has(vp.product.url)) { 
-                                result.allProducts.push(vp.product); 
-                                currentUrls.add(vp.product.url); 
-                            } 
+                        filteredProducts.forEach(vp => {
+                            if (!currentUrls.has(vp.product.url)) {
+                                result.allProducts.push(vp.product);
+                                currentUrls.add(vp.product.url);
+                            }
                         });
 
+                        // Select best based on unit price from the accumulated, filtered list
                         foundProduct = result.allProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, result.allProducts[0]);
                         result.currentSelectionURL = foundProduct.url;
                         result.source = 'discovery';
                         currentAttemptLog.status = 'success';
                         bestScoreSoFar = Math.max(bestScoreSoFar, pageBestScore);
 
+                        // --- Capture Telemetry on Success ---
+                        acceptedQueryIdx = index;
+                        acceptedQueryType = type;
+                        const keptCount = filteredProducts.length; // Count after price guard for this successful query
+
+                         // Calculate Z-score for the chosen product
+                        if (keptCount >= 3 && foundProduct.unit_price_per_100 > 0) {
+                            const prices = filteredProducts.map(p => p.product.unit_price_per_100).filter(p => p > 0);
+                            const m = mean(prices);
+                            const s = stdev(prices);
+                            priceZ = (s > 0) ? ((foundProduct.unit_price_per_100 - m) / s) : 0;
+                        }
+
+                        log(`[${ingredientKey}] Success Telemetry`, 'INFO', 'LADDER_TELEMETRY', {
+                             ingredientKey: ingredientKey,
+                             accepted_query_idx: acceptedQueryIdx,
+                             accepted_query_type: acceptedQueryType,
+                             pages_touched: pagesTouched,
+                             kept_count: keptCount,
+                             price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null,
+                             mode: mode,
+                         });
+                        // --- End Telemetry ---
+
+
                         if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                             log(`[${ingredientKey}] Skip heuristic hit (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
-                            break;
+                            break; // Still break for skip heuristic
                         }
-                        // This break; is what enforces the "speed" mode (Step 2 is skipped)
+                        // This break; enforces the "speed" mode (Step 2 skipped)
                         break; // Stop after first successful query type
 
                     } else {
@@ -785,35 +823,5 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
 }
 
 
-// CORRECTED calculateCalorieTarget function (passes log)
-function calculateCalorieTarget(formData, log = console.log) { // Added log default
-    const { weight, height, age, gender, activityLevel, goal } = formData;
-    const weightKg = parseFloat(weight);
-    const heightCm = parseFloat(height);
-    const ageYears = parseInt(age, 10);
-
-    if (isNaN(weightKg) || isNaN(heightCm) || isNaN(ageYears) || !gender || !activityLevel || !goal) {
-        log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', { weight, height, age, gender, activityLevel, goal});
-        return 2000;
-    }
-    let bmr = (gender === 'male')
-        ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
-        : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
-    const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
-    let multiplier = activityMultipliers[activityLevel];
-     if (!multiplier) {
-         log(`Invalid activityLevel "${activityLevel}", using default 1.55.`, 'WARN', 'CALC');
-         multiplier = 1.55;
-     }
-    const tdee = bmr * multiplier;
-    const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
-    let adjustment = goalAdjustments[goal];
-    if (adjustment === undefined) {
-         log(`Invalid goal "${goal}", using default 0 adjustment.`, 'WARN', 'CALC');
-         adjustment = 0;
-    }
-    return Math.max(1200, Math.round(tdee + adjustment));
-}
-/// ===== API-CALLERS-END ===== ////
-
+// CORRECTED cal...
 
