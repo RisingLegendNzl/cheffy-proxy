@@ -1,6 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 34: Removed manual API key appending from URL
+// Mark 35: Corrected API key handling for environment
+// + Mark 34: Removed incorrect manual API key appending
 // + Mark 33: Corrected Gemini API URL typo
 // + Mark 32: Conditional Australian Terminology
 // + Mark 31: Explicit Portion Sizes in Prompt
@@ -25,10 +26,6 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 
 /// ===== CONFIG-START ===== \\\\
 
-// --- MODIFICATION START: Removed API Key from URL Base usage ---
-// We no longer need GEMINI_API_KEY here as it's handled by the environment
-// const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// --- MODIFICATION END ---
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
@@ -100,27 +97,25 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            // --- MODIFICATION START: Log the URL being fetched (without key) ---
-            log(`Attempt ${attempt}: Fetching from ${url} (Key handled by environment)`, 'DEBUG', 'HTTP');
-            // --- MODIFICATION END ---
-            const response = await fetch(url, options); // Key is handled automatically
+            log(`Attempt ${attempt}: Fetching from URL (key handled by environment)`, 'DEBUG', 'HTTP', { url: url.split('?')[0] }); // Log base URL without key
+            const response = await fetch(url, options); // URL now includes ?key=
             if (response.ok) {
                 return response; // Success
             }
             // Check for retryable status codes
             if (response.status === 429 || response.status >= 500) {
-                log(`Attempt ${attempt}: Received retryable error ${response.status} from ${url}. Retrying...`, 'WARN', 'HTTP');
+                log(`Attempt ${attempt}: Received retryable error ${response.status} from API. Retrying...`, 'WARN', 'HTTP');
                 // Fall through to retry logic
             } else {
                 // Non-retryable client error (4xx except 429)
                 const errorBody = await response.text();
-                log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from ${url}.`, 'CRITICAL', 'HTTP', { body: errorBody });
+                log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from API.`, 'CRITICAL', 'HTTP', { body: errorBody });
                 throw new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`);
             }
         } catch (error) {
             // Catch fetch errors (network issues) or the re-thrown client error
              if (!error.message?.startsWith('API call failed with client error')) { // Avoid double logging client errors
-                log(`Attempt ${attempt}: Fetch failed for ${url} with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+                log(`Attempt ${attempt}: Fetch failed for API with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
                 console.error(`Fetch Error Details (Attempt ${attempt}):`, error);
             } else {
                  throw error; // Re-throw the non-retryable client error immediately
@@ -133,8 +128,8 @@ async function fetchWithRetry(url, options, log) {
         }
     }
     // If all retries fail
-    log(`API call to ${url} failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
-    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
+    log(`API call failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
+    throw new Error(`API call failed after ${MAX_RETRIES} attempts.`); // Generic error message for safety
 }
 
 
@@ -739,8 +734,8 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
-    // --- MODIFICATION START: Use base URL only ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    // --- MODIFICATION START: Use base URL + ?key= ---
+    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=`; 
     // --- MODIFICATION END ---
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
@@ -766,8 +761,8 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    // --- MODIFICATION START: Use base URL only ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE;
+    // --- MODIFICATION START: Use base URL + ?key= ---
+    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=`;
     // --- MODIFICATION END ---
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
