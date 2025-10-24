@@ -319,8 +319,19 @@ module.exports = async function handler(request, response) {
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    if (request.method === 'OPTIONS') { /* ... */ }
-    if (request.method !== 'POST') { /* ... */ }
+
+    // Handle OPTIONS pre-flight requests
+    if (request.method === 'OPTIONS') {
+        log("Handling OPTIONS pre-flight request.", 'INFO', 'HTTP');
+        return response.status(200).end();
+    }
+    
+    // Only allow POST
+    if (request.method !== 'POST') {
+        log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
+        response.setHeader('Allow', 'POST, OPTIONS');
+        return response.status(405).json({ message: `Method ${request.method} Not Allowed.` });
+    }
 
     try {
         if (!request.body) {
@@ -381,7 +392,7 @@ module.exports = async function handler(request, response) {
         // Sanitize the plan
         const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && ing.requiredWords && ing.negativeKeywords && ing.totalGramsRequired >= 0);
         if (ingredientPlan.length !== rawIngredientPlan.length) {
-            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries.`, 'WARN', 'DATA');
+            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - rawIngredientPlan.length} invalid entries.`, 'WARN', 'DATA');
         }
         if (ingredientPlan.length === 0) {
             log("Blueprint fail: All ingredients failed sanitization.", 'CRITICAL', 'LLM');
@@ -614,7 +625,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
         const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!jsonText) {
             log("Technical AI returned no JSON text.", 'CRITICAL', 'LLM', result);
-            throw new Error("LLM response was empty or contained no text part.");
+            throw.new Error("LLM response was empty or contained no text part.");
         }
         log("Technical Raw", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
         try {
