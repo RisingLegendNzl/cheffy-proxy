@@ -122,7 +122,7 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
     // Fire and forget
     (async () => {
         try {
-            const freshData = await _fetchNutritionDataFromApi(barcode, query, log);
+            const freshData = await _fetchNutritionDataFromApi( barcode, query, log);
             // Cache both 'found' and 'not_found' results
             if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
                 await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
@@ -250,3 +250,4 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
+
