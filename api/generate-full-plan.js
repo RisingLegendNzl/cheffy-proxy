@@ -3,7 +3,7 @@
 // This file implements the "Mark 20" pipeline:
 // 1. (Optional) Creative AI call.
 // 2. Technical AI call (plan, 3 STORE-PREFIXED query types, required/negativeKeywords, targetSize, accurate totalGrams).
-// 3. **Parallel (K=5) & Optimized** Market Run (Tight -> Normal -> Wide) with Skip Heuristic & Smarter Checklist.
+// 3. Parallel (K=5) & Optimized Market Run (Tight -> Normal -> Wide) with Skip Heuristic & Smarter Checklist.
 // 4. Backend Nutrition Calculation using Open Food Facts (Daily Average).
 
 /// ===== IMPORTS-START ===== \\\\
@@ -45,20 +45,98 @@ const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (Not Found)", brand: "MOCK DA
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function concurrentlyMap(array, limit, asyncMapper) { /* no change */ const results = []; const executing = []; for (const item of array) { const promise = asyncMapper(item).then(result => { executing.splice(executing.indexOf(promise), 1); return result; }).catch(error => { console.error("Error during concurrentlyMap item processing:", error); executing.splice(executing.indexOf(promise), 1); return { error: error.message, // Ensure errors are returned distinctly possibly adding item info is needed here for tracing in caller item: item?.originalIngredient || 'unknown' }; }); executing.push(promise); results.push(promise); if (executing.length >= limit) { await Promise.race(executing); } } return Promise.all(results); }
+async function concurrentlyMap(array, limit, asyncMapper) {
+    const results = [];
+    const executing = [];
+    for (const item of array) {
+        const promise = asyncMapper(item).then(result => {
+            executing.splice(executing.indexOf(promise), 1);
+            return result;
+        }).catch(error => {
+             console.error("Error during concurrentlyMap item processing:", error);
+             executing.splice(executing.indexOf(promise), 1);
+             // Ensure errors are returned distinctly possibly adding item info is needed here for tracing in caller
+             return { error: error.message, item: item?.originalIngredient || 'unknown' };
+        });
+        executing.push(promise);
+        results.push(promise);
+        if (executing.length >= limit) {
+            await Promise.race(executing);
+        }
+    }
+    return Promise.all(results);
+}
 
-async function fetchWithRetry(url, options, log) { /* no change */ for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) { try { const response = await fetch(url, options); if (response.ok) return response; if (response.status === 429 || response.status >= 500) { log(`Attempt ${attempt}: Received retryable error ${response.status} from ${url}. Retrying...`, 'WARN', 'HTTP'); } else { const errorBody = await response.text(); log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from ${url}.`, 'CRITICAL', 'HTTP', { body: errorBody }); throw new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`); } } catch (error) { log(`Attempt ${attempt}: Fetch failed for ${url} with error: ${error.message}. Retrying...`, 'WARN', 'HTTP'); console.error(`Fetch Error Details (Attempt ${attempt}):`, error); } if (attempt < MAX_RETRIES) { const delayTime = Math.pow(2, attempt - 1) * 2000; await delay(delayTime); } } log(`API call to ${url} failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP'); throw new Error(`API call failed after ${MAX_RETRIES} attempts.`); }
+// Corrected fetchWithRetry function definition
+async function fetchWithRetry(url, options, log) {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const response = await fetch(url, options);
+            if (response.ok) {
+                return response; // Success
+            }
+            // Check for retryable status codes
+            if (response.status === 429 || response.status >= 500) {
+                log(`Attempt ${attempt}: Received retryable error ${response.status} from ${url}. Retrying...`, 'WARN', 'HTTP');
+                // Fall through to retry logic
+            } else {
+                // Non-retryable client error (4xx except 429)
+                const errorBody = await response.text();
+                log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from ${url}.`, 'CRITICAL', 'HTTP', { body: errorBody });
+                throw new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`);
+            }
+        } catch (error) {
+            // Catch fetch errors (network issues) or the re-thrown client error
+             if (!error.message.startsWith('API call failed with client error')) { // Avoid double logging client errors
+                log(`Attempt ${attempt}: Fetch failed for ${url} with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+                console.error(`Fetch Error Details (Attempt ${attempt}):`, error);
+            } else {
+                 throw error; // Re-throw the non-retryable client error immediately
+            }
+        }
+        // If it was a retryable error, wait before the next attempt
+        if (attempt < MAX_RETRIES) {
+            const delayTime = Math.pow(2, attempt - 1) * 2000; // Exponential backoff
+            await delay(delayTime);
+        }
+    }
+    // If all retries fail
+    log(`API call to ${url} failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
+    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
+}
 
-const calculateUnitPrice = (price, size) => { /* no change */ if (!price || price <= 0 || typeof size !== 'string' || size.length === 0) return price; const sizeLower = size.toLowerCase().replace(/\s/g, ''); let numericSize = 0; const match = sizeLower.match(/(\d+\.?\d*)(g|kg|ml|l)/); if (match) { numericSize = parseFloat(match[1]); const unit = match[2]; if (numericSize > 0) { let totalUnits = (unit === 'kg' || unit === 'l') ? numericSize * 1000 : numericSize; if (totalUnits >= 100) return (price / totalUnits) * 100; } } return price; };
 
-function parseSize(sizeString) { /* no change */ if (typeof sizeString !== 'string') return null; const sizeLower = sizeString.toLowerCase().replace(/\s/g, ''); const match = sizeLower.match(/(\d+\.?\d*)(g|kg|ml|l)/); if (match) { const value = parseFloat(match[1]); let unit = match[2]; let valueInBaseUnits = value; if (unit === 'kg') { valueInBaseUnits *= 1000; unit = 'g'; } else if (unit === 'l') { valueInBaseUnits *= 1000; unit = 'ml'; } return { value: valueInBaseUnits, unit: unit }; } return null; }
+const calculateUnitPrice = (price, size) => {
+    if (!price || price <= 0 || typeof size !== 'string' || size.length === 0) return price;
+    const sizeLower = size.toLowerCase().replace(/\s/g, '');
+    let numericSize = 0;
+    const match = sizeLower.match(/(\d+\.?\d*)(g|kg|ml|l)/);
+    if (match) {
+        numericSize = parseFloat(match[1]);
+        const unit = match[2];
+        if (numericSize > 0) {
+            let totalUnits = (unit === 'kg' || unit === 'l') ? numericSize * 1000 : numericSize;
+            if (totalUnits >= 100) return (price / totalUnits) * 100;
+        }
+    }
+    return price;
+};
 
-/**
- * Calculates the match score for required words.
- * @param {string} productNameLower - Lowercase product name.
- * @param {string[]} requiredWords - Array of lowercase required words.
- * @returns {number} - Score between 0.0 and 1.0.
- */
+function parseSize(sizeString) {
+    if (typeof sizeString !== 'string') return null;
+    const sizeLower = sizeString.toLowerCase().replace(/\s/g, '');
+    const match = sizeLower.match(/(\d+\.?\d*)(g|kg|ml|l)/);
+    if (match) {
+        const value = parseFloat(match[1]);
+        let unit = match[2];
+        let valueInBaseUnits = value;
+        if (unit === 'kg') { valueInBaseUnits *= 1000; unit = 'g'; }
+        else if (unit === 'l') { valueInBaseUnits *= 1000; unit = 'ml'; }
+        return { value: valueInBaseUnits, unit: unit };
+    }
+    return null;
+}
+
 function calculateRequiredWordScore(productNameLower, requiredWords) {
     if (!requiredWords || requiredWords.length === 0) return 1.0;
     let wordsFound = 0;
@@ -71,61 +149,35 @@ function calculateRequiredWordScore(productNameLower, requiredWords) {
     return wordsFound / requiredWords.length;
 }
 
-
-/**
- * Smarter Checklist function (Mark 20 - Score Based + Negative Keywords + Skip Heuristic support).
- * Modified to return a result object including the score.
- * @param {object} product - Product object from RapidAPI.
- * @param {object} ingredientData - Data from the AI blueprint.
- * @param {Function} log - Logging function.
- * @returns {object} - { pass: boolean, score: number }
- */
 function runSmarterChecklist(product, ingredientData, log) {
     const productNameLower = product.product_name?.toLowerCase() || '';
     if (!productNameLower) return { pass: false, score: 0 };
-
     const { requiredWords = [], negativeKeywords = [], targetSize } = ingredientData;
-    const checkLogPrefix = `Checklist for "${product.product_name}" vs [${requiredWords.join(', ')}]`;
-    let score = 0; // Default score
+    let score = 0;
 
-    // --- 1. Excludes Banned Words (Global Filter) ---
-    if (BANNED_KEYWORDS.some(kw => productNameLower.includes(kw))) {
-        // log(`${checkLogPrefix}: FAIL (Global Banned)`, 'DEBUG', 'CHECKLIST');
-        return { pass: false, score: 0 };
-    }
+    if (BANNED_KEYWORDS.some(kw => productNameLower.includes(kw))) return { pass: false, score: 0 };
+    if (negativeKeywords.length > 0 && negativeKeywords.some(kw => productNameLower.includes(kw.toLowerCase()))) return { pass: false, score: 0 };
 
-    // --- 2. Excludes Negative Keywords (AI Filter) ---
-    if (negativeKeywords.length > 0 && negativeKeywords.some(kw => productNameLower.includes(kw.toLowerCase()))) {
-        // log(`${checkLogPrefix}: FAIL (Negative Keyword)`, 'DEBUG', 'CHECKLIST');
-        return { pass: false, score: 0 };
-    }
-
-    // --- 3. Required Words Score ---
     score = calculateRequiredWordScore(productNameLower, requiredWords);
-    if (score < REQUIRED_WORD_SCORE_THRESHOLD) {
-        // log(`${checkLogPrefix}: FAIL (Score ${score.toFixed(2)} < ${REQUIRED_WORD_SCORE_THRESHOLD})`, 'DEBUG', 'CHECKLIST');
-        return { pass: false, score: score }; // Return score even on failure
-    }
+    if (score < REQUIRED_WORD_SCORE_THRESHOLD) return { pass: false, score: score };
 
-    // --- 4. Size sanity check ---
     if (targetSize?.value && targetSize.unit && product.product_size) {
         const productSizeParsed = parseSize(product.product_size);
         if (productSizeParsed && productSizeParsed.unit === targetSize.unit) {
-            const lowerBound = targetSize.value * (1 - SIZE_TOLERANCE);
-            const upperBound = targetSize.value * (1 + SIZE_TOLERANCE);
-            if (productSizeParsed.value < lowerBound || productSizeParsed.value > upperBound) {
-                // log(`${checkLogPrefix}: FAIL (Size)`, 'DEBUG', 'CHECKLIST');
-                return { pass: false, score: score }; // Return score even on failure
-            }
-        } // No penalty if units mismatch or parse fails
+            const lower = targetSize.value * (1 - SIZE_TOLERANCE); const upper = targetSize.value * (1 + SIZE_TOLERANCE);
+            if (productSizeParsed.value < lower || productSizeParsed.value > upper) return { pass: false, score: score };
+        }
     }
-
-    // log(`${checkLogPrefix}: PASS (Score: ${score.toFixed(2)})`, 'DEBUG', 'CHECKLIST');
-    return { pass: true, score: score }; // Pass, return score
+    return { pass: true, score: score };
 }
 
-
-function isCreativePrompt(cuisinePrompt) { /* no change */ if (!cuisinePrompt || cuisinePrompt.toLowerCase() === 'none') return false; const simpleKeywords = ['italian','mexican','chinese','thai','indian','japanese','mediterranean','french','spanish','korean','vietnamese','greek','american','spicy','mild','quick','easy','high protein','low carb','low fat','vegetarian','vegan']; const promptLower = cuisinePrompt.toLowerCase(); if (simpleKeywords.some(kw => promptLower === kw)) return false; return cuisinePrompt.length > 20 || !simpleKeywords.some(kw => promptLower.includes(kw)); }
+function isCreativePrompt(cuisinePrompt) {
+    if (!cuisinePrompt || cuisinePrompt.toLowerCase() === 'none') return false;
+    const simpleKeywords = ['italian','mexican','chinese','thai','indian','japanese','mediterranean','french','spanish','korean','vietnamese','greek','american','spicy','mild','quick','easy','high protein','low carb','low fat','vegetarian','vegan'];
+    const promptLower = cuisinePrompt.toLowerCase();
+    if (simpleKeywords.some(kw => promptLower === kw)) return false;
+    return cuisinePrompt.length > 20 || !simpleKeywords.some(kw => promptLower.includes(kw));
+}
 
 /// ===== HELPERS-END ===== ////
 
@@ -136,7 +188,7 @@ function isCreativePrompt(cuisinePrompt) { /* no change */ if (!cuisinePrompt ||
 // --- MAIN API HANDLER ---
 module.exports = async function handler(request, response) {
     const logs = [];
-    const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => { /* no change */ const logEntry={timestamp:new Date().toISOString(),level:level.toUpperCase(),tag:tag.toUpperCase(),message,data}; logs.push(logEntry); console.log(JSON.stringify(logEntry)); return logEntry;};
+    const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => { const logEntry={timestamp:new Date().toISOString(),level:level.toUpperCase(),tag:tag.toUpperCase(),message,data}; logs.push(logEntry); console.log(JSON.stringify(logEntry)); return logEntry;};
 
     log("Orchestrator invoked.", 'INFO', 'SYSTEM');
     response.setHeader('Access-Control-Allow-Origin', '*'); response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -148,46 +200,48 @@ module.exports = async function handler(request, response) {
         const { store, cuisine } = formData;
         const numDays = parseInt(formData.days, 10) || 1;
 
-        // --- Phase 1: Creative Router --- (No change)
+        // --- Phase 1: Creative Router ---
         log("Phase 1: Creative Router...", 'INFO', 'PHASE');
         let creativeIdeas = null;
-        if (isCreativePrompt(cuisine)) { log(`Creative prompt detected: "${cuisine}". Calling Creative AI...`, 'INFO', 'LLM'); creativeIdeas = await generateCreativeIdeas(cuisine, log); log(`Creative AI returned: "${creativeIdeas.substring(0, 100)}..."`, 'SUCCESS', 'LLM'); }
-        else { log("Simple prompt detected. Skipping.", 'INFO', 'SYSTEM'); }
+        if (isCreativePrompt(cuisine)) { log(`Creative prompt: "${cuisine}". Calling Creative AI...`, 'INFO', 'LLM'); creativeIdeas = await generateCreativeIdeas(cuisine, log); log(`Creative AI: "${creativeIdeas.substring(0, 100)}..."`, 'SUCCESS', 'LLM'); }
+        else { log("Simple prompt. Skipping.", 'INFO', 'SYSTEM'); }
 
-        // --- Phase 2: Technical Blueprint --- (No change)
+        // --- Phase 2: Technical Blueprint ---
         log("Phase 2: Generating Technical Blueprint...", 'INFO', 'PHASE');
-        const calorieTarget = calculateCalorieTarget(formData); log(`Calculated daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
-        const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log); // Uses Mark 19 prompt
-        if (!ingredientPlan || ingredientPlan.length === 0) { log("Blueprint failed: No ingredients returned.", 'CRITICAL', 'LLM'); throw new Error("Blueprint failed: No ingredients."); }
-        log(`Blueprint successful. ${ingredientPlan.length} ingredients found.`, 'SUCCESS', 'PHASE');
+        const calorieTarget = calculateCalorieTarget(formData); log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
+        const { ingredients: ingredientPlan, mealPlan } = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
+        if (!ingredientPlan || ingredientPlan.length === 0) { log("Blueprint fail: No ingredients.", 'CRITICAL', 'LLM'); throw new Error("Blueprint fail: No ingredients."); }
+        log(`Blueprint success: ${ingredientPlan.length} ingredients.`, 'SUCCESS', 'PHASE');
 
 
-        // --- Phase 3: Market Run (Parallel & Optimized) --- (NEW LOGIC)
+        // --- Phase 3: Market Run (Parallel & Optimized) ---
         log("Phase 3: Executing Parallel & Optimized Market Run...", 'INFO', 'PHASE');
 
-        // This function processes a SINGLE ingredient using the T->N->W logic + skip heuristic
         const processSingleIngredientOptimized = async (ingredient) => {
             const ingredientKey = ingredient.originalIngredient;
-            log(`Starting Market Run for: "${ingredientKey}"`, 'DEBUG', 'MARKET_RUN');
+            // Simplified log for start
+            // log(`Starting Market Run for: "${ingredientKey}"`, 'DEBUG', 'MARKET_RUN');
             const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
             let foundProduct = null;
-            let bestScoreSoFar = -1; // Keep track of best score found
+            let bestScoreSoFar = -1;
 
             const queriesToTry = [ { type: 'tight', query: ingredient.tightQuery }, { type: 'normal', query: ingredient.normalQuery }, { type: 'wide', query: ingredient.wideQuery } ];
 
             for (const { type, query } of queriesToTry) {
-                 if (!query) { log(`Skipping query type "${type}" for "${ingredientKey}" as missing.`, 'WARN', 'MARKET_RUN'); result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
+                 if (!query) { /* log skip */ result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
 
-                log(`Attempting "${type}" query for "${ingredientKey}": "${query}"`, 'DEBUG', 'HTTP');
-                const priceData = await fetchPriceData(store, query, 1); // Page 1 only
+                // Simplified log for attempt
+                // log(`Attempting "${type}" query for "${ingredientKey}": "${query}"`, 'DEBUG', 'HTTP');
+                const priceData = await fetchPriceData(store, query, 1);
                 result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0, rawCount: 0, bestScore: 0});
                 const currentAttemptLog = result.searchAttempts.at(-1);
 
-                if (priceData.error) { log(`Fetch failed for "${type}" query "${query}": ${priceData.error.message}`, 'WARN', 'HTTP'); currentAttemptLog.status = 'fetch_error'; continue; } // Critical: Continue to next query type on fetch error
+                if (priceData.error) { log(`Fetch failed (${type} query) for "${ingredientKey}": ${priceData.error.message}`, 'WARN', 'HTTP'); currentAttemptLog.status = 'fetch_error'; continue; }
 
                 const rawProducts = priceData.results || [];
                 currentAttemptLog.rawCount = rawProducts.length;
-                log(`Raw results for "${ingredientKey}" (${type} query): ${rawProducts.length}`, 'DEBUG', 'DATA'); // Log count, not names
+                // Simplified log for raw results
+                // log(`Raw results for "${ingredientKey}" (${type} query): ${rawProducts.length}`, 'DEBUG', 'DATA');
 
                 const validProductsOnPage = [];
                 let pageBestScore = -1;
@@ -202,81 +256,68 @@ module.exports = async function handler(request, response) {
                 currentAttemptLog.bestScore = pageBestScore;
 
                 if (validProductsOnPage.length > 0) {
-                    log(`Found ${validProductsOnPage.length} valid products for "${ingredientKey}" using "${type}" query (Best score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
-                    // Add newly found valid products to the main list
+                    // Simplified log for success
+                    // log(`Found ${validProductsOnPage.length} valid for "${ingredientKey}" (${type} query, Best score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
                     result.allProducts.push(...validProductsOnPage.map(vp => vp.product));
-                    // Determine the overall cheapest valid product found SO FAR across all queries tried
                     foundProduct = result.allProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, result.allProducts[0]);
                     result.currentSelectionURL = foundProduct.url;
                     result.source = 'discovery';
                     currentAttemptLog.status = 'success';
                     bestScoreSoFar = Math.max(bestScoreSoFar, pageBestScore);
 
-                    // *** SKIP HEURISTIC ***
                     if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
-                        log(`Applying skip heuristic for "${ingredientKey}" (Score ${bestScoreSoFar.toFixed(2)} >= ${SKIP_HEURISTIC_SCORE_THRESHOLD}). Skipping normal/wide.`, 'INFO', 'MARKET_RUN');
-                        break; // Stop searching further queries for this ingredient
+                        log(`Skip heuristic hit for "${ingredientKey}" (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
+                        break;
                     }
-                    // Implicitly continue to next query type if heuristic not met
                 } else {
-                    log(`No valid products for "${ingredientKey}" using "${type}" query after smarter checklist.`, 'WARN', 'DATA');
+                    // Simplified log for no match
+                    // log(`No valid products for "${ingredientKey}" (${type} query).`, 'WARN', 'DATA');
                     currentAttemptLog.status = 'no_match';
-                    // Continue to the next query type
                 }
-            } // End query types loop
+            } // End query loop
 
-            if (result.source === 'failed') { log(`"${ingredientKey}" definitively failed - no valid products found.`, 'WARN', 'MARKET_RUN'); }
-            
-            // Return the processed result for this single ingredient
+            if (result.source === 'failed') { log(`"${ingredientKey}" definitively failed.`, 'WARN', 'MARKET_RUN'); }
             return { [ingredientKey]: result };
-             
-        }; // End processSingleIngredientOptimized
+        }; // End processSingleIngredient
 
-
-        // Execute the market run in parallel
-        log(`Executing Market Run for ${ingredientPlan.length} ingredients with concurrency K=${MAX_MARKET_RUN_CONCURRENCY}...`, 'INFO', 'MARKET_RUN');
+        log(`Market Run: ${ingredientPlan.length} ingredients, K=${MAX_MARKET_RUN_CONCURRENCY}...`, 'INFO', 'MARKET_RUN');
+        const startMarketTime = Date.now();
         const parallelResultsArray = await concurrentlyMap(ingredientPlan, MAX_MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
+        const endMarketTime = Date.now();
+        log(`Market Run parallel execution took ${(endMarketTime - startMarketTime)/1000}s`, 'INFO', 'SYSTEM');
 
-        // Combine results from parallel execution
+
         const finalResults = parallelResultsArray.reduce((acc, currentResult) => {
-             // Handle potential errors from concurrentlyMap
              if(currentResult.error) {
-                 log(`Error processing ingredient "${currentResult.item}": ${currentResult.error}`, 'CRITICAL', 'MARKET_RUN');
-                 // Optionally create a failed result entry
-                 if(currentResult.item) {
-                    acc[currentResult.item] = { ...ingredientPlan.find(i=>i.originalIngredient===currentResult.item), allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'error', searchAttempts: [{ status: 'processing_error', error: currentResult.error}] };
-                 }
+                 log(`Error processing "${currentResult.item}": ${currentResult.error}`, 'CRITICAL', 'MARKET_RUN');
+                 if(currentResult.item) { acc[currentResult.item] = { ...ingredientPlan.find(i=>i.originalIngredient===currentResult.item), source: 'error', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, searchAttempts: [{ status: 'processing_error', error: currentResult.error}] }; }
                  return acc;
              }
              return { ...acc, ...currentResult };
         }, {});
-
-
         log("Market Run complete.", 'SUCCESS', 'PHASE');
-        // --- END NEW PHASE 3 ---
 
 
-        // --- Phase 4: Nutrition Calculation --- (No change, uses finalResults)
+        // --- Phase 4: Nutrition Calculation ---
         log("Phase 4: Calculating Estimated Nutrition...", 'INFO', 'PHASE');
         let calculatedTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
         const itemsToFetchNutrition = [];
-        // Iterate through the finalResults object generated by the parallel process
-        for (const key in finalResults) { const result = finalResults[key]; const selectedProduct = result.allProducts?.find(p => p.url === result.currentSelectionURL); if (result.source === 'discovery' && selectedProduct) { itemsToFetchNutrition.push({ ingredientKey: key, barcode: selectedProduct.barcode, query: selectedProduct.name, grams: result.totalGramsRequired || 0 }); } }
+        for (const key in finalResults) { const result = finalResults[key]; const selected = result.allProducts?.find(p => p.url === result.currentSelectionURL); if (result.source === 'discovery' && selected) { itemsToFetchNutrition.push({ ingredientKey: key, barcode: selected.barcode, query: selected.name, grams: result.totalGramsRequired || 0 }); } }
 
         if (itemsToFetchNutrition.length > 0) {
-            log(`Fetching nutrition data for ${itemsToFetchNutrition.length} selected products...`, 'INFO', 'HTTP');
-            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) => fetchNutritionData(item.barcode, item.query).then(nutrition => ({ ...item, nutrition })).catch(err => { log(`Nutrition fetch failed for ${item.ingredientKey}: ${err.message}`, 'WARN', 'HTTP'); return { ...item, nutrition: { status: 'not_found' } }; }));
-            log("Nutrition data fetching complete.", 'SUCCESS', 'HTTP');
+            log(`Fetching nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
+            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) => fetchNutritionData(item.barcode, item.query).then(nut => ({ ...item, nut })).catch(err => { log(`Nutrition fetch fail for ${item.ingredientKey}: ${err.message}`, 'WARN', 'HTTP'); return { ...item, nut: { status: 'not_found' } }; }));
+            log("Nutrition fetch complete.", 'SUCCESS', 'HTTP');
 
             let weeklyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-            nutritionResults.forEach(item => { if (item.nutrition?.status === 'found' && item.grams > 0) { const nut = item.nutrition; weeklyTotals.calories += (nut.calories / 100) * item.grams; weeklyTotals.protein += (nut.protein / 100) * item.grams; weeklyTotals.fat += (nut.fat / 100) * item.grams; weeklyTotals.carbs += (nut.carbs / 100) * item.grams; } else { log(`Skipping nutrition for ${item.ingredientKey}: Data not found/zero grams.`, 'INFO', 'CALC'); } });
+            nutritionResults.forEach(item => { if (item.nut?.status === 'found' && item.grams > 0) { const nut=item.nut; weeklyTotals.calories+=(nut.calories/100)*item.grams; weeklyTotals.protein+=(nut.protein/100)*item.grams; weeklyTotals.fat+=(nut.fat/100)*item.grams; weeklyTotals.carbs+=(nut.carbs/100)*item.grams; } else { /* log skip */ } });
 
             calculatedTotals.calories = Math.round(weeklyTotals.calories / numDays); calculatedTotals.protein = Math.round(weeklyTotals.protein / numDays); calculatedTotals.fat = Math.round(weeklyTotals.fat / numDays); calculatedTotals.carbs = Math.round(weeklyTotals.carbs / numDays);
-            log("Estimated DAILY nutrition totals calculated.", 'SUCCESS', 'CALC', calculatedTotals);
-        } else { log("No valid products found to calculate nutrition.", 'WARN', 'CALC'); }
+            log("DAILY nutrition totals calculated.", 'SUCCESS', 'CALC', calculatedTotals);
+        } else { log("No products for nutrition calc.", 'WARN', 'CALC'); }
 
 
-        // --- Phase 5: Assembling Final Response --- (No change)
+        // --- Phase 5: Assembling Final Response ---
         log("Phase 5: Assembling Final Response...", 'INFO', 'PHASE');
         const finalResponseData = { mealPlan: mealPlan || [], uniqueIngredients: ingredientPlan, results: finalResults, nutritionalTargets: calculatedTotals };
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
@@ -296,65 +337,59 @@ module.exports = async function handler(request, response) {
 /// ===== API-CALLERS-START ===== \\\\
 
 
-async function generateCreativeIdeas(cuisinePrompt, log) { /* no change */ const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;const systemPrompt=`You are a creative chef... Return *only* a simple, comma-separated list...`;const userQuery=`Theme: "${cuisinePrompt}"...`;log("Creative AI Prompt",'INFO','LLM_PROMPT',{userQuery});const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:systemPrompt}]},};try{const response=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log);if(!response.ok)throw new Error(`Creative AI API HTTP error! Status: ${response.status}.`);const result=await response.json();const text=result.candidates?.[0]?.content?.parts?.[0]?.text;if(!text)throw new Error("Creative AI response empty.");log("Creative AI Raw Response",'INFO','LLM',{raw:text.substring(0,500)});return text;}catch(error){log("Creative AI failed.",'CRITICAL','LLM',{error:error.message});return"";}}
+async function generateCreativeIdeas(cuisinePrompt, log) { /* no change */ const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;const sysPrompt=`Creative chef... comma-separated list.`;const userQuery=`Theme: "${cuisinePrompt}"...`;log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};try{const res=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log);if(!res.ok)throw new Error(`Creative AI HTTP ${res.status}.`);const result=await res.json();const text=result.candidates?.[0]?.content?.parts?.[0]?.text;if(!text)throw new Error("Creative AI empty.");log("Creative Raw",'INFO','LLM',{raw:text.substring(0,500)});return text;}catch(e){log("Creative AI failed.",'CRITICAL','LLM',{error:e.message});return"";}}
 
-/**
- * AI Call #2: The "Technician" - Prompt for Mark 19/20 (Store Prefix, Negative Keywords, Accurate Total Grams)
- */
 async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
-    const cuisineInstruction = creativeIdeas ? `Use these creative meal ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus recipes around: ${cuisine}.`:'Neutral profile.');
+    const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (No change from Mark 19) ---
-    const systemPrompt = `You are an expert dietitian, chef, and search query optimizer creating a practical grocery and meal plan for a specific store: ${store}.
+    // --- PROMPT (Mark 19) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}.
 RULES:
-1.  Generate meal plan AND shopping list ('ingredients').
-2.  **CRITICAL QUERY RULES**: For each ingredient:
-    a. 'tightQuery': Hyper-specific query, PREPENDING store name (e.g., "${store} RSPCA chicken breast fillets 500g"). Null if impossible.
-    b. 'normalQuery': 2-4 generic but descriptive words, PREPENDING store name (e.g., "${store} chicken breast fillets", "${store} smooth peanut butter"). MUST NOT be overly specific (NO brands/sizes unless essential).
-    c. 'wideQuery': 1-2 very broad words, PREPENDING store name (e.g., "${store} chicken breast", "${store} peanut butter", "${store} oats"). Null if normal is broad.
-3.  'requiredWords': Array of 2-4 ESSENTIAL, CORE, lowercase keywords defining the item for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"], ["peanut", "butter", "smooth"]).
-4.  'negativeKeywords': Array of 1-5 lowercase words that indicate an INCORRECT product (e.g., for "tuna springwater": ["oil", "brine", "cat"]; for "diced beef": ["mince", "strip"]). Empty array if none apply.
-5.  'targetSize': Object { "value": NUMBER, "unit": "g" | "ml" } for typical pack size (e.g., { "value": 500, "unit": "g" }). MUST BE 'g' or 'ml'. Null if not applicable (e.g., loose produce like 'apples').
-6.  'totalGramsRequired': Your BEST ESTIMATE of total grams/ml needed for the entire plan. Calculate this by summing portion sizes in your generated mealPlan. Be precise.
-7.  Adhere to user constraints.
-8.  'ingredients' MANDATORY. 'mealPlan' OPTIONAL but make BEST EFFORT (provide simple plan if needed).
-9.  DO NOT include 'nutritionalTargets'.`;
-    // --- END PROMPT ---
+1. Generate meal plan & shopping list ('ingredients').
+2. QUERIES: For each ingredient:
+    a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Null if impossible.
+    b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential.
+    c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad.
+3. 'requiredWords': Array[2-4] ESSENTIAL, CORE, lowercase keywords for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"]).
+4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). Empty array ok.
+5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A.
+6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise.
+7. Adhere to constraints.
+8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT.
+9. NO 'nutritionalTargets'.`;
 
-    const userQuery = `Generate the ${days}-day plan for ${name||'Guest'}.
-- Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Activity: ${formData.activityLevel}. Goal: ${goal}.
-- Store: ${store}.
-- Target: ~${calorieTarget} kcal (ref only). Dietary: ${dietary}.
-- Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spending: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}.
-- Cuisine: ${cuisineInstruction}.`;
+    const userQuery = `Gen ${days}-day plan for ${name||'Guest'}.
+Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}.
+Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}.
+Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}.
+Cuisine: ${cuisineInstruction}.`;
 
-    log("Technical AI Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
+    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
-    // Schema remains the same as Mark 19
+    // Schema (Mark 19)
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { "ingredients": { type: "ARRAY", items: { type: "OBJECT", properties: { "originalIngredient": { "type": "STRING" }, "category": { "type": "STRING" }, "tightQuery": { "type": "STRING", nullable: true }, "normalQuery": { "type": "STRING" }, "wideQuery": { "type": "STRING", nullable: true }, "requiredWords": { type: "ARRAY", items: { "type": "STRING" } }, "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } }, "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true }, "totalGramsRequired": { "type": "NUMBER" }, "quantityUnits": { "type": "STRING" } }, required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "totalGramsRequired", "quantityUnits"] } }, "mealPlan": { type: "ARRAY", items: { type: "OBJECT", properties: { "day": { "type": "NUMBER" }, "meals": { type: "ARRAY", items: { type: "OBJECT", properties: { "type": { "type": "STRING" }, "name": { "type": "STRING" }, "description": { "type": "STRING" } } } } } } } }, required: ["ingredients"] } }
     };
 
     const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
-    if (!response.ok) throw new Error(`Technical AI API HTTP error! Status: ${response.status}.`);
-    const result = await response.json(); const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text; if (!jsonText) { log("Technical AI returned no text.", 'CRITICAL', 'LLM', result); throw new Error("LLM response empty."); }
-    log("Technical AI Raw Response", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
+    if (!response.ok) throw new Error(`Technical AI HTTP ${response.status}.`);
+    const result=await response.json(); const jsonText=result.candidates?.[0]?.content?.parts?.[0]?.text; if (!jsonText){log("Technical AI empty.",'CRITICAL','LLM',result); throw new Error("LLM empty.");}
+    log("Technical Raw",'INFO','LLM',{raw:jsonText.substring(0,1000)+'...'});
     try {
-        const parsed = JSON.parse(jsonText); log("Parsed Technical AI Response", 'INFO', 'DATA', { ingredientCount: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan && parsed.mealPlan.length > 0 }); if (!parsed.ingredients) { parsed.ingredients = []; log("Corrected missing 'ingredients' array.", 'WARN', 'LLM'); }
-        // Basic validation
-        if(parsed.ingredients.length>0&&!parsed.ingredients[0]?.normalQuery){log("Validation Warning: Missing 'normalQuery'.",'WARN','LLM',parsed.ingredients[0]);}
-        if(parsed.ingredients.length>0&&(!parsed.ingredients[0]?.requiredWords||parsed.ingredients[0]?.requiredWords.length<1)){log("Validation Warning: Missing or empty 'requiredWords'.",'WARN','LLM',parsed.ingredients[0]);}
-        if(parsed.ingredients.length>0&&!parsed.ingredients[0]?.negativeKeywords){log("Validation Warning: Missing 'negativeKeywords'.",'WARN','LLM',parsed.ingredients[0]);}
+        const parsed=JSON.parse(jsonText); log("Parsed Technical",'INFO','DATA',{ingreds:parsed.ingredients?.length||0,hasMealPlan:!!parsed.mealPlan?.length}); if(!parsed.ingredients){parsed.ingredients=[];log("Added missing 'ingredients'.",'WARN','LLM');}
+        if(parsed.ingredients.length>0&&!parsed.ingredients[0]?.normalQuery){log("WARN: Missing 'normalQuery'.",'WARN','LLM',parsed.ingredients[0]);}
+        if(parsed.ingredients.length>0&&(!parsed.ingredients[0]?.requiredWords||parsed.ingredients[0]?.requiredWords.length<1)){log("WARN: Missing 'requiredWords'.",'WARN','LLM',parsed.ingredients[0]);}
+        if(parsed.ingredients.length>0&&!parsed.ingredients[0]?.negativeKeywords){log("WARN: Missing 'negativeKeywords'.",'WARN','LLM',parsed.ingredients[0]);}
         return parsed;
-    } catch (parseError) { log("Failed to parse Technical AI JSON.", 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: parseError.message }); throw new Error(`Failed to parse LLM JSON: ${parseError.message}`); }
+    } catch (e) { log("Failed parse Technical JSON.",'CRITICAL','LLM',{jsonText:jsonText.substring(0,1000),error:e.message}); throw new Error(`Parse LLM JSON: ${e.message}`); }
 }
 
-function calculateCalorieTarget(formData) { /* no change */ const{weight,height,age,gender,activityLevel,goal}=formData;const weightKg=parseFloat(weight);const heightCm=parseFloat(height);const ageYears=parseInt(age,10);if(!weightKg||!heightCm||!ageYears)return 2000;let bmr=(gender==='male')?(10*weightKg+6.25*heightCm-5*ageYears+5):(10*weightKg+6.25*heightCm-5*ageYears-161);const activityMultipliers={sedentary:1.2,light:1.375,moderate:1.55,active:1.725,veryActive:1.9};const tdee=bmr*(activityMultipliers[activityLevel]||1.55);const goalAdjustments={cut:-500,maintain:0,bulk:500};return Math.round(tdee+(goalAdjustments[goal]||0));}
+function calculateCalorieTarget(formData) { /* no change */ const{weight,height,age,gender,activityLevel,goal}=formData;const w=parseFloat(weight);const h=parseFloat(height);const y=parseInt(age,10);if(!w||!h||!y)return 2000;let bmr=(gender==='male')?(10*w+6.25*h-5*y+5):(10*w+6.25*h-5*y-161);const actM={sedentary:1.2,light:1.375,moderate:1.55,active:1.725,veryActive:1.9};const tdee=bmr*(actM[activityLevel]||1.55);const goalAdj={cut:-500,maintain:0,bulk:500};return Math.round(tdee+(goalAdj[goal]||0));}
 /// ===== API-CALLERS-END ===== ////
 
