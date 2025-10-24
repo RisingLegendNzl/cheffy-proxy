@@ -1,14 +1,11 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 28 Pipeline + TypeError Fixes for LLM Results
+// Mark 29 Pipeline + CRITICAL FIX: Ensure userQuery is never empty before Gemini Call.
+// + TypeError Fixes for LLM Results (Mark 28)
 // + Ladder Telemetry Logging (Step 5)
 // + Checklist Upgrades (Step 4)
 // + SWR-lite Caching (Step 3)
 // + Token Bucket (Step 1)
-// 1. Creative AI (Optional) - Added undefined check fix
-// 2. Technical AI (Plan, Queries, Keywords, Size, Grams, AI Nutrition Est., Allowed Categories) - Enhanced Rules
-// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist v2, CACHED w/ SWR) - Enhanced Telemetry
-// 4. Nutrition Calculation (with AI Fallback, CACHED w/ SWR)
 
 /// ===== IMPORTS-START ===== \\\\
 
@@ -360,24 +357,21 @@ module.exports = async function handler(request, response) {
         const calorieTarget = calculateCalorieTarget(formData, log);
         log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
 
-        // --- FIX 2: Call and Check before Destructuring ---
+        // --- FIX 2: Call and Check before Destructuring (Corrected) ---
         let llmResult;
         try {
             // Call the function and store the result
             llmResult = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
         } catch (llmError) {
             // If generateLLMPlanAndMeals throws, log is already done inside.
-            // Re-throw the error to be caught by the main handler's catch block.
             log(`Error during generateLLMPlanAndMeals call: ${llmError.message}`, 'CRITICAL', 'LLM_CALL'); // Add specific log here
             throw llmError; // Propagate the error
         }
 
-        // --- FIX 2 (Modified): Destructure with defaults to prevent TypeError ---
-        // We also use `llmResult || {}` to guard against llmResult itself being null.
+        // Destructure with defaults to prevent TypeError if llmResult is null/undefined
         const { ingredients, mealPlan = [] } = llmResult || {};
 
         // Now, check 'ingredients' and default to [] if it's not a valid array.
-        // This handles null, undefined, or any other invalid type.
         const rawIngredientPlan = Array.isArray(ingredients) ? ingredients : [];
         // --- END FIX 2 ---
 
@@ -496,7 +490,7 @@ module.exports = async function handler(request, response) {
                              kept_count: keptCount,
                              price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null,
                              mode: mode,
-                             bucket_wait_ms: bucketWaitMs // Included
+                             bucket_wait_ms: bucketWaitMs
                          });
 
                         if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
@@ -526,7 +520,23 @@ module.exports = async function handler(request, response) {
         const endMarketTime = Date.now();
         log(`Market Run parallel took ${(endMarketTime - startMarketTime)/1000}s`, 'INFO', 'SYSTEM');
 
-        const finalResults = parallelResultsArray.reduce((acc, currentResult) => { /* ... reduce logic ... */ });
+        const finalResults = parallelResultsArray.reduce((acc, currentResult) => {
+             if (!currentResult) { log(`Received null/undefined result from concurrentlyMap`, 'ERROR', 'SYSTEM'); return acc; }
+             if (currentResult.error && currentResult.item) {
+                 log(`ConcurrentlyMap Error for "${currentResult.item}": ${currentResult.error}`, 'CRITICAL', 'MARKET_RUN');
+                 const failedIngredientData = ingredientPlan.find(i => i.originalIngredient === currentResult.item);
+                 acc[currentResult.item] = { ...(failedIngredientData || { originalIngredient: currentResult.item }), source: 'error', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, searchAttempts: [{ status: 'processing_error', error: currentResult.error}] };
+                 return acc;
+             }
+             const ingredientKey = Object.keys(currentResult)[0];
+             if(ingredientKey && currentResult[ingredientKey]?.source === 'error') {
+                 log(`Processing Error for "${ingredientKey}": ${currentResult[ingredientKey].error}`, 'CRITICAL', 'MARKET_RUN');
+                  const failedIngredientData = ingredientPlan.find(i => i.originalIngredient === ingredientKey);
+                 acc[ingredientKey] = { ...(failedIngredientData || { originalIngredient: ingredientKey }), source: 'error', error: currentResult[ingredientKey].error, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url };
+                 return acc;
+             }
+             return { ...acc, ...currentResult };
+        }, {});
 
         log("Market Run complete.", 'SUCCESS', 'PHASE');
 
@@ -535,22 +545,84 @@ module.exports = async function handler(request, response) {
         log("Phase 4: Nutrition Calculation...", 'INFO', 'PHASE');
         let calculatedTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
         const itemsToFetchNutrition = [];
-        for (const key in finalResults) { /* ... populate itemsToFetchNutrition ... */ }
+
+        for (const key in finalResults) {
+            const result = finalResults[key];
+            if (result && result.source === 'discovery') {
+                const selected = result.allProducts?.find(p => p.url === result.currentSelectionURL);
+                if (selected) {
+                    itemsToFetchNutrition.push({
+                        ingredientKey: key, barcode: selected.barcode, query: selected.name,
+                        grams: result.totalGramsRequired >= 0 ? result.totalGramsRequired : 0,
+                        aiEstCaloriesPer100g: result.aiEstCaloriesPer100g, aiEstProteinPer100g: result.aiEstProteinPer100g,
+                        aiEstFatPer100g: result.aiEstFatPer100g, aiEstCarbsPer100g: result.aiEstCarbsPer100g
+                    });
+                }
+            } else if (result && (result.source === 'failed' || result.source === 'error')) {
+                 if (result.totalGramsRequired > 0 && typeof result.aiEstCaloriesPer100g === 'number') {
+                     log(`[${key}] Market Run failed, adding to nutrition queue with AI fallback.`, 'WARN', 'MARKET_RUN');
+                     itemsToFetchNutrition.push({
+                         ingredientKey: key, barcode: null, query: null, grams: result.totalGramsRequired,
+                         aiEstCaloriesPer100g: result.aiEstCaloriesPer100g, aiEstProteinPer100g: result.aiEstProteinPer100g,
+                         aiEstFatPer100g: result.aiEstFatPer100g, aiEstCarbsPer100g: result.aiEstCarbsPer100g
+                     });
+                 }
+            }
+        }
+
 
         if (itemsToFetchNutrition.length > 0) {
             log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) =>
+                // fetchNutritionData now has SWR logic built-in
                 (item.barcode || item.query) ?
                 fetchNutritionData(item.barcode, item.query, log) // Pass log
                     .then(nut => ({ ...item, nut }))
-                    .catch(err => { /* ... error handling ... */ })
+                    .catch(err => {
+                        log(`Unhandled Nutri fetch error ${item.ingredientKey}: ${err.message}`, 'CRITICAL', 'HTTP');
+                        return { ...item, nut: { status: 'not_found', error: 'Unhandled fetch error' } };
+                    })
                 : Promise.resolve({ ...item, nut: { status: 'not_found' } })
             );
+
             log("Nutrition fetch/calc complete.", 'SUCCESS', 'HTTP');
+
             let weeklyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-            nutritionResults.forEach(item => { /* ... calculate totals using AI fallback if needed ... */ });
+
+            nutritionResults.forEach(item => {
+                if (!item.grams || item.grams <= 0) return;
+                const nut = item.nut;
+
+                if (nut?.status === 'found') {
+                    weeklyTotals.calories += ((nut.calories || 0) / 100) * item.grams;
+                    weeklyTotals.protein += ((nut.protein || 0) / 100) * item.grams;
+                    weeklyTotals.fat += ((nut.fat || 0) / 100) * item.grams;
+                    weeklyTotals.carbs += ((nut.carbs || 0) / 100) * item.grams;
+                } else if (
+                    typeof item.aiEstCaloriesPer100g === 'number' && typeof item.aiEstProteinPer100g === 'number' &&
+                    typeof item.aiEstFatPer100g === 'number' && typeof item.aiEstCarbsPer100g === 'number'
+                ) {
+                    log(`Using AI nutrition fallback for ${item.ingredientKey}.`, 'WARN', 'CALC', {
+                        item: item.ingredientKey, grams: item.grams,
+                        source: nut?.status ? `OFF status: ${nut.status}` : 'Market Run Fail'
+                    });
+                    weeklyTotals.calories += (item.aiEstCaloriesPer100g / 100) * item.grams;
+                    weeklyTotals.protein += (item.aiEstProteinPer100g / 100) * item.grams;
+                    weeklyTotals.fat += (item.aiEstFatPer100g / 100) * item.grams;
+                    weeklyTotals.carbs += (item.aiEstCarbsPer100g / 100) * item.grams;
+                } else {
+                    log(`Skipping nutrition for ${item.ingredientKey}: Data not found and no AI fallback.`, 'INFO', 'CALC');
+                }
+            });
+
             log("Calculated WEEKLY nutrition totals:", 'DEBUG', 'CALC', weeklyTotals);
-            /* ... average totals ... */
+            const validNumDays = (numDays >= 1 && numDays <= 7) ? numDays : 1;
+            log(`Number of days for averaging: ${validNumDays}`, 'DEBUG', 'CALC');
+
+            calculatedTotals.calories = Math.round(weeklyTotals.calories / validNumDays);
+            calculatedTotals.protein = Math.round(weeklyTotals.protein / validNumDays);
+            calculatedTotals.fat = Math.round(weeklyTotals.fat / validNumDays);
+            calculatedTotals.carbs = Math.round(weeklyTotals.carbs / validNumDays);
             log("DAILY nutrition totals calculated.", 'SUCCESS', 'CALC', calculatedTotals);
         } else {
             log("No valid products with required grams found for nutrition calculation.", 'WARN', 'CALC');
@@ -585,8 +657,8 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
     const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};
     try{
         const res=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log); // Pass log
-        const result=await res.json();
-        const text=result.candidates?.[0]?.content?.parts?.[0]?.text;
+        const result = await res.json();
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
         // --- FIX 1: Stricter check before substring ---
         if (typeof text !== 'string' || text.length === 0) {
@@ -606,12 +678,24 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
 async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    /* ... setup mealTypesMap, costInstruction, maxRepetitions, cuisineInstruction ... */
+    const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
+    const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
+    const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
+    const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
     // --- PROMPT (Mark 25) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer... 14. CATEGORY (Optional): ...`;
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). CRITICAL SAFETY RULE: If the ingredient is commonly used as a flavour in NON-FOOD items (e.g., mint, lemon, vanilla, coconut), you MUST include common non-food product types in negativeKeywords (e.g., for 'Fresh Mint', add ["mouthwash", "toothpaste", "gum", "floss", "tea"]; for 'Lemon', add ["cleaner", "spray", "polish", "detergent", "soap"]; for 'Coconut Oil', add ["shampoo", "lotion", "conditioner"]). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'. 14. CATEGORY (Optional): Optionally provide 'allowedCategories' string array (e.g., ["dairy", "cheese"], ["fruit", "veg"]). Use simple, broad terms. This helps filter out items from incorrect aisles (e.g., "cheese snacks" vs "cheese block"). Null if not needed.`;
 
-    const userQuery = `Gen ${days}-day plan for ${name||'Guest'}...`;
+    // CRITICAL FIX: Ensure template literals resolve to a string, or provide fallback
+    const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
+
+
+    // --- Check userQuery before passing to payload ---
+    if (userQuery.trim().length < 50) {
+        log("Critical Input Failure: User query is too short/empty due to missing form data or invalid template resolution.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery: userQuery, formData: formData });
+        throw new Error("Cannot generate plan: Invalid input data caused an empty prompt.");
+    }
+    // --- End Check ---
 
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
@@ -622,6 +706,56 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: {
             responseMimeType: "application/json",
+            responseSchema: {
+                type: "OBJECT",
+                properties: {
+                    "ingredients": {
+                        type: "ARRAY",
+                        items: {
+                            type: "OBJECT",
+                            properties: {
+                                "originalIngredient": { "type": "STRING" },
+                                "category": { "type": "STRING" },
+                                "tightQuery": { "type": "STRING", nullable: true },
+                                "normalQuery": { "type": "STRING" },
+                                "wideQuery": { "type": "STRING", nullable: true },
+                                "requiredWords": { type: "ARRAY", items: { "type": "STRING" } },
+                                "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } },
+                                "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
+                                "totalGramsRequired": { "type": "NUMBER" },
+                                "quantityUnits": { "type": "STRING" },
+                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }, // NEW
+                                "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
+                                "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
+                                "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
+                                "aiEstCarbsPer100g": { "type": "NUMBER", nullable: true }
+                            },
+                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "totalGramsRequired", "quantityUnits"]
+                        }
+                    },
+                    "mealPlan": {
+                        type: "ARRAY",
+                        items: {
+                            type: "OBJECT",
+                            properties: {
+                                "day": { "type": "NUMBER" },
+                                "meals": {
+                                    type: "ARRAY",
+                                    items: {
+                                        type: "OBJECT",
+                                        properties: {
+                                            "type": { "type": "STRING" },
+                                            "name": { "type": "STRING" },
+                                            "description": { "type": "STRING" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                required: ["ingredients"]
+            }
         }
     };
 
@@ -651,11 +785,8 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
                  log("Validation Error: Root response is not an object.", 'CRITICAL', 'LLM', parsed);
                  throw new Error("LLM response was not a valid object.");
             }
-             if (!Array.isArray(parsed.ingredients)) {
-                 log("Validation Error: 'ingredients' is not an array.", 'CRITICAL', 'LLM', parsed);
-                 // Attempt recovery or throw, depending on strictness needed
-                 // For now, let the check in the main handler catch this, but logging here is good.
-                 // throw new Error("LLM response missing 'ingredients' array.");
+             if (parsed.ingredients && !Array.isArray(parsed.ingredients)) {
+                 log("Validation Error: 'ingredients' exists but is not an array.", 'CRITICAL', 'LLM', parsed);
              }
              // Add more validation checks here if needed...
 
@@ -672,5 +803,32 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
 
 
 // CORRECTED calculateCalorieTarget function (passes log)
-function calculateCalorieTarget(formData, log = console.log) { /* ... */ }
+function calculateCalorieTarget(formData, log = console.log) {
+    const { weight, height, age, gender, activityLevel, goal } = formData;
+    const weightKg = parseFloat(weight);
+    const heightCm = parseFloat(height);
+    const ageYears = parseInt(age, 10);
+
+    if (isNaN(weightKg) || isNaN(heightCm) || isNaN(ageYears) || !gender || !activityLevel || !goal) {
+        log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', { weight, height, age, gender, activityLevel, goal});
+        return 2000;
+    }
+    let bmr = (gender === 'male')
+        ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
+        : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
+    const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
+    let multiplier = activityMultipliers[activityLevel];
+     if (!multiplier) {
+         log(`Invalid activityLevel "${activityLevel}", using default 1.55.`, 'WARN', 'CALC');
+         multiplier = 1.55;
+     }
+    const tdee = bmr * multiplier;
+    const goalAdjustments = { cut: -500, maintain: 0, bulk: 500 };
+    let adjustment = goalAdjustments[goal];
+    if (adjustment === undefined) {
+         log(`Invalid goal "${goal}", using default 0 adjustment.`, 'WARN', 'CALC');
+         adjustment = 0;
+    }
+    return Math.max(1200, Math.round(tdee + adjustment));
+}
 /// ===== API-CALLERS-END ===== ////
