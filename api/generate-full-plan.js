@@ -1,6 +1,6 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 21 Pipeline + AI NUTRITION FALLBACK
+// Mark 22 Pipeline + AI Query Logic Fixes
 // 1. Creative AI (Optional)
 // 2. Technical AI (Plan, 3 Queries, Keywords, Size, Total Grams, AI Nutrition Est.) - Log full output
 // 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist) - Log queries, raw results, checklist reasons
@@ -635,10 +635,11 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (Mark 21 - AI Nutrition Fallback) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Null if impossible. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[2-4] ESSENTIAL, CORE, lowercase keywords for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"]). 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). Empty array ok. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. 10. NO 'nutritionalTargets'.`;
+    // --- PROMPT (Mark 22 - Query Logic Fixes) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Null if impossible. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[2-4] ESSENTIAL, CORE, lowercase keywords for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"]). CRITICAL: DO NOT include simple adjectives like 'fresh', 'loose', 'natural', 'raw', or 'dry' in requiredWords, as they cause search failures. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). Empty array ok. CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., do not add 'mix' for 'Mixed Nuts'). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NO 'nutritionalTargets'.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
+
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
@@ -702,7 +703,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     };
 
     try {
-        const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, log);
+        const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(payload) }, log);
         // Removed !response.ok check here as fetchWithRetry handles non-ok and throws on final failure
         const result = await response.json();
         const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
