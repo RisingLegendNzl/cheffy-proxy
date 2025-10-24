@@ -86,13 +86,13 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
 /**
  * Initiates a background refresh for a nutrition cache key.
  */
-async function refreshInBackground(cacheKey, barcode, query, ttlMs, log) {
+async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType) { // Added keyType
     if (inflightRefreshes.has(cacheKey)) {
-        log(`Nutrition background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP');
+        log(`Nutrition background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP', { key_type: keyType }); // Added key_type
         return;
     }
     inflightRefreshes.add(cacheKey);
-    log(`Starting nutrition background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START');
+    log(`Starting nutrition background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType }); // Added key_type
 
     // Fire and forget
     (async () => {
@@ -101,12 +101,12 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log) {
             // Cache both 'found' and 'not_found' results
             if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
                 await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
-                log(`Nutrition background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status });
+                log(`Nutrition background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status, key_type: keyType }); // Added key_type
             } else {
-                 log(`Nutrition background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL');
+                 log(`Nutrition background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { key_type: keyType }); // Added key_type
             }
         } catch (error) {
-            log(`Nutrition background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR');
+            log(`Nutrition background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType }); // Added key_type
         } finally {
             inflightRefreshes.delete(cacheKey);
         }
@@ -166,7 +166,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
             const latencyMs = Date.now() - startTime;
             log(`Cache Hit (Stale) for ${cacheKey}, serving stale and refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
             // --- Trigger background refresh ---
-            refreshInBackground(cacheKey, barcode, query, ttlMs, log);
+            refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType); // Pass keyType
             return cachedItem.data; // Return stale data
         }
     }
@@ -220,5 +220,6 @@ module.exports = async (request, response) => {
 };
 
 // Export the cache-wrapped function for the orchestrator
+// --- FIX: Correct function name ---
 module.exports.fetchNutritionData = fetchNutritionData;
 
