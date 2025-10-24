@@ -309,8 +309,37 @@ function isCreativePrompt(cuisinePrompt) {
 module.exports = async function handler(request, response) {
     const logs = [];
     const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
-        try { /* ... logging implementation ... */ } catch (error) { /* ... */ }
+        try {
+            const logEntry = {
+                timestamp: new Date().toISOString(),
+                level: level.toUpperCase(),
+                tag: tag.toUpperCase(),
+                message,
+                data: data ? JSON.parse(JSON.stringify(data, (key, value) =>
+                    typeof value === 'object' && value !== null ? value : value
+                )) : null
+            };
+            logs.push(logEntry);
+            // Also log simple version to Vercel console
+            console.log(`[${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
+            if (data && (level === 'ERROR' || level === 'CRITICAL' || level === 'WARN')) { // Log data for Warn too
+                 console.warn("Log Data:", data);
+            }
+            return logEntry;
+        } catch (error) {
+            const fallbackEntry = {
+                 timestamp: new Date().toISOString(),
+                 level: 'ERROR',
+                 tag: 'LOGGING',
+                 message: `Failed to serialize log data for message: ${message}`,
+                 data: { serializationError: error.message }
+            }
+            logs.push(fallbackEntry);
+            console.error(JSON.stringify(fallbackEntry));
+            return fallbackEntry;
+        }
     };
+
 
     log("Orchestrator invoked.", 'INFO', 'SYSTEM');
     response.setHeader('Access-Control-Allow-Origin', '*');
@@ -337,17 +366,24 @@ module.exports = async function handler(request, response) {
         }
         const formData = request.body;
         const { store, cuisine, days } = formData;
-        if (!store || !days) { /* ... */ }
+        
+        // Ensure critical fields are present/valid before proceeding
+        if (!store || !days || isNaN(parseFloat(formData.weight)) || isNaN(parseFloat(formData.height))) { 
+             log("CRITICAL: Missing core form data (store, days, weight, or height). Cannot calculate plan.", 'CRITICAL', 'INPUT', formData);
+             throw new Error("Missing critical profile data required for plan generation (store, days, weight, height).");
+        }
+        
         const numDays = parseInt(days, 10);
-        if (isNaN(numDays) || numDays < 1 || numDays > 7) { /* ... */ }
+        if (isNaN(numDays) || numDays < 1 || numDays > 7) { 
+             log(`Invalid number of days: ${days}. Proceeding with default 1.`, 'WARN', 'INPUT');
+        }
 
         // --- Phase 1: Creative Router ---
         log("Phase 1: Creative Router...", 'INFO', 'PHASE');
         let creativeIdeas = null;
         if (isCreativePrompt(cuisine)) {
             log(`Creative prompt: "${cuisine}". Calling AI...`, 'INFO', 'LLM');
-            creativeIdeas = await generateCreativeIdeas(cuisine, log); // Pass log
-            // Log moved inside generateCreativeIdeas after check
+            creativeIdeas = await generateCreativeIdeas(cuisine, log);
         } else {
             log("Simple prompt. Skipping Creative AI.", 'INFO', 'SYSTEM');
         }
@@ -357,28 +393,22 @@ module.exports = async function handler(request, response) {
         const calorieTarget = calculateCalorieTarget(formData, log);
         log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
 
-        // --- FIX 2: Call and Check before Destructuring (Corrected) ---
+        // --- FIX 2: Robust LLM Call & Validation ---
         let llmResult;
         try {
-            // Call the function and store the result
             llmResult = await generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log);
         } catch (llmError) {
-            // If generateLLMPlanAndMeals throws, log is already done inside.
-            log(`Error during generateLLMPlanAndMeals call: ${llmError.message}`, 'CRITICAL', 'LLM_CALL'); // Add specific log here
-            throw llmError; // Propagate the error
+            log(`Error during generateLLMPlanAndMeals call: ${llmError.message}`, 'CRITICAL', 'LLM_CALL');
+            throw llmError;
         }
 
-        // Destructure with defaults to prevent TypeError if llmResult is null/undefined
         const { ingredients, mealPlan = [] } = llmResult || {};
-
-        // Now, check 'ingredients' and default to [] if it's not a valid array.
         const rawIngredientPlan = Array.isArray(ingredients) ? ingredients : [];
         // --- END FIX 2 ---
 
 
         // Validate rawIngredientPlan (array exists, might be empty)
         if (rawIngredientPlan.length === 0) {
-            // This check will now catch both "ingredients: []" and "ingredients: null" or missing ingredients
             log("Blueprint fail: No ingredients returned by Technical AI (array was empty or invalid).", 'CRITICAL', 'LLM', { result: llmResult });
             throw new Error("Blueprint fail: AI did not return any ingredients.");
         }
@@ -386,7 +416,7 @@ module.exports = async function handler(request, response) {
         // Sanitize the plan
         const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && ing.requiredWords && ing.negativeKeywords && ing.totalGramsRequired >= 0);
         if (ingredientPlan.length !== rawIngredientPlan.length) {
-            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - rawIngredientPlan.length} invalid entries.`, 'WARN', 'DATA');
+            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries.`, 'WARN', 'DATA');
         }
         if (ingredientPlan.length === 0) {
             log("Blueprint fail: All ingredients failed sanitization.", 'CRITICAL', 'LLM');
@@ -423,7 +453,6 @@ module.exports = async function handler(request, response) {
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
                     pagesTouched = 1;
 
-                    // Capture bucket wait time from fetchPriceData result
                     const { data: priceData, waitMs: currentWaitMs } = await fetchPriceData(store, query, 1, log);
                     bucketWaitMs = Math.max(bucketWaitMs, currentWaitMs);
 
