@@ -3,8 +3,13 @@ const { kv } = require('@vercel/kv'); // Import Vercel KV
 
 // --- CACHE CONFIGURATION ---
 const TTL_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const SWR_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 10; // Stale While Revalidate after 10 days
 const TTL_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 7;    // 7 days
+const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;     // Stale While Revalidate after 2 days
 const CACHE_PREFIX_NUTRI = 'nutri';
+
+// Keep track of ongoing background refreshes within this invocation
+const inflightRefreshes = new Set();
 
 /**
  * Normalizes strings for consistent cache keys.
@@ -79,16 +84,43 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
 }
 
 /**
- * Cache-wrapped function for fetching nutrition data.
- * @param {string} barcode - The product barcode.
- * @param {string} query - The product search query.
- * @param {Function} [log=console.log] - Logging function from orchestrator.
- * @returns {Promise<Object>} A promise that resolves to the nutrition data object (cached or fresh).
+ * Initiates a background refresh for a nutrition cache key.
+ */
+async function refreshInBackground(cacheKey, barcode, query, ttlMs, log) {
+    if (inflightRefreshes.has(cacheKey)) {
+        log(`Nutrition background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP');
+        return;
+    }
+    inflightRefreshes.add(cacheKey);
+    log(`Starting nutrition background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START');
+
+    // Fire and forget
+    (async () => {
+        try {
+            const freshData = await _fetchNutritionDataFromApi(barcode, query, log);
+            // Cache both 'found' and 'not_found' results
+            if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
+                await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
+                log(`Nutrition background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status });
+            } else {
+                 log(`Nutrition background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL');
+            }
+        } catch (error) {
+            log(`Nutrition background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR');
+        } finally {
+            inflightRefreshes.delete(cacheKey);
+        }
+    })();
+}
+
+/**
+ * Cache-wrapped function for fetching nutrition data with SWR.
  */
 async function fetchNutritionData(barcode, query, log = console.log) {
     const startTime = Date.now();
     let cacheKey = '';
     let ttlMs = 0;
+    let swrMs = 0;
     let keyType = '';
     const identifier = barcode || query;
 
@@ -97,48 +129,66 @@ async function fetchNutritionData(barcode, query, log = console.log) {
         return { status: 'not_found', error: 'Missing barcode or query parameter' };
     }
 
+    // Determine key, TTL, and SWR TTL based on identifier type
     if (barcode) {
         const barcodeNorm = normalizeKey(barcode);
         cacheKey = `${CACHE_PREFIX_NUTRI}:barcode:${barcodeNorm}`;
         ttlMs = TTL_NUTRI_BARCODE_MS;
+        swrMs = SWR_NUTRI_BARCODE_MS;
         keyType = 'nutri_barcode';
     } else { // Use query
         const queryNorm = normalizeKey(query);
         cacheKey = `${CACHE_PREFIX_NUTRI}:name:${queryNorm}`;
         ttlMs = TTL_NUTRI_NAME_MS;
+        swrMs = SWR_NUTRI_NAME_MS;
         keyType = 'nutri_name';
     }
 
+    // 1. Check Cache
+    let cachedItem = null;
     try {
-        const cachedData = await kv.get(cacheKey);
-        if (cachedData !== null && cachedData !== undefined) {
-            const latencyMs = Date.now() - startTime;
-            log(`Cache Hit for ${cacheKey}`, 'INFO', 'CACHE_HIT', { key_type: keyType, latency_ms: latencyMs });
-            return cachedData; // Assuming cached data has { status: 'found', ... } or { status: 'not_found' }
-        }
+        cachedItem = await kv.get(cacheKey);
     } catch (error) {
         log(`Cache GET error for ${cacheKey}: ${error.message}`, 'ERROR', 'CACHE_ERROR', { key_type: keyType });
-        // Proceed to fetch if cache read fails
+        // Proceed to fetch
     }
 
-    // Cache Miss or error reading cache
-    log(`Cache Miss for ${cacheKey}`, 'INFO', 'CACHE_MISS', { key_type: keyType });
-    const fetchedData = await _fetchNutritionDataFromApi(barcode, query, log);
-    const fetchLatencyMs = Date.now() - startTime; // Total time includes fetch
+    if (cachedItem && typeof cachedItem === 'object' && cachedItem.data && cachedItem.ts) {
+        const ageMs = Date.now() - cachedItem.ts;
 
-    // Cache BOTH 'found' and 'not_found' responses to avoid re-fetching known misses
+        if (ageMs < swrMs) {
+            // Cache is fresh enough
+            const latencyMs = Date.now() - startTime;
+            log(`Cache Hit (Fresh) for ${cacheKey}`, 'INFO', 'CACHE_HIT', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
+            return cachedItem.data;
+        } else if (ageMs < ttlMs) {
+            // Cache is stale but usable - Serve stale, refresh in background
+            const latencyMs = Date.now() - startTime;
+            log(`Cache Hit (Stale) for ${cacheKey}, serving stale and refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
+            // --- Trigger background refresh ---
+            refreshInBackground(cacheKey, barcode, query, ttlMs, log);
+            return cachedItem.data; // Return stale data
+        }
+    }
+
+    // 2. Cache Miss or Expired: Fetch Fresh Data
+    log(`Cache Miss or Expired for ${cacheKey}`, 'INFO', 'CACHE_MISS', { key_type: keyType });
+    const fetchedData = await _fetchNutritionDataFromApi(barcode, query, log);
+    const fetchLatencyMs = Date.now() - startTime;
+
+    // 3. Cache Result (Cache 'found' and 'not_found')
     if (fetchedData && (fetchedData.status === 'found' || fetchedData.status === 'not_found')) {
         try {
-            await kv.set(cacheKey, fetchedData, { px: ttlMs });
+            // --- Store object with data and timestamp ---
+            await kv.set(cacheKey, { data: fetchedData, ts: Date.now() }, { px: ttlMs });
             log(`Cache SET success for ${cacheKey}`, 'DEBUG', 'CACHE_WRITE', { key_type: keyType, status: fetchedData.status, ttl_ms: ttlMs });
         } catch (error) {
             log(`Cache SET error for ${cacheKey}: ${error.message}`, 'ERROR', 'CACHE_ERROR', { key_type: keyType });
-            // Still return fetched data even if cache write fails
         }
     }
 
     log(`Fetch completed for ${cacheKey}`, 'INFO', 'FETCH_COMPLETE', { key_type: keyType, status: fetchedData.status, latency_ms: fetchLatencyMs });
-    return fetchedData;
+    return fetchedData; // Return the fresh data object
 }
 
 
@@ -171,3 +221,4 @@ module.exports = async (request, response) => {
 
 // Export the cache-wrapped function for the orchestrator
 module.exports.fetchNutritionData = fetchNutritionData;
+
