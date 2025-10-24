@@ -1,6 +1,6 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 22 Pipeline + AI Query Logic Fixes
+// Mark 23 Pipeline + Refined AI Query/Keyword Rules based on ChatGPT Data
 // 1. Creative AI (Optional)
 // 2. Technical AI (Plan, 3 Queries, Keywords, Size, Total Grams, AI Nutrition Est.) - Log full output
 // 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist) - Log queries, raw results, checklist reasons
@@ -25,7 +25,7 @@ const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
 const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip']; // Expanded further
 const SIZE_TOLERANCE = 0.6; // +/- 60%
-const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60%
+const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60% - KEEPING at 0.6 for now, adjust if needed later
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Score needed on tight query to skip normal/wide
 
 /// ===== CONFIG-END ===== ////
@@ -153,10 +153,6 @@ function parseSize(sizeString) {
         else if (unit === 'l') { valueInBaseUnits *= 1000; unit = 'ml'; }
         return { value: valueInBaseUnits, unit: unit };
     }
-    // Handle cases like "each" or counts if necessary, though targetSize focuses on g/ml
-    // if (sizeLower === 'each' || sizeLower.match(/^\d+pk$/) || sizeLower.match(/^\d+pack$/)) {
-        // Could potentially return a different structure or null, depending on how counts are handled
-    // }
     return null; // Return null if format doesn't match g/kg/ml/l
 }
 
@@ -635,15 +631,15 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
-    // --- PROMPT (Mark 22 - Query Logic Fixes) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Null if impossible. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[2-4] ESSENTIAL, CORE, lowercase keywords for SCORE-BASED matching (e.g., ["chicken", "breast", "fillet"]). CRITICAL: DO NOT include simple adjectives like 'fresh', 'loose', 'natural', 'raw', or 'dry' in requiredWords, as they cause search failures. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). Empty array ok. CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., do not add 'mix' for 'Mixed Nuts'). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NO 'nutritionalTargets'.`;
+    // --- PROMPT (Mark 23 - Refined Rules based on ChatGPT Data) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
 
-    // Schema (Mark 21 - Added AI Nutrition fields)
+    // Schema (Mark 21 - Added AI Nutrition fields) - Schema remains the same
     const payload = { 
         contents: [{ parts: [{ text: userQuery }] }], 
         systemInstruction: { parts: [{ text: systemPrompt }] }, 
@@ -724,10 +720,12 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, l
              if (parsed.ingredients.length > 0) {
                 const firstIng = parsed.ingredients[0];
                  if (!firstIng?.normalQuery) { log("Validation WARN: First ingredient missing 'normalQuery'.", 'WARN', 'LLM', firstIng); }
-                 if (!Array.isArray(firstIng?.requiredWords) || firstIng?.requiredWords.length === 0) { log("Validation WARN: First ingredient missing/empty 'requiredWords'.", 'WARN', 'LLM', firstIng); }
-                 if (!Array.isArray(firstIng?.negativeKeywords)) { log("Validation WARN: First ingredient missing 'negativeKeywords'.", 'WARN', 'LLM', firstIng); } // Check new field
+                 // --- Reduced required word validation based on new rule ---
+                 if (!Array.isArray(firstIng?.requiredWords) || firstIng.requiredWords.length === 0 || firstIng.requiredWords.length > 2) { 
+                     log("Validation WARN: First ingredient 'requiredWords' check (should be 1-2 core nouns).", 'WARN', 'LLM', firstIng); 
+                 }
+                 if (!Array.isArray(firstIng?.negativeKeywords)) { log("Validation WARN: First ingredient missing 'negativeKeywords'.", 'WARN', 'LLM', firstIng); }
                  if (typeof firstIng?.totalGramsRequired !== 'number') {log("Validation WARN: First ingredient missing/invalid 'totalGramsRequired'.", 'WARN', 'LLM', firstIng); }
-                 // --- NEW: Add validation warning for AI nutrition fallback ---
                  if (typeof firstIng?.aiEstCaloriesPer100g !== 'number') {log("Validation WARN: First ingredient missing 'aiEstCaloriesPer100g'. Fallback may fail.", 'WARN', 'LLM', firstIng); }
              }
              // Ensure mealPlan is an array if it exists but is null/malformed
