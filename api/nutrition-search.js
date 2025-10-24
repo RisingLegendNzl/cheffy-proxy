@@ -18,6 +18,11 @@ const inflightRefreshes = new Set();
  */
 const normalizeKey = (str) => (str || '').toString().toLowerCase().trim().replace(/\s+/g, '_');
 
+// --- HELPER TO CHECK KV STATUS ---
+const isKvConfigured = () => {
+    return process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN;
+};
+
 
 /**
  * Internal logic for fetching nutrition data from Open Food Facts API.
@@ -28,14 +33,15 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     const identifier = barcode || query;
     const identifierType = barcode ? 'barcode' : 'query';
 
+    if (!identifier) {
+        log('Missing barcode or query parameter for nutrition search.', 'WARN', 'INPUT');
+        return { status: 'not_found', error: 'Missing barcode or query parameter' };
+    }
+
     if (barcode) {
         openFoodFactsURL = `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`;
     } else if (query) {
         openFoodFactsURL = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=1`;
-    } else {
-        log('Missing barcode or query parameter for nutrition search.', 'WARN', 'INPUT');
-        // Return not_found structure directly instead of throwing for consistency
-        return { status: 'not_found', error: 'Missing barcode or query parameter' };
     }
 
     log(`Requesting nutrition data for ${identifierType}: ${identifier}`, 'DEBUG', 'OFF_REQUEST');
@@ -44,13 +50,13 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     try {
         const apiResponse = await fetch(openFoodFactsURL, {
             method: 'GET',
-            headers: { 'User-Agent': 'CheffyApp/1.0 (dev@cheffy.com)' } // Updated User-Agent
+            headers: { 'User-Agent': 'CheffyApp/1.0 (dev@cheffy.com)' }
         });
         const latencyMs = Date.now() - startTime;
 
         if (!apiResponse.ok) {
             log(`Open Food Facts API returned: ${apiResponse.status} for ${identifierType}: ${identifier}`, 'WARN', 'OFF_RESPONSE', { status: apiResponse.status, latency_ms: latencyMs });
-            return { status: 'not_found' }; // Don't throw, return expected structure
+            return { status: 'not_found' };
         }
 
         const data = await apiResponse.json();
@@ -79,20 +85,20 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     } catch (error) {
         const latencyMs = Date.now() - startTime;
         log(`Nutrition Fetch Error for ${identifierType} "${identifier}": ${error.message}`, 'ERROR', 'OFF_FAILURE', { latency_ms: latencyMs });
-        return { status: 'not_found', error: error.message }; // Return expected structure on fetch error
+        return { status: 'not_found', error: error.message };
     }
 }
 
 /**
  * Initiates a background refresh for a nutrition cache key.
  */
-async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType) { // Added keyType
+async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType) {
     if (inflightRefreshes.has(cacheKey)) {
-        log(`Nutrition background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP', { key_type: keyType }); // Added key_type
+        log(`Nutrition background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP', { key_type: keyType });
         return;
     }
     inflightRefreshes.add(cacheKey);
-    log(`Starting nutrition background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType }); // Added key_type
+    log(`Starting nutrition background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType });
 
     // Fire and forget
     (async () => {
@@ -101,12 +107,12 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
             // Cache both 'found' and 'not_found' results
             if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
                 await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
-                log(`Nutrition background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status, key_type: keyType }); // Added key_type
+                log(`Nutrition background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status, key_type: keyType });
             } else {
-                 log(`Nutrition background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { key_type: keyType }); // Added key_type
+                 log(`Nutrition background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { key_type: keyType });
             }
         } catch (error) {
-            log(`Nutrition background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType }); // Added key_type
+            log(`Nutrition background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType });
         } finally {
             inflightRefreshes.delete(cacheKey);
         }
@@ -118,6 +124,14 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
  */
 async function fetchNutritionData(barcode, query, log = console.log) {
     const startTime = Date.now();
+    
+    // --- DEGRADATION CHECK ---
+    if (!isKvConfigured()) {
+        log('CRITICAL: KV environment variables are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
+        return await _fetchNutritionDataFromApi(barcode, query, log);
+    }
+    // --- END DEGRADATION CHECK ---
+
     let cacheKey = '';
     let ttlMs = 0;
     let swrMs = 0;
@@ -150,23 +164,20 @@ async function fetchNutritionData(barcode, query, log = console.log) {
         cachedItem = await kv.get(cacheKey);
     } catch (error) {
         log(`Cache GET error for ${cacheKey}: ${error.message}`, 'ERROR', 'CACHE_ERROR', { key_type: keyType });
-        // Proceed to fetch
     }
 
     if (cachedItem && typeof cachedItem === 'object' && cachedItem.data && cachedItem.ts) {
         const ageMs = Date.now() - cachedItem.ts;
 
         if (ageMs < swrMs) {
-            // Cache is fresh enough
             const latencyMs = Date.now() - startTime;
             log(`Cache Hit (Fresh) for ${cacheKey}`, 'INFO', 'CACHE_HIT', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
             return cachedItem.data;
         } else if (ageMs < ttlMs) {
-            // Cache is stale but usable - Serve stale, refresh in background
             const latencyMs = Date.now() - startTime;
             log(`Cache Hit (Stale) for ${cacheKey}, serving stale and refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
             // --- Trigger background refresh ---
-            refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType); // Pass keyType
+            refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType);
             return cachedItem.data; // Return stale data
         }
     }
@@ -219,7 +230,4 @@ module.exports = async (request, response) => {
     }
 };
 
-// Export the cache-wrapped function for the orchestrator
-// --- FIX: Correct function name ---
 module.exports.fetchNutritionData = fetchNutritionData;
-
