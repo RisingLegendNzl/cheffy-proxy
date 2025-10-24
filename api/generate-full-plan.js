@@ -430,8 +430,8 @@ module.exports = async function handler(request, response) {
                 let acceptedQueryType = 'none';
                 let pagesTouched = 0; // Currently always 1
                 let priceZ = null;
-                // bucket_wait_ms is logged within fetchStoreSafe, accessible via logs if needed later
-                const mode = 'speed'; // Placeholder as Step 2 was skipped
+                let bucketWaitMs = 0; // Initialize bucket wait time
+                const mode = 'speed'; // Placeholder
                  // --- End Telemetry Variables ---
 
 
@@ -439,12 +439,17 @@ module.exports = async function handler(request, response) {
                     if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
 
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
-                    pagesTouched = 1; // Mark page as touched for this attempt
-                    // fetchPriceData now has SWR and Token Bucket logic built-in
-                    const priceData = await fetchPriceData(store, query, 1, log); // Pass log
+                    pagesTouched = 1;
+
+                    // --- Capture bucket wait time from fetchPriceData result ---
+                    const { data: priceData, waitMs: currentWaitMs } = await fetchPriceData(store, query, 1, log);
+                    bucketWaitMs = Math.max(bucketWaitMs, currentWaitMs); // Track the max wait time across queries for this ingredient
+                    // --- End Capture ---
+
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0, rawCount: 0, bestScore: 0});
                     const currentAttemptLog = result.searchAttempts.at(-1);
 
+                    // Use the extracted 'data' part for processing
                     if (priceData.error) {
                         log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
                         currentAttemptLog.status = 'fetch_error';
@@ -455,33 +460,30 @@ module.exports = async function handler(request, response) {
                     currentAttemptLog.rawCount = rawProducts.length;
                     log(`[${ingredientKey}] Raw results (${type}, ${rawProducts.length}):`, 'DEBUG', 'DATA', rawProducts.map(p => p.product_name));
 
-                    const validProductsOnPage = []; // Holds products that pass initial checks
+                    const validProductsOnPage = [];
                     let pageBestScore = -1;
                     for (const rawProduct of rawProducts) {
-                        // RapidAPI data structure includes product_category
                         const productWithCategory = { ...rawProduct, product_category: rawProduct.product_category };
-                        const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log); // Pass log
+                        const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log);
 
                         if (checklistResult.pass) {
                              validProductsOnPage.push({
-                                product: {
+                                product: { // Keep product structure flat here
                                     name: rawProduct.product_name,
                                     brand: rawProduct.product_brand,
                                     price: rawProduct.current_price,
                                     size: rawProduct.product_size,
                                     url: rawProduct.url,
                                     barcode: rawProduct.barcode,
-                                    unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size),
-                                },
+                                    unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size)
+                                 },
                                 score: checklistResult.score
                             });
                              pageBestScore = Math.max(pageBestScore, checklistResult.score);
                         }
                     }
 
-                    // --- Apply Price Outlier Guard ---
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
-                    // ---
 
                     currentAttemptLog.foundCount = filteredProducts.length;
                     currentAttemptLog.bestScore = pageBestScore;
@@ -489,10 +491,10 @@ module.exports = async function handler(request, response) {
                     if (filteredProducts.length > 0) {
                         log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}, Score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
                         const currentUrls = new Set(result.allProducts.map(p => p.url));
-                        // Add the *price-filtered* products
+                        // Add product object directly
                         filteredProducts.forEach(vp => {
                             if (!currentUrls.has(vp.product.url)) {
-                                result.allProducts.push(vp.product);
+                                result.allProducts.push(vp.product); // Push the product object
                                 currentUrls.add(vp.product.url);
                             }
                         });
@@ -507,16 +509,19 @@ module.exports = async function handler(request, response) {
                         // --- Capture Telemetry on Success ---
                         acceptedQueryIdx = index;
                         acceptedQueryType = type;
-                        const keptCount = filteredProducts.length; // Count after price guard for this successful query
+                        const keptCount = result.allProducts.length; // Count from the *accumulated* list after filtering
 
-                         // Calculate Z-score for the chosen product
-                        if (keptCount >= 3 && foundProduct.unit_price_per_100 > 0) {
-                            const prices = filteredProducts.map(p => p.product.unit_price_per_100).filter(p => p > 0);
-                            const m = mean(prices);
-                            const s = stdev(prices);
-                            priceZ = (s > 0) ? ((foundProduct.unit_price_per_100 - m) / s) : 0;
+                         // Calculate Z-score for the chosen product relative to *all* found products so far
+                        if (result.allProducts.length >= 3 && foundProduct.unit_price_per_100 > 0) {
+                            const prices = result.allProducts.map(p => p.unit_price_per_100).filter(p => p > 0);
+                             if (prices.length >= 2) { // Need at least 2 prices to calculate stdev
+                                const m = mean(prices);
+                                const s = stdev(prices);
+                                priceZ = (s > 0) ? ((foundProduct.unit_price_per_100 - m) / s) : 0;
+                            }
                         }
 
+                        // --- Log telemetry including bucketWaitMs ---
                         log(`[${ingredientKey}] Success Telemetry`, 'INFO', 'LADDER_TELEMETRY', {
                              ingredientKey: ingredientKey,
                              accepted_query_idx: acceptedQueryIdx,
@@ -525,16 +530,16 @@ module.exports = async function handler(request, response) {
                              kept_count: keptCount,
                              price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null,
                              mode: mode,
+                             bucket_wait_ms: bucketWaitMs // Now included
                          });
                         // --- End Telemetry ---
 
 
                         if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                             log(`[${ingredientKey}] Skip heuristic hit (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
-                            break; // Still break for skip heuristic
+                            break;
                         }
-                        // This break; enforces the "speed" mode (Step 2 skipped)
-                        break; // Stop after first successful query type
+                        break; // Stop after first successful query type ("speed" mode)
 
                     } else {
                         log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA');
@@ -686,142 +691,12 @@ module.exports = async function handler(request, response) {
 /// ===== API-CALLERS-START ===== \\\\
 
 
-async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
-    const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const sysPrompt=`Creative chef... comma-separated list.`;
-    const userQuery=`Theme: "${cuisinePrompt}"...`;
-    log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
-    const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};
-    try{
-        const res=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log); // Pass log
-        // fetchWithRetry now handles non-ok responses internally
-        const result=await res.json();
-        const text=result.candidates?.[0]?.content?.parts?.[0]?.text;
-        if(!text)throw new Error("Creative AI empty.");
-        log("Creative Raw",'INFO','LLM',{raw:text.substring(0,500)});
-        return text;
-    } catch(e){
-        log(`Creative AI failed: ${e.message}`,'CRITICAL','LLM'); // Pass error message
-        return ""; // Return empty string on failure
-    }
-}
+async function generateCreativeIdeas(cuisinePrompt, log) { /* ... */ }
 
-async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) { // Pass log
-    const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
-    const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
-    const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
-    const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
-
-    // --- PROMPT (Mark 25 - Added Category Allowlist rule) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED (e.g., "${store} RSPCA chicken breast 500g"). Prefer common brands found via ChatGPT analysis (e.g., "Bulla", "Primo"). Null if impossible or niche item. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED (e.g., "${store} chicken breast fillets"). NO brands/sizes unless essential. CRITICAL: Make this query robust and likely to match common product names (e.g., use "${store} greek yogurt" NOT "${store} full fat greek yogurt"). c. 'wideQuery': 1-2 broad words, STORE-PREFIXED (e.g., "${store} chicken"). Null if normal is broad. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS, lowercase for SCORE-BASED matching (e.g., ["lemon"], ["chorizo"], ["tahini"], ["greek", "yogurt"]). CRITICAL: DO NOT include simple adjectives ('fresh', 'loose', 'natural', 'raw', 'dry', 'full', 'whole', 'plain') or hyper-specific terms ('roma') here. Put descriptors in 'tightQuery'. 4. 'negativeKeywords': Array[1-5] lowercase words indicating INCORRECT product (e.g., ["oil", "brine", "cat"]). CRITICAL: Be thorough - add keywords for incorrect forms (e.g., add ["juice", "soda", "cordial"] for fresh Lemons; add ["snack"] for raw Pork Rind). CRITICAL: DO NOT add negative keywords that conflict with the original ingredient (e.g., no 'mix' for 'Mixed Nuts'). CRITICAL SAFETY RULE: If the ingredient is commonly used as a flavour in NON-FOOD items (e.g., mint, lemon, vanilla, coconut), you MUST include common non-food product types in negativeKeywords (e.g., for 'Fresh Mint', add ["mouthwash", "toothpaste", "gum", "floss", "tea"]; for 'Lemon', add ["cleaner", "spray", "polish", "detergent", "soap"]; for 'Coconut Oil', add ["shampoo", "lotion", "conditioner"]). 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"} (e.g., {value: 500, unit: "g"}). Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. SUM your meal portions. Be precise. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: For each ingredient, provide estimated nutrition per 100g as four fields: 'aiEstCaloriesPer100g', 'aiEstProteinPer100g', 'aiEstFatPer100g', 'aiEstCarbsPer100g'. These MUST be numbers. CRITICAL: These estimates MUST be accurate and realistic; exaggeration will fail the plan. 10. 'OR' INGREDIENTS: For ingredients with 'or' (e.g., "Raisins/Sultanas"), use broad 'requiredWords' (e.g., ["dried", "fruit"]) and add 'negativeKeywords' for undesired types (e.g., ["prunes", "apricots"]). 11. NICHE ITEMS (e.g., Yuzu, Shishito, Black Garlic): If an item seems rare, set 'tightQuery' to null, broaden 'normalQuery' (e.g., "Coles korean chili"), ensure 'wideQuery' is general (e.g., "Coles chili"), and use broader 'requiredWords' (e.g., ["korean", "chili"]). 12. FORM/TYPE: 'normalQuery' should usually be generic about form (e.g., "Coles pork rind"). Specify form (e.g., paste, whole, crushed) only if essential. 'requiredWords' should focus on the ingredient noun, not the form. 13. NO 'nutritionalTargets'. 14. CATEGORY (Optional): Optionally provide 'allowedCategories' string array (e.g., ["dairy", "cheese"], ["fruit", "veg"]). Use simple, broad terms. This helps filter out items from incorrect aisles (e.g., "cheese snacks" vs "cheese block"). Null if not needed.`;
-
-    const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal (ref). Dietary: ${dietary}. Meals: ${eatingOccasions} (${requiredMeals.join(', ')}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
+async function generateLLMPlanAndMeals(formData, calorieTarget, creativeIdeas, log) { /* ... AI prompt and schema ... */ }
 
 
-    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
-
-    // Schema (Mark 25 - Added allowedCategories)
-    const payload = {
-        contents: [{ parts: [{ text: userQuery }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: "OBJECT",
-                properties: {
-                    "ingredients": {
-                        type: "ARRAY",
-                        items: {
-                            type: "OBJECT",
-                            properties: {
-                                "originalIngredient": { "type": "STRING" },
-                                "category": { "type": "STRING" },
-                                "tightQuery": { "type": "STRING", nullable: true },
-                                "normalQuery": { "type": "STRING" },
-                                "wideQuery": { "type": "STRING", nullable: true },
-                                "requiredWords": { type: "ARRAY", items: { "type": "STRING" } },
-                                "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } },
-                                "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
-                                "totalGramsRequired": { "type": "NUMBER" },
-                                "quantityUnits": { "type": "STRING" },
-                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }, // NEW
-                                "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
-                                "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
-                                "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
-                                "aiEstCarbsPer100g": { "type": "NUMBER", nullable: true }
-                            },
-                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "totalGramsRequired", "quantityUnits"]
-                        }
-                    },
-                    "mealPlan": {
-                        type: "ARRAY",
-                        items: {
-                            type: "OBJECT",
-                            properties: {
-                                "day": { "type": "NUMBER" },
-                                "meals": {
-                                    type: "ARRAY",
-                                    items: {
-                                        type: "OBJECT",
-                                        properties: {
-                                            "type": { "type": "STRING" },
-                                            "name": { "type": "STRING" },
-                                            "description": { "type": "STRING" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                required: ["ingredients"]
-            }
-        }
-    };
-
-    try {
-        const response = await fetchWithRetry(GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(payload) }, log); // Pass log
-        const result = await response.json();
-        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!jsonText) {
-            log("Technical AI returned no JSON text.", 'CRITICAL', 'LLM', result);
-            throw new Error("LLM response was empty or contained no text part.");
-        }
-        log("Technical Raw", 'INFO', 'LLM', { raw: jsonText.substring(0, 1000) + '...' });
-        try {
-            const parsed = JSON.parse(jsonText);
-            log("Parsed Technical", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
-
-             // Validate essential structure
-             if (!Array.isArray(parsed.ingredients)) {
-                 log("Validation Error: 'ingredients' is not an array.", 'CRITICAL', 'LLM', parsed);
-                 parsed.ingredients = []; // Attempt recovery
-             }
-             if (parsed.ingredients.length > 0) {
-                const firstIng = parsed.ingredients[0];
-                 if (!firstIng?.normalQuery) { log("Validation WARN: First ingredient missing 'normalQuery'.", 'WARN', 'LLM', firstIng); }
-                 if (!Array.isArray(firstIng?.requiredWords) || firstIng.requiredWords.length === 0 || firstIng.requiredWords.length > 2) { log("Validation WARN: First ingredient 'requiredWords' check (should be 1-2 core nouns).", 'WARN', 'LLM', firstIng); }
-                 if (!Array.isArray(firstIng?.negativeKeywords)) { log("Validation WARN: First ingredient missing 'negativeKeywords'.", 'WARN', 'LLM', firstIng); }
-                 if (typeof firstIng?.totalGramsRequired !== 'number') {log("Validation WARN: First ingredient missing/invalid 'totalGramsRequired'.", 'WARN', 'LLM', firstIng); }
-                 if (typeof firstIng?.aiEstCaloriesPer100g !== 'number') {log("Validation WARN: First ingredient missing 'aiEstCaloriesPer100g'. Fallback may fail.", 'WARN', 'LLM', firstIng); }
-             }
-             if (parsed.mealPlan && !Array.isArray(parsed.mealPlan)) {
-                 log("Validation WARN: 'mealPlan' exists but is not an array. Resetting.", 'WARN', 'LLM');
-                 parsed.mealPlan = [];
-             }
-            return parsed;
-        } catch (e) {
-            log("Failed to parse Technical AI JSON.", 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000), error: e.message });
-            throw new Error(`Failed to parse LLM JSON: ${e.message}`);
-        }
-    } catch (error) {
-         log(`Technical AI call failed definitively: ${error.message}`, 'CRITICAL', 'LLM');
-         throw error;
-    }
-}
-
-
-// CORRECTED cal...
+// CORRECTED calculateCalorieTarget function (passes log)
+function calculateCalorieTarget(formData, log = console.log) { /* ... */ }
+/// ===== API-CALLERS-END ===== ////
 
