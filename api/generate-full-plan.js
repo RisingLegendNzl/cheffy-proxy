@@ -2,15 +2,16 @@
 
 // Mark 24 Pipeline + CRITICAL False Positive Fix (Negative Keywords)
 // + Phase 1 Cache Implementation (Vercel KV)
+// + SWR-lite Caching (Step 3)
 // 1. Creative AI (Optional)
 // 2. Technical AI (Plan, Queries, Keywords, Size, Grams, AI Nutrition Est.) - Enhanced Rules
-// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist, CACHED)
-// 4. Nutrition Calculation (with AI Fallback, CACHED)
+// 3. Parallel Market Run (T->N->W, Skip Heuristic, Smarter Checklist, CACHED w/ SWR)
+// 4. Nutrition Calculation (with AI Fallback, CACHED w/ SWR)
 
 /// ===== IMPORTS-START ===== \\\\
 
 const fetch = require('node-fetch');
-// Now importing the CACHE-WRAPPED versions
+// Now importing the CACHE-WRAPPED versions with SWR
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
 
@@ -25,7 +26,7 @@ const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/mo
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
-const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Expanded further including common personal care/cleaning
+const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Expanded further
 const SIZE_TOLERANCE = 0.6; // +/- 60%
 const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60%
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Score needed on tight query to skip normal/wide
@@ -369,6 +370,7 @@ module.exports = async function handler(request, response) {
                     if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
 
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
+                    // fetchPriceData now has SWR and Token Bucket logic built-in
                     const priceData = await fetchPriceData(store, query, 1, log); // Pass log
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0, rawCount: 0, bestScore: 0});
                     const currentAttemptLog = result.searchAttempts.at(-1);
@@ -410,6 +412,7 @@ module.exports = async function handler(request, response) {
                             log(`[${ingredientKey}] Skip heuristic hit (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
                             break;
                         }
+                        // This break; is what enforces the "speed" mode (Step 2)
                         break; // Stop after first successful query type
 
                     } else {
@@ -487,6 +490,7 @@ module.exports = async function handler(request, response) {
         if (itemsToFetchNutrition.length > 0) {
             log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) =>
+                // fetchNutritionData now has SWR logic built-in
                 (item.barcode || item.query) ?
                 fetchNutritionData(item.barcode, item.query, log) // Pass log
                     .then(nut => ({ ...item, nut }))
