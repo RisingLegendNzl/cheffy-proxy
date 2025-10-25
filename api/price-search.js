@@ -21,56 +21,10 @@ const BUCKET_CAPACITY = 10;
 const BUCKET_REFILL_RATE = 8; // Tokens per second
 const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
 
-// --- TOKEN BUCKET IMPLEMENTATION (FIX) ---
-class Bucket {
-    constructor(capacity, refillRate) {
-        this.capacity = capacity;
-        this.tokens = capacity;
-        this.refillRate = refillRate / 1000; // Tokens per millisecond
-        this.lastRefill = Date.now();
-        // Start the refill interval
-        this.interval = setInterval(() => this._refill(), 1000);
-    }
-
-    _refill() {
-        const now = Date.now();
-        const elapsedMs = now - this.lastRefill;
-        if (elapsedMs > 0) {
-            const tokensToAdd = elapsedMs * this.refillRate;
-            this.tokens = Math.min(this.capacity, this.tokens + tokensToAdd);
-            this.lastRefill = now;
-        }
-    }
-
-    async take(log = console.log) {
-        let waitMsTotal = 0;
-        const waitStart = Date.now();
-        
-        this._refill(); // Refill immediately before checking
-
-        while (this.tokens < 1) {
-            // Calculate necessary wait time for 1 token
-            const waitTime = Math.max(50, (1 - this.tokens) * (1000 / BUCKET_REFILL_RATE));
-            await delay(waitTime);
-            this._refill(); // Refill again after waiting
-        }
-        
-        waitMsTotal = Date.now() - waitStart;
-        this.tokens -= 1;
-        return waitMsTotal; // Return the total time spent waiting
-    }
-
-    stopRefill() {
-        clearInterval(this.interval);
-    }
-}
-
-// --- INSTANTIATE BUCKETS ---
-const buckets = {
-    coles: new Bucket(BUCKET_CAPACITY, BUCKET_REFILL_RATE),
-    woolworths: new Bucket(BUCKET_CAPACITY, BUCKET_REFILL_RATE)
-};
-// --- END TOKEN BUCKET IMPLEMENTATION ---
+// --- MODIFICATION (Mark 41): Removed stateful Bucket class ---
+// The old class Bucket and global `buckets` map have been removed.
+// They are replaced by a stateless KV-based rate limiter inside `fetchStoreSafe`.
+// --- END MODIFICATION ---
 
 // --- HELPER TO CHECK KV STATUS ---
 const isKvConfigured = () => {
@@ -146,19 +100,85 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
 }
 
 
+// --- MODIFICATION (Mark 41): Replaced stateful bucket with stateless KV rate limiter ---
 /**
- * Wrapper for API calls using the token bucket and adding a single 429 retry.
+ * Wrapper for API calls using a STATELESS token bucket (Vercel KV) and adding a single 429 retry.
+ * This is CRITICAL for serverless environments.
  * Returns { data, waitMs }
  */
 async function fetchStoreSafe(store, query, page = 1, log = console.log) {
     const storeKey = store?.toLowerCase();
-    if (!buckets[storeKey]) {
+    if (!RAPID_API_HOSTS[store]) { // Check against hosts map
         log(`Invalid store key "${storeKey}" for token bucket.`, 'CRITICAL', 'BUCKET_ERROR');
         return { data: { error: { message: `Internal configuration error: Invalid store key ${storeKey}`, status: 500 } }, waitMs: 0 };
     }
 
-    const waitMs = await buckets[storeKey].take(log); // Capture wait time
+    // --- STATELESS BUCKET LOGIC ---
+    const bucketKey = `bucket:rapidapi:${storeKey}`;
+    const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
+    let waitMs = 0;
+    const waitStart = Date.now();
+
+    // Loop until we successfully acquire a token
+    while (true) {
+        const now = Date.now();
+        let bucketState = null;
+
+        if (isKvConfigured()) {
+            try {
+                bucketState = await kv.get(bucketKey);
+            } catch (kvError) {
+                log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message });
+                // Don't loop, just break and proceed with the API call.
+                break;
+            }
+        }
+
+        if (!bucketState) {
+            // First run or KV error: Initialize and take one token
+            log(`Initializing KV bucket: ${bucketKey}`, 'DEBUG', 'BUCKET_INIT');
+            if (isKvConfigured()) {
+                try {
+                    // Set with capacity - 1, and a TTL (using search TTL / 10 as an example) to prevent stale buckets
+                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) });
+                } catch (kvError) {
+                    log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
+                }
+            }
+            break; // Acquired token
+        }
+
+        // State exists, calculate refill
+        const elapsedMs = now - bucketState.lastRefill;
+        const tokensToAdd = elapsedMs * refillRatePerMs;
+        let currentTokens = Math.min(BUCKET_CAPACITY, bucketState.tokens + tokensToAdd);
+        const newLastRefill = now;
+
+        if (currentTokens >= 1) {
+            // Take token and update KV
+            currentTokens -= 1;
+            if (isKvConfigured()) {
+                try {
+                    await kv.set(bucketKey, { tokens: currentTokens, lastRefill: newLastRefill }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) });
+                } catch (kvError) {
+                    log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
+                }
+            }
+            break; // Acquired token
+        } else {
+            // Not enough tokens, calculate wait time
+            const tokensNeeded = 1 - currentTokens;
+            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs)); // Wait at least 50ms
+            
+            log(`Rate limiter active. Waiting ${waitTime}ms for ${tokensNeeded.toFixed(2)} tokens...`, 'INFO', 'BUCKET_WAIT');
+            await delay(waitTime);
+            // Loop will restart, re-getting state and refilling
+        }
+    } // end while(true)
+    
+    waitMs = Date.now() - waitStart; // Total time spent in the loop
     log(`Acquired token for ${store} (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
+    // --- END STATELESS BUCKET LOGIC ---
 
     try {
         const data = await _fetchPriceDataFromApi(store, query, page, log);
@@ -182,6 +202,7 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
          return { data: errorData, waitMs };
     }
 }
+// --- END MODIFICATION ---
 
 /**
  * Initiates a background refresh for a given cache key.
@@ -272,7 +293,8 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
 }
 
 
-// --- Vercel Handler (Remains unchanged - uses _fetch directly) ---
+// --- Vercel Handler (MODIFIED Mark 41) ---
+// This handler now uses the public, cached, and rate-limited `fetchPriceData` function.
 module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -284,8 +306,15 @@ module.exports = async (req, res) => {
 
     try {
         const { store, query, page } = req.query;
-        // Use the internal fetch function directly for the simple handler (NO CACHE/BUCKET for direct calls)
-        const result = await _fetchPriceDataFromApi(store, query, page ? parseInt(page, 10) : 1);
+        
+        // --- MODIFICATION: Use the public, cached, rate-limited function ---
+        // We create a simple log function for this handler's scope
+        const log = (message, level = 'INFO', tag = 'HANDLER') => {
+            console.log(`[${level}] [${tag}] ${message}`);
+        };
+        
+        const { data: result } = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1, log);
+        // --- END MODIFICATION ---
 
         if (result.error) {
             return res.status(result.error.status || 500).json(result.error);
@@ -296,5 +325,7 @@ module.exports = async (req, res) => {
         return res.status(500).json({ message: "Internal server error in price search handler.", details: error.message });
     }
 };
+// --- END MODIFICATION ---
 
 module.exports.fetchPriceData = fetchPriceData;
+
