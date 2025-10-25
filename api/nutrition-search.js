@@ -19,7 +19,10 @@ const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;     // Stale While Revalidate
 const CACHE_PREFIX_NUTRI = 'nutri';
 
 // --- DIETAGRAM API CONFIGURATION (NEW) ---
-const DIETAGRAM_API_KEY = process.env.DIETAGRAM_RAPIDAPI_KEY;
+// --- BUG FIX: Use the correct environment variable 'RAPIDAPI_KEY' as specified by user ---
+const DIETAGRAM_API_KEY = process.env.RAPIDAPI_KEY;
+// const DIETAGRAM_API_KEY = process.env.DIETAGRAM_RAPIDAPI_KEY; // Old
+// --- END BUG FIX ---
 const DIETAGRAM_API_HOST = process.env.DIETAGRAM_RAPIDAPI_HOST || 'dietagram.p.rapidapi.com';
 
 // --- TOKEN BUCKET CONFIGURATION (NEW - copied from price-search.js) ---
@@ -98,10 +101,13 @@ function normalizeDietagramResponse(dietagramResponse, query, log) {
  * Internal logic for fetching from Dietagram API.
  */
 async function _fetchDietagramFromApi(query, log = console.log) {
+    // --- BUG FIX: Updated check to reflect new variable and provide clearer logging ---
     if (!DIETAGRAM_API_KEY) { 
-        log('Configuration Error: DIETAGRAM_RAPIDAPI_KEY is not set.', 'CRITICAL', 'CONFIG');
-        return { error: { message: 'Server configuration error: API key missing.', status: 500 } };
+        log('Configuration Error: Nutrition API key (RAPIDAPI_KEY) is not set.', 'CRITICAL', 'CONFIG');
+        return { error: { message: 'Server configuration error: Nutrition API key missing.', status: 500 } };
     }
+    log('Using Nutrition API Key.', 'DEBUG', 'CONFIG'); // Added success log
+    // --- END BUG FIX ---
 
     const options = {
         method: 'GET',
@@ -488,5 +494,4 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
-
 
