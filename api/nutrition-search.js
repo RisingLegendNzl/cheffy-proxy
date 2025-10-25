@@ -1,5 +1,13 @@
 const fetch = require('node-fetch');
-const { kv } = require('@vercel/kv'); // Import Vercel KV
+// --- MODIFICATION: Import createClient instead of the default kv instance ---
+const { createClient } = require('@vercel/kv');
+
+// --- MODIFICATION: Create a client instance using your Upstash variables ---
+const kv = createClient({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+// --- END MODIFICATION ---
 
 // --- CACHE CONFIGURATION ---
 const TTL_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
@@ -25,9 +33,11 @@ const inflightRefreshes = new Set();
 const normalizeKey = (str) => (str || '').toString().toLowerCase().trim().replace(/\s+/g, '_');
 
 // --- HELPER TO CHECK KV STATUS ---
+// --- MODIFICATION: Check for your Upstash variables instead of Vercel's KV variables ---
 const isKvConfigured = () => {
-    return process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN;
+    return process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
 };
+// --- END MODIFICATION ---
 
 
 /**
@@ -147,7 +157,9 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     
     // --- DEGRADATION CHECK ---
     if (!isKvConfigured()) {
-        log('CRITICAL: KV environment variables are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
+        // --- MODIFICATION: Updated error message to reflect correct env var names ---
+        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
+        // --- END MODIFICATION ---
         return await _fetchNutritionDataFromApi(barcode, query, log);
     }
     // --- END DEGRADATION CHECK ---
