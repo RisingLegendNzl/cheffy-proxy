@@ -1,4 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
+// Mark 48: Fixed heuristic fallback logic to allow independent decrease checks.
+// - The heuristic loop now checks for decreasing grams *separately* from increasing grams,
+//   allowing it to recover from an oversized starting point (e.g., when min_g values are too high).
 // Mark 47: Implemented robust checklist (lemma/synonym) and solver min_g prompt fix.
 // - Replaced runSmarterChecklist with lemma/synonym-aware matcher (normTokens, hasAny, etc.)
 // - Added hard-coded REQ_ANY and NEG_EXTRA maps to override bad AI filters.
@@ -1114,6 +1117,7 @@ function solveHeuristic(meal, nutritionDataMap, log) {
         // Shuffle rows to avoid bias towards ingredients listed first
         const shuffledRows = [...rows].sort(() => Math.random() - 0.5);
 
+        // --- REPLACED (Mark 48): Heuristic logic to allow independent decrease checks ---
         for (const r of shuffledRows) {
             // Try increasing
             if (q[r.id] + step <= r.max_g) {
@@ -1122,14 +1126,14 @@ function solveHeuristic(meal, nutritionDataMap, log) {
                 if (newState.err < lastState.err) {
                     lastState = newState;
                     improvedThisCycle = true;
-                    // Don't revert q[r.id] - keep the improvement
-                     log(`Heuristic Iter ${iterations}: +${step}g ${r.id} -> Err ${newState.err.toFixed(1)}`, 'DEBUG', 'HEURISTIC_SOLVER');
+                    log(`Heuristic Iter ${iterations}: +${step}g ${r.id} -> Err ${newState.err.toFixed(1)}`, 'DEBUG', 'HEURISTIC_SOLVER');
                 } else {
-                    q[r.id] -= step; // Revert if no improvement
+                    q[r.id] -= step; // Revert
                 }
             }
-             // Try decreasing (only if above minimum) - less common but can help balance
-             if (!improvedThisCycle && q[r.id] - step >= r.min_g) {
+            
+            // Try decreasing (independently)
+            if (q[r.id] - step >= r.min_g) {
                  q[r.id] -= step;
                  const newState = calculateTotalsAndError(q);
                  if (newState.err < lastState.err) {
@@ -1141,6 +1145,7 @@ function solveHeuristic(meal, nutritionDataMap, log) {
                  }
              }
         }
+        // --- END REPLACEMENT (Mark 48) ---
 
         if (!improvedThisCycle) {
             step = Math.floor(step / 2); // Reduce step size if no improvement found in a full cycle
@@ -1339,3 +1344,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
