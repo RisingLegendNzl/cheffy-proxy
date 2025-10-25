@@ -22,6 +22,13 @@ const CACHE_PREFIX_NUTRI = 'nutri';
 const DIETAGRAM_API_KEY = process.env.DIETAGRAM_RAPIDAPI_KEY;
 const DIETAGRAM_API_HOST = process.env.DIETAGRAM_RAPIDAPI_HOST || 'dietagram.p.rapidapi.com';
 
+// --- TOKEN BUCKET CONFIGURATION (NEW - copied from price-search.js) ---
+const BUCKET_CAPACITY = 10;
+const BUCKET_REFILL_RATE = 8; // Tokens per second (same as other RapidAPI)
+const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+// --- END NEW ---
+
 // --- CONSTANT FOR UNIT CORRECTION ---
 const KJ_TO_KCAL_FACTOR = 4.184;
 
@@ -85,6 +92,145 @@ function normalizeDietagramResponse(dietagramResponse, query, log) {
     };
 }
 // --- END NEW ---
+
+// --- NEW (Mark 44.2): Internal Dietagram API fetcher ---
+/**
+ * Internal logic for fetching from Dietagram API.
+ */
+async function _fetchDietagramFromApi(query, log = console.log) {
+    if (!DIETAGRAM_API_KEY) { 
+        log('Configuration Error: DIETAGRAM_RAPIDAPI_KEY is not set.', 'CRITICAL', 'CONFIG');
+        return { error: { message: 'Server configuration error: API key missing.', status: 500 } };
+    }
+
+    const options = {
+        method: 'GET',
+        url: `https://${DIETAGRAM_API_HOST}/apiFood.php`,
+        params: { name: query, lang: 'en' }, // Assuming 'en' for now
+        headers: {
+            'x-rapidapi-key': DIETAGRAM_API_KEY,
+            'x-rapidapi-host': DIETAGRAM_API_HOST
+        },
+        timeout: 10000 // 10 second timeout
+    };
+    
+    const attemptStartTime = Date.now();
+    log(`Attempting Dietagram fetch for: ${query}`, 'DEBUG', 'DIETAGRAM_REQUEST');
+
+    try {
+        const rapidResp = await axios.request(options);
+        const attemptLatency = Date.now() - attemptStartTime;
+        log(`Successfully fetched Dietagram for "${query}".`, 'SUCCESS', 'DIETAGRAM_RESPONSE', { status: rapidResp.status, latency_ms: attemptLatency });
+        return rapidResp.data; // Return the raw data
+    } catch (error) {
+        const attemptLatency = Date.now() - attemptStartTime;
+        const status = error.response?.status;
+        const is429 = status === 429;
+
+        log(`Dietagram fetch failed for "${query}"`, 'WARN', 'DIETAGRAM_FAILURE', { status: status || 'Network/Timeout', message: error.message, is429, latency_ms: attemptLatency });
+
+        if (is429) {
+            error.statusCode = 429;
+            throw error; // Re-throw 429 to be handled by fetchDietagramSafe
+        }
+        
+        const finalErrorMessage = `Request failed. Status: ${status || 'Network/Timeout'}.`;
+        return { error: { message: finalErrorMessage, status: status || 504, details: error.message } };
+    }
+}
+// --- END NEW ---
+
+// --- NEW (Mark 44.2): Rate-limited wrapper for Dietagram ---
+/**
+ * Wrapper for Dietagram API calls using a STATELESS token bucket (Vercel KV).
+ * This is CRITICAL for serverless environments.
+ * Returns { data, waitMs }
+ */
+async function fetchDietagramSafe(query, log = console.log) {
+    const bucketKey = `bucket:dietagram`; // Single bucket for the API
+    const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
+    let waitMs = 0;
+    const waitStart = Date.now();
+
+    // Loop until we successfully acquire a token
+    while (true) {
+        const now = Date.now();
+        let bucketState = null;
+
+        if (isKvConfigured()) {
+            try {
+                bucketState = await kv.get(bucketKey);
+            } catch (kvError) {
+                log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message });
+                break; // Bypassing loop
+            }
+        }
+
+        if (!bucketState) {
+            log(`Initializing KV bucket: ${bucketKey}`, 'DEBUG', 'BUCKET_INIT');
+            if (isKvConfigured()) {
+                try {
+                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: Math.ceil(TTL_NUTRI_NAME_MS / 1000) });
+                } catch (kvError) {
+                    log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
+                }
+            }
+            break; // Acquired token
+        }
+
+        // State exists, calculate refill
+        const elapsedMs = now - bucketState.lastRefill;
+        const tokensToAdd = elapsedMs * refillRatePerMs;
+        let currentTokens = Math.min(BUCKET_CAPACITY, bucketState.tokens + tokensToAdd);
+        const newLastRefill = now;
+
+        if (currentTokens >= 1) {
+            // Take token and update KV
+            currentTokens -= 1;
+            if (isKvConfigured()) {
+                try {
+                    await kv.set(bucketKey, { tokens: currentTokens, lastRefill: newLastRefill }, { ex: Math.ceil(TTL_NUTRI_NAME_MS / 1000) });
+                } catch (kvError) {
+                    log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
+                }
+            }
+            break; // Acquired token
+        } else {
+            // Not enough tokens, calculate wait time
+            const tokensNeeded = 1 - currentTokens;
+            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs)); // Wait at least 50ms
+            log(`Rate limiter active (Dietagram). Waiting ${waitTime}ms...`, 'INFO', 'BUCKET_WAIT');
+            await delay(waitTime);
+        }
+    } // end while(true)
+    
+    waitMs = Date.now() - waitStart;
+    log(`Acquired token for Dietagram (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
+
+    try {
+        const data = await _fetchDietagramFromApi(query, log);
+        return { data, waitMs }; // Return data and wait time
+    } catch (error) {
+        if (error.statusCode === 429) {
+            log(`Dietagram returned 429. Retrying once after ${BUCKET_RETRY_DELAY_MS}ms...`, 'WARN', 'BUCKET_RETRY', { query });
+            await delay(BUCKET_RETRY_DELAY_MS);
+             try {
+                 const retryData = await _fetchDietagramFromApi(query, log);
+                 return { data: retryData, waitMs };
+             } catch (retryError) {
+                  log(`Retry after 429 failed (Dietagram): ${retryError.message}`, 'ERROR', 'BUCKET_RETRY_FAIL', { query });
+                  const status = retryError.response?.status || retryError.statusCode || 500;
+                  const errorData = { error: { message: `Retry after 429 failed. Status: ${status}`, status: status, details: retryError.message } };
+                  return { data: errorData, waitMs };
+             }
+        }
+        log(`Unhandled error during fetchDietagramSafe: ${error.message}`, 'CRITICAL', 'BUCKET_ERROR', { query });
+         const errorData = { error: { message: `Unexpected error during safe fetch: ${error.message}`, status: 500 } };
+         return { data: errorData, waitMs };
+    }
+}
+// --- END NEW ---
+
 
 /**
  * Internal logic for fetching nutrition data from Open Food Facts API (and Dietagram fallback).
@@ -169,33 +315,26 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     }
 
     // --- STAGE 2: Attempt Dietagram Fallback (only for queries) ---
-    if (query && DIETAGRAM_API_KEY) {
-        log(`OFF failed for query "${query}". Attempting Dietagram fallback...`, 'INFO', 'DIETAGRAM_REQUEST');
-        const options = {
-            method: 'GET',
-            url: `https://${DIETAGRAM_API_HOST}/apiFood.php`,
-            params: { name: query, lang: 'en' }, // Assuming 'en' for now
-            headers: {
-                'x-rapidapi-key': DIETAGRAM_API_KEY,
-                'x-rapidapi-host': DIETAGRAM_API_HOST
-            }
-        };
+    // --- MODIFICATION (Mark 44.2): Use fetchDietagramSafe ---
+    if (query) {
+        log(`OFF failed for query "${query}". Attempting rate-limited Dietagram fallback...`, 'INFO', 'DIETAGRAM_REQUEST');
+        
+        const { data: dietagramData } = await fetchDietagramSafe(query, log);
 
-        try {
-            const response = await axios.request(options);
-            const normalizedData = normalizeDietagramResponse(response.data, query, log);
-            
+        if (dietagramData && !dietagramData.error) {
+            const normalizedData = normalizeDietagramResponse(dietagramData, query, log);
             if (normalizedData) {
                 return normalizedData; // Success!
             } else {
-                log(`Dietagram fallback failed to find valid data for: ${query}`, 'WARN', 'DIETAGRAM_RESPONSE');
+                log(`Dietagram fallback failed to parse valid data for: ${query}`, 'WARN', 'DIETAGRAM_RESPONSE');
             }
-        } catch (error) {
-            log(`Dietagram API request failed for query "${query}": ${error.message}`, 'ERROR', 'DIETAGRAM_FAILURE', { status: error.response?.status });
+        } else {
+             log(`Dietagram fallback fetch failed for: ${query}`, 'ERROR', 'DIETAGRAM_FAILURE', { error: dietagramData?.error });
         }
     } else if (barcode && !query) {
         log(`OFF failed for barcode "${barcode}". No query provided, cannot use Dietagram fallback.`, 'WARN', 'NUTRITION_FAIL');
     }
+    // --- END MODIFICATION ---
 
     // --- STAGE 3: Definitive Failure ---
     log(`All nutrition sources failed for ${identifierType}: ${identifier}`, 'WARN', 'NUTRITION_FAIL');
@@ -349,4 +488,5 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
+
 
