@@ -76,7 +76,8 @@ const SOLVER_MIN_GRAMS = 20; // Min grams for any ingredient in the solver
 // --- END NEW ---
 
 
-const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Expanded further
+// --- BUG FIX (Bug #3): Removed 'spray' from banned keywords as AI was asked to find it. ---
+const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Expanded further
 const SIZE_TOLERANCE = 0.6; // +/- 60%
 const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60%
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Score needed on tight query to skip normal/wide
@@ -848,7 +849,8 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
     // --- MODIFICATION (Mark 44): Updated System Prompt ---
     // REMOVED all rules about gram calculation (6, 9, 15, 16)
     // ADDED new rules for meal descriptions (just ingredient lists)
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 6. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 7. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 8. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 9. CATEGORY (Optional): 'allowedCategories' string array. 10. MEAL PORTIONS: For 'mealPlan.description', MUST list ONLY the key ingredients (e.g., 'Chicken Breast, Jasmine Rice, Broccoli'). DO NOT specify grams or portions. A code solver will calculate amounts later. 11. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 12. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 11). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
+    // --- BUG FIX (Bug #3): Updated prompt rules 3 & 4 for plurals and negative keywords ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 3a. PLURALS ARE CRITICAL: Use the form found on packaging. For "Eggs", use \`["eggs"]\` (plural). For "Diced Tomatoes", use \`["tomatoes", "diced"]\`. Using the singular "egg" or "tomato" will fail. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. For "Eggs", MUST include \`["mayonnaise", "salad", "chocolate", "gummies"]\`. For "Tomatoes", MUST include \`["sauce", "paste", "soup"]\`. 5. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 6. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 7. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 8. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 9. CATEGORY (Optional): 'allowedCategories' string array. 10. MEAL PORTIONS: For 'mealPlan.description', MUST list ONLY the key ingredients (e.g., 'Chicken Breast, Jasmine Rice, Broccoli'). DO NOT specify grams or portions. A code solver will calculate amounts later. 11. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 12. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 11). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
 
     // --- MODIFICATION (Mark 44): User query no longer includes retryContext ---
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
@@ -1145,9 +1147,21 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
         daysProcessed++;
 
         for (const meal of day.meals) {
-            const mealBudget = budgetTemplate[meal.type];
+            // --- BUG FIX (Bug #1): Map AI meal types (e.g., "Breakfast") to solver codes (e.g., "B") ---
+            const mealTypeMap = {
+                'breakfast': 'B',
+                'lunch': 'L',
+                'dinner': 'D',
+                'snack': 'S1', // Map "Snack" to "S1"
+                'snack 1': 'S1',
+                'snack 2': 'S2'
+            };
+            const mealCode = mealTypeMap[(meal.type || '').toLowerCase()] || meal.type; // Fallback to original
+            const mealBudget = budgetTemplate[mealCode];
+            // --- END FIX ---
+            
             if (!mealBudget) {
-                log(`No budget for meal type "${meal.type}", skipping solver.`, 'WARN', 'SOLVER');
+                log(`No budget for meal type "${meal.type}" (Code: ${mealCode}), skipping solver.`, 'WARN', 'SOLVER');
                 continue;
             }
 
@@ -1449,5 +1463,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
 
