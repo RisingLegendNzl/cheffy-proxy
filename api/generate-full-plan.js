@@ -1,4 +1,5 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
+// Mark 44.3 (FIX): Corrected typo in GEMINI_API_URL_BASE causing DNS failure.
 // Mark 44.2 (FIX): Build fail.
 // - REMOVED all external LP solver packages from package.json.
 // - EMBEDDED a simple, dependency-free heuristic solver (`solveMealMacros_Heuristic`).
@@ -32,7 +33,10 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 // --- MODIFICATION START: Reinstate GEMINI_API_KEY constant ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // --- MODIFICATION END ---
-const GEMINI_API_URL_BASE = 'https://generativela-generateContent'; // Key removed from here
+// --- FIX (Mark 44.3): Corrected Gemini API Base URL ---
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+// const GEMINI_API_URL_BASE = 'https://generativela-generateContent'; // Old Typo
+// --- END FIX ---
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
@@ -191,8 +195,8 @@ async function fetchWithRetry(url, options, log) {
         }
     }
     // If all retries fail
-    log(`API call failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
-    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
+    log(`API call failed definitively after ${MAX_RETRIES} attempts to ${url}.`, 'CRITICAL', 'HTTP'); // Added URL to log
+    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`); // Added URL to error
 }
 
 
@@ -1082,7 +1086,7 @@ function solveMealMacros_Heuristic(mealTargets, ingredients, log) {
         remainingTargets.carbs -= (nutrition.carbs * targetGrams);
         remainingTargets.calories -= (nutrition.calories * targetGrams);
         
-        log(`Heuristic Solver: Pass 1 (${priority})`, 'DEBUG', 'SOLVER', { key, targetGrams, remaining: remainingTargets });
+        log(`Heuristic Solver: Pass 1 (${priority})`, 'DEBUG', 'SOLVER', { key, targetGrams: Math.round(targetGrams), remaining: remainingTargets });
 
         // Mark as "done" by setting its priority to filler
         ing.priority = 'filler';
@@ -1191,10 +1195,12 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
                 if (grams > 0) {
                     // Add to this meal's totals
                     const nutrition = nutritionDataMap[key];
-                    mealCals += nutrition.calories * grams;
-                    mealProt += nutrition.protein * grams;
-                    mealFat += nutrition.fat * grams;
-                    mealCarbs += nutrition.carbs * grams;
+                    if (nutrition) { // Add safety check
+                        mealCals += nutrition.calories * grams;
+                        mealProt += nutrition.protein * grams;
+                        mealFat += nutrition.fat * grams;
+                        mealCarbs += nutrition.carbs * grams;
+                    }
 
                     // Add to the grand total
                     if (!finalIngredientTotals[key]) {
