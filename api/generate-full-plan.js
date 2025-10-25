@@ -1,11 +1,11 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
-// Mark 44.1 (FIX): Swapped 'javascript-lp-solver' for 'js-lpsolver' to fix build fail.
-// - Updated require statement.
-// - Updated solver model to place bounds inside 'variables' block.
-// - Updated solver call from .Solve() to .solve().
+// Mark 44.2 (FIX): Build fail.
+// - REMOVED all external LP solver packages from package.json.
+// - EMBEDDED a simple, dependency-free heuristic solver (`solveMealMacros_Heuristic`).
+// - This fixes the 'npm install' build failure permanently.
 // Mark 44: Re-architected pipeline ("AI-Code-AI Sandwich")
 // - REMOVED Mark 43 Verifier Loop. AI no longer does math.
-// - ADDED Code-based LP Solver to calculate exact grams (Step 5).
+// - ADDED Code-based Solver to calculate exact grams (Step 5).
 // - ADDED AI Phase 2 (Food Writer) to describe meals using solver output (Step 6).
 // - MODIFIED AI Phase 1 (Idea Chef) to only generate ideas + query ladders.
 // Mark 42: REPLACED macro calculation with industry-standard, dual-validation system.
@@ -20,8 +20,8 @@ const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
 
-// --- NEW (Mark 44.1): Import js-lpsolver ---
-const solver = require('js-lpsolver');
+// --- NEW (Mark 44.2): No longer import solver ---
+// const solver = require('js-lpsolver');
 
 /// ===== IMPORTS-END ===== ////
 
@@ -44,19 +44,31 @@ const MEAL_MACRO_BUDGETS = {
     '4': { 'B': 0.25, 'L': 0.35, 'D': 0.30, 'S1': 0.10 },
     '5': { 'B': 0.20, 'L': 0.30, 'D': 0.30, 'S1': 0.10, 'S2': 0.10 }
 };
-const SOLVER_MIN_GRAMS = 20; // Min grams for any ingredient in the solver
-const SOLVER_MAX_GRAMS = 1000; // Max grams for any ingredient in the solver
-// Cook yields (Raw Grams * Yield = Cooked Grams). We solve for RAW grams.
-// Nutrition data is (usually) for RAW, so we apply yield to nutrition.
-const COOK_YIELDS = {
-    'default': 1.0,
-    'Chicken': 0.75, // 100g raw -> 75g cooked
-    'Beef': 0.75,
-    'Pork': 0.75,
-    'Fish': 0.85,
-    'Rice': 3.0,  // 100g dry -> 300g cooked (but nutrition is for dry)
-    'Pasta': 2.5, // 100g dry -> 250g cooked (but nutrition is for dry)
+// --- NEW (Mark 44.2): Heuristic solver configuration ---
+// Defines which macro to prioritize for a given ingredient category.
+const HEURISTIC_PRIORITY_MAP = {
+    'Meat': 'protein',
+    'Poultry': 'protein',
+    'Fish': 'protein',
+    'Seafood': 'protein',
+    'Eggs': 'protein',
+    'Protein Powders': 'protein',
+    'Tofu & Meat Alternatives': 'protein',
+    'Dairy': 'protein',
+    'Grains': 'carbs',
+    'Rice': 'carbs',
+    'Pasta': 'carbs',
+    'Bakery': 'carbs',
+    'Fruit': 'carbs',
+    'Oils': 'fat',
+    'Nuts & Seeds': 'fat',
+    'Avocado': 'fat',
+    'Cheese': 'fat',
+    // Vegetables are fillers, handled last.
+    'Vegetables': 'filler',
+    'default': 'filler'
 };
+const SOLVER_MIN_GRAMS = 20; // Min grams for any ingredient in the solver
 // --- END NEW ---
 
 
@@ -473,7 +485,7 @@ module.exports = async function handler(request, response) {
         // Sanitize the plan
         const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && ing.requiredWords && ing.negativeKeywords);
         if (ingredientPlan.length !== rawIngredientPlan.length) {
-            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries.`, 'WARN', 'DATA');
+            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - rawIngredientPlan.length} invalid entries.`, 'WARN', 'DATA');
         }
         if (ingredientPlan.length === 0) {
             log("Blueprint fail: All ingredients failed sanitization.", 'CRITICAL', 'LLM');
@@ -739,7 +751,8 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                     protein: (item.nut.protein || 0) / 100, // Per Gram
                     fat: (item.nut.fat || 0) / 100,       // Per Gram
                     carbs: (item.nut.carbs || 0) / 100,     // Per Gram
-                    source: item.nut.source || 'unknown'
+                    source: item.nut.source || 'unknown',
+                    category: finalResults[item.ingredientKey]?.category || 'default' // Pass category for solver
                 };
             } else {
                  log(`No nutrition data found for "${item.ingredientKey}". It will be excluded from the solver.`, 'WARN', 'NUTRITION');
@@ -960,12 +973,19 @@ RULES:
 1.  Incorporate all ingredients and their exact gram amounts (e.g., "210g", "75g").
 2.  Be concise and appealing.
 3.  DO NOT add any ingredients not on the list.
-4.  If an ingredient is '0g', DO NOT mention it.
+4.  If an ingredient is '0g' or less, DO NOT mention it.
 5.  Assume grams are for the raw/dry product unless specified (e.g., "75g (dry) rice").`;
     
     const ingredientList = Object.entries(solvedIngredients)
+        .filter(([name, grams]) => grams > 0) // Filter out 0-gram ingredients
         .map(([name, grams]) => `${grams}g ${name}`)
         .join(', ');
+
+    // Handle case where solver returns nothing
+    if (!ingredientList) {
+        log(`AI Phase 2: No non-zero ingredients for ${mealName}, returning simple name.`, 'WARN', 'LLM');
+        return mealName;
+    }
 
     const userQuery = `Write a description for a ${mealType} called "${mealName}" containing: ${ingredientList}`;
     
@@ -1008,6 +1028,87 @@ RULES:
 
 
 /// ===== API-CALLERS-END ===== ////
+
+
+// --- NEW (Mark 44.2): Heuristic Code Solver (Replaces LP solver) ---
+/**
+ * Solves for meal grams using a simple, dependency-free heuristic.
+ * This is the replacement for the external LP solver package.
+ * @param {Object} mealTargets - The macro targets for this specific meal (P, F, C).
+ * @param {Array} ingredients - Array of ingredient objects { key, nutrition }
+ * @param {Function} log - The logger function.
+ * @returns {Object} A map of solved grams, e.g., { "Chicken Breast": 200, "Rice": 50 }
+ */
+function solveMealMacros_Heuristic(mealTargets, ingredients, log) {
+    const solvedGrams = {};
+    const remainingTargets = { ...mealTargets };
+
+    // Create a mutable list of ingredients sorted by priority
+    const sortedIngredients = ingredients.map(ing => ({
+        key: ing.key,
+        nutrition: ing.nutrition, // per-gram nutrition
+        priority: HEURISTIC_PRIORITY_MAP[ing.nutrition.category] || HEURISTIC_PRIORITY_MAP['default']
+    })).sort((a, b) => {
+        // Sort by priority: protein > carbs > fat > filler
+        const pA = a.priority === 'protein' ? 1 : (a.priority === 'carbs' ? 2 : (a.priority === 'fat' ? 3 : 4));
+        const pB = b.priority === 'protein' ? 1 : (b.priority === 'carbs' ? 2 : (b.priority === 'fat' ? 3 : 4));
+        return pA - pB;
+    });
+
+    log(`Heuristic Solver: Starting`, 'DEBUG', 'SOLVER', { targets: mealTargets, ingredients: sortedIngredients.map(i => i.key) });
+
+    // --- Pass 1: Solve for Primary Macro ---
+    for (const ing of sortedIngredients) {
+        const { key, nutrition, priority } = ing;
+        if (priority === 'filler') continue; // Skip fillers for now
+
+        let targetGrams = 0;
+        const macroPerGram = nutrition[priority];
+
+        if (macroPerGram > 0.05) { // Only solve if it's a significant source
+            const targetMacroAmount = remainingTargets[priority];
+            if (targetMacroAmount > 0) {
+                targetGrams = targetMacroAmount / macroPerGram;
+            }
+        }
+        
+        // Apply bounds
+        targetGrams = Math.max(SOLVER_MIN_GRAMS, targetGrams);
+        
+        // Store and subtract from budget
+        solvedGrams[key] = Math.round(targetGrams);
+        remainingTargets.protein -= (nutrition.protein * targetGrams);
+        remainingTargets.fat -= (nutrition.fat * targetGrams);
+        remainingTargets.carbs -= (nutrition.carbs * targetGrams);
+        remainingTargets.calories -= (nutrition.calories * targetGrams);
+        
+        log(`Heuristic Solver: Pass 1 (${priority})`, 'DEBUG', 'SOLVER', { key, targetGrams, remaining: remainingTargets });
+
+        // Mark as "done" by setting its priority to filler
+        ing.priority = 'filler';
+    }
+
+    // --- Pass 2: Handle Fillers (e.g., Vegetables) ---
+    // For now, we just give them a minimum amount. A more complex solver
+    // could use them to fill remaining calorie gaps.
+    for (const ing of sortedIngredients) {
+        if (ing.priority === 'filler' && !solvedGrams[ing.key]) {
+             solvedGrams[ing.key] = SOLVER_MIN_GRAMS; // Add a minimum amount
+             log(`Heuristic Solver: Pass 2 (filler)`, 'DEBUG', 'SOLVER', { key: ing.key, targetGrams: SOLVER_MIN_GRAMS });
+        }
+    }
+    
+    // Ensure all ingredients from the original list have a gram value
+    for (const ing of ingredients) {
+        if (solvedGrams[ing.key] === undefined) {
+             solvedGrams[ing.key] = 0; // Ensure 0 if not solved
+        }
+    }
+
+    log(`Heuristic Solver: Finished`, 'INFO', 'SOLVER', { solvedGrams });
+    return solvedGrams;
+}
+// --- END NEW ---
 
 
 // --- NEW (Mark 44): Code Solver (Phase 5) & Writer (Phase 6) ---
@@ -1056,87 +1157,51 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
 
             // Parse ingredients from AI Phase 1 description (e.g., "Chicken Breast, Rice")
             const mealIngredientKeys = meal.description.split(',').map(s => s.trim());
-            const variables = {};
-            const constraints = {
-                protein: { equal: mealTargets.protein },
-                fat: { equal: mealTargets.fat },
-                carbs: { equal: mealTargets.carbs }
-            };
-
-            // Build the solver model for this meal
+            
+            // Build the list of valid ingredients for the solver
+            const solverIngredients = [];
             for (const key of mealIngredientKeys) {
                 const nutrition = nutritionDataMap[key];
                 if (nutrition) {
-                    // This ingredient is valid and has data
-                    variables[key] = {
-                        protein: nutrition.protein,
-                        fat: nutrition.fat,
-                        carbs: nutrition.carbs,
-                        calories: nutrition.calories,
-                        // --- FIX (Mark 44.1): Place bounds *inside* the variable ---
-                        min: SOLVER_MIN_GRAMS,
-                        max: SOLVER_MAX_GRAMS
-                        // --- END FIX ---
-                    };
+                    solverIngredients.push({ key, nutrition });
                 } else {
                     log(`[Meal: ${meal.name}] Skipping "${key}" in solver: No nutrition data.`, 'WARN', 'SOLVER');
                 }
             }
 
-            if (Object.keys(variables).length === 0) {
+            if (solverIngredients.length === 0) {
                 log(`[Meal: ${meal.name}] Skipping solver: No valid ingredients with nutrition data.`, 'ERROR', 'SOLVER');
                 meal.solvedGrams = {}; // Mark as solved (with 0)
                 continue;
             }
 
-            // --- FIX (Mark 44.1): Remove top-level 'bounds' key ---
-            const model = {
-                optimize: "calories", // We'll optimize for calories
-                opType: "min",        // Minimize deviation (solver handles this)
-                constraints: constraints,
-                variables: variables
-                // bounds: bounds // This was the bug
-            };
-            // --- END FIX ---
+            // --- NEW (Mark 44.2): Call Heuristic Solver ---
+            log(`Running heuristic solver for: ${meal.name}`, 'INFO', 'SOLVER', { mealTargets, ingredients: solverIngredients.map(i => i.key) });
+            const solvedGrams = solveMealMacros_Heuristic(mealTargets, solverIngredients, log);
+            meal.solvedGrams = solvedGrams;
+            // --- END NEW ---
             
-            // Run the solver
-            log(`Running solver for: ${meal.name}`, 'INFO', 'SOLVER', { mealTargets, variables: Object.keys(variables) });
-            
-            // --- FIX (Mark 44.1): Change call to solver.solve(model) ---
-            const solution = solver.solve(model);
-            // const solution = solver.Solve(model, 1.0, (msg, level) => log(msg, level, 'LP_SOLVER')); // Old
-            // --- END FIX ---
-
-            if (!solution.feasible) {
-                log(`[Meal: ${meal.name}] Solver FAILED to find a feasible solution.`, 'CRITICAL', 'SOLVER', { solution });
-                meal.solvedGrams = {}; // Mark as failed
-                continue;
-            }
-
-            log(`[Meal: ${meal.name}] Solver SUCCESS.`, 'SUCCESS', 'SOLVER', { bounded: solution.bounded });
-
             // Store the solved grams on the meal object
-            meal.solvedGrams = {};
             let mealCals = 0, mealProt = 0, mealFat = 0, mealCarbs = 0;
 
-            for (const key in variables) {
-                // --- FIX (Mark 44.1): Access solution[key] directly ---
-                const grams = Math.round(solution[key] || 0);
-                // --- END FIX ---
-                meal.solvedGrams[key] = grams;
+            for (const key of mealIngredientKeys) { // Iterate original keys to ensure all are present
+                const grams = Math.round(solvedGrams[key] || 0);
+                meal.solvedGrams[key] = grams; // Ensure it's set, even if 0
 
-                // Add to this meal's totals
-                const nutrition = nutritionDataMap[key];
-                mealCals += nutrition.calories * grams;
-                mealProt += nutrition.protein * grams;
-                mealFat += nutrition.fat * grams;
-                mealCarbs += nutrition.carbs * grams;
+                if (grams > 0) {
+                    // Add to this meal's totals
+                    const nutrition = nutritionDataMap[key];
+                    mealCals += nutrition.calories * grams;
+                    mealProt += nutrition.protein * grams;
+                    mealFat += nutrition.fat * grams;
+                    mealCarbs += nutrition.carbs * grams;
 
-                // Add to the grand total
-                if (!finalIngredientTotals[key]) {
-                    finalIngredientTotals[key] = { totalGrams: 0, quantityUnits: "" };
+                    // Add to the grand total
+                    if (!finalIngredientTotals[key]) {
+                        finalIngredientTotals[key] = { totalGrams: 0, quantityUnits: "" };
+                    }
+                    finalIngredientTotals[key].totalGrams += grams;
                 }
-                finalIngredientTotals[key].totalGrams += grams;
             }
             
             // Add this meal's *actual* solved macros to the daily total
