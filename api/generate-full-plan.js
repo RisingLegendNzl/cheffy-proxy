@@ -1,20 +1,9 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
-// Mark 38: Patched macro calculation (g/kg) and AI variety prompt
+// Mark 39: CRITICAL SECURITY FIX - Moved API key from URL query to x-goog-api-key header
+// + Mark 38: Patched macro calculation (g/kg) and AI variety prompt
 // + Mark 37: Reverted API key handling to original method (manual append)
-// + Mark 36: Attempted environment injection fix (Incorrect)
-// + Mark 35: Attempted ?key= fix (Incorrect)
-// + Mark 34: Removed incorrect manual API key appending
-// + Mark 33: Corrected Gemini API URL typo
-// + Mark 32: Conditional Australian Terminology
-// + Mark 31: Explicit Portion Sizes in Prompt
-// + Mark 30: Explicit Macro Targeting
-// + Mark 29 Pipeline + CRITICAL FIX: Ensure userQuery is never empty before Gemini Call.
-// + TypeError Fixes for LLM Results (Mark 28)
-// + Ladder Telemetry Logging (Step 5)
-// + Checklist Upgrades (Step 4)
-// + SWR-lite Caching (Step 3)
-// + Token Bucket (Step 1)
+// ... (rest of changelog)
 
 /// ===== IMPORTS-START ===== \\\\
 
@@ -32,7 +21,7 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 // --- MODIFICATION START: Reinstate GEMINI_API_KEY constant ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // --- MODIFICATION END ---
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent'; // Key removed from here
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
@@ -103,10 +92,9 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            // Log the URL but obscure the key
-             const urlToLog = url.replace(/key=([^&]*)/, 'key=REDACTED');
-            log(`Attempt ${attempt}: Fetching from ${urlToLog}`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, options); // URL now includes the key
+            // --- MODIFICATION (Mark 39): URL no longer contains the key ---
+            log(`Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
+            const response = await fetch(url, options); 
             if (response.ok) {
                 return response; // Success
             }
@@ -137,9 +125,7 @@ async function fetchWithRetry(url, options, log) {
     }
     // If all retries fail
     log(`API call failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
-     // Obscure key in final error message
-     const urlToLogFinal = url.replace(/key=([^&]*)/, 'key=REDACTED');
-    throw new Error(`API call to ${urlToLogFinal} failed after ${MAX_RETRIES} attempts.`);
+    throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
 }
 
 
@@ -700,6 +686,23 @@ module.exports = async function handler(request, response) {
             nutritionResults.forEach(item => {
                 if (!item.grams || item.grams <= 0) return;
                 const nut = item.nut;
+
+                // --- MODIFICATION: Attach nutrition data to the final result object ---
+                const result = finalResults[item.ingredientKey];
+                if (result && result.allProducts) {
+                    const selectedProduct = result.allProducts.find(p => 
+                        (item.barcode && p.barcode === item.barcode) || 
+                        (item.query && p.name === item.query)
+                    );
+                    if (selectedProduct) {
+                        selectedProduct.nutrition = nut; // Attach the full nutrition object
+                    } else if (result.currentSelectionURL) {
+                         // Fallback: attach to current selection if match failed (e.g. market fail)
+                         const current = result.allProducts.find(p => p.url === result.currentSelectionURL);
+                         if (current) current.nutrition = nut;
+                    }
+                }
+                // --- END MODIFICATION ---
                 
                 let proteinG = 0;
                 let fatG = 0;
@@ -769,15 +772,25 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
-    // --- MODIFICATION START: Reverted to original URL construction ---
-    const GEMINI_API_URL=`${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`; 
-    // --- MODIFICATION END ---
+    // --- MODIFICATION (Mark 39): Use base URL, key in header ---
+    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
     const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};
     try{
-        const res=await fetchWithRetry(GEMINI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)},log); // Pass log
+        const res=await fetchWithRetry(
+            GEMINI_API_URL,
+            {
+                method:'POST',
+                headers:{
+                    'Content-Type':'application/json',
+                    'x-goog-api-key': GEMINI_API_KEY // Pass key as header
+                },
+                body:JSON.stringify(payload)
+            },
+            log
+        ); // Pass log
         const result = await res.json();
         const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
@@ -796,9 +809,8 @@ async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) { // Pass log
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    // --- MODIFICATION START: Reverted to original URL construction ---
-    const GEMINI_API_URL = `${GEMINI_API_URL_BASE}?key=${GEMINI_API_KEY}`;
-    // --- MODIFICATION END ---
+    // --- MODIFICATION (Mark 39): Use base URL, key in header ---
+    const GEMINI_API_URL = GEMINI_API_URL_BASE;
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
@@ -888,7 +900,10 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
             GEMINI_API_URL, 
             { 
                 method: 'POST', 
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': GEMINI_API_KEY // Pass key as header
+                },
                 body: JSON.stringify(payload) 
             }, 
             log
@@ -967,4 +982,5 @@ function calculateCalorieTarget(formData, log = console.log) {
     return Math.max(1200, Math.round(tdee + adjustment));
 }
 /// ===== API-CALLERS-END ===== ////
+
 
