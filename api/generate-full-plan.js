@@ -1,4 +1,9 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
+// Mark 47: Implemented robust checklist (lemma/synonym) and solver min_g prompt fix.
+// - Replaced runSmarterChecklist with lemma/synonym-aware matcher (normTokens, hasAny, etc.)
+// - Added hard-coded REQ_ANY and NEG_EXTRA maps to override bad AI filters.
+// - Added categoryOK function for hard category gating (e.g., reject non-food).
+// - Updated AI Phase 1 prompt to require sensible 'min_g' values, preventing 0g solver results.
 // Mark 46: Implemented Stable IDs & LP Solver (javascript-lp-solver) with Heuristic Fallback
 // - Updated AI Phase 1 prompt/schema for ingredient_id and structured mealPlan.
 // - Keyed nutritionDataMap by ingredient_id.
@@ -49,7 +54,24 @@ const MEAL_MACRO_BUDGETS = {
 
 // Banned keywords for market run checklist
 const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Removed 'wrap', 'spray'
-const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Must match >= 60%
+
+// --- NEW (Mark 47): Hard-coded overrides for known-bad AI checklist data ---
+const REQ_ANY = {
+  ing_wholemeal_pasta: ["pasta", "spaghetti", "penne", "fusilli", "rigatoni", "spirals"],
+  ing_onion: ["onion"], // 'lemmaVariants' will add 'onions'
+  ing_spinach: ["spinach"],
+  ing_eggs: ["eggs"],
+  ing_diced_tomatoes: ["tomatoes"]
+};
+const NEG_EXTRA = {
+  ing_onion: ["shallots", "spring", "powder", "minced", "prepack", "packet", "mix"],
+  ing_olive_oil_spray: ["canola", "vegetable", "eucalyptus", "sunflower"],
+  ing_diced_tomatoes: ["paste", "sundried", "cherry", "soup", "puree"],
+  ing_wholemeal_pasta: ["bread", "loaf", "flour", "rolls"]
+};
+// --- END NEW ---
+
+const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // Kept for old logic path if needed, but new checklist is boolean
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Score needed on tight query to skip normal/wide
 const PRICE_OUTLIER_Z_SCORE = 2.0; // Products with unit price z-score > 2 will be demoted
 
@@ -181,17 +203,8 @@ function parseSize(sizeString) {
     return null;
 }
 
-function calculateRequiredWordScore(productNameLower, requiredWords) {
-    if (!requiredWords || requiredWords.length === 0) return 1.0;
-    let wordsFound = 0;
-    requiredWords.forEach(kw => {
-        const regex = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-        if (regex.test(productNameLower)) {
-            wordsFound++;
-        }
-    });
-    return wordsFound / requiredWords.length;
-}
+// --- REMOVED (Mark 47): Old strict scoring function ---
+// function calculateRequiredWordScore(productNameLower, requiredWords) { ... }
 
 // --- Statistical Helper Functions ---
 const mean = (arr) => arr.reduce((acc, val) => acc + val, 0) / arr.length;
@@ -222,43 +235,125 @@ function applyPriceOutlierGuard(products, log, ingredientKey) {
     });
 }
 
+// --- NEW (Mark 47): Helper functions for new checklist logic ---
+function normTokens(s){
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
+}
+function hasAny(tokens, words){
+  const set = new Set(tokens);
+  return words.some(w => set.has(w));
+}
+function lemmaVariants(w){ // tiny stemmer for common food forms
+  const base = w.toLowerCase();
+  const forms = new Set([base]);
+  if (base.endsWith('s')) forms.add(base.slice(0,-1)); // onions -> onion
+  if (base.endsWith('ies')) forms.add(base.slice(0,-3)+'y');
+  return [...forms];
+}
+function expandWords(words){
+  const out = new Set();
+  for (const w of words) for (const v of lemmaVariants(w)) out.add(v);
+  return [...out];
+}
+
+// --- NEW (Mark 47): Category gating function ---
+function categoryOK(product, ingredient_id, log) {
+  const prodCat = (product.product_category || '').toLowerCase();
+  // We'll be lenient since we may only have 'product_category'
+  const logId = ingredient_id || 'unknown_ing';
+  const checkLogPrefix = `Category Check [${logId}] for "${product.product_name}" (Cat: ${prodCat})`;
+
+  switch(ingredient_id){
+    case 'ing_olive_oil_spray':
+      if (!(prodCat.includes('oil') || prodCat.includes('spray') || prodCat.includes('pantry'))) {
+        log(`${checkLogPrefix}: FAIL (Cat must include 'oil', 'spray', or 'pantry')`, 'DEBUG', 'CHECKLIST_CAT');
+        return false;
+      }
+      return true;
+    case 'ing_soy_sauce':
+      if (!(prodCat.includes('sauce') || prodCat.includes('pantry') || prodCat.includes('asian'))) {
+         log(`${checkLogPrefix}: FAIL (Cat must include 'sauce', 'pantry', or 'asian')`, 'DEBUG', 'CHECKLIST_CAT');
+         return false;
+      }
+      return true;
+    case 'ing_english_muffins':
+      if (!(prodCat.includes('bakery') || prodCat.includes('bread'))) {
+         log(`${checkLogPrefix}: FAIL (Cat must include 'bakery' or 'bread')`, 'DEBUG', 'CHECKLIST_CAT');
+         return false;
+      }
+      return true;
+    case 'ing_wholemeal_pasta':
+      if (!(prodCat.includes('pasta') || prodCat.includes('pantry'))) {
+         log(`${checkLogPrefix}: FAIL (Cat must include 'pasta' or 'pantry')`, 'DEBUG', 'CHECKLIST_CAT');
+         return false;
+      }
+      return true;
+    default:
+      return true; // Pass by default if no specific rule
+  }
+}
+
+// --- MODIFIED (Mark 47): Smarter Checklist function ---
 /** Smarter Checklist function */
 function runSmarterChecklist(product, ingredientData, log) {
     const productNameLower = product.product_name?.toLowerCase() || '';
-    if (!productNameLower) return { pass: false, score: 0 };
-    // --- MODIFICATION (Mark 46): Use ingredient_id if available for logging ---
-    const logId = ingredientData.ingredient_id || ingredientData.originalIngredient;
-    const { requiredWords = [], negativeKeywords = [], allowedCategories = [] } = ingredientData;
+    if (!productNameLower) return { pass: false, score: 0, reason: 'no_name' };
+    
+    const ingredient_id = ingredientData.ingredient_id;
+    const logId = ingredient_id || ingredientData.originalIngredient;
+    const { allowedCategories = [] } = ingredientData; // Keep AI's allowedCategories
     const checkLogPrefix = `Checklist [${logId}] for "${product.product_name}"`;
 
+    // --- 1. Category Gating (Hard-coded) ---
+    if (!categoryOK(product, ingredient_id, log)) {
+        return { pass: false, score: 0, reason: 'category_hard' };
+    }
+    
+    // --- 2. Global Banned Keywords ---
     const bannedWordFound = BANNED_KEYWORDS.find(kw => productNameLower.includes(kw));
     if (bannedWordFound) {
         log(`${checkLogPrefix}: FAIL (Global Banned: '${bannedWordFound}')`, 'DEBUG', 'CHECKLIST');
-        return { pass: false, score: 0 };
+        return { pass: false, score: 0, reason: 'banned_global' };
     }
-    if (negativeKeywords && negativeKeywords.length > 0) {
-        const negativeWordFound = negativeKeywords.find(kw => productNameLower.includes(kw.toLowerCase()));
+    
+    // --- 3. Expanded Negative Keywords (AI + Hard-coded) ---
+    const allNegativeKeywords = (ingredientData.negativeKeywords || []).concat(NEG_EXTRA[ingredient_id] || []);
+    if (allNegativeKeywords.length > 0) {
+        const negativeWordFound = allNegativeKeywords.find(kw => productNameLower.includes(kw.toLowerCase()));
         if (negativeWordFound) {
             log(`${checkLogPrefix}: FAIL (Negative Keyword: '${negativeWordFound}')`, 'DEBUG', 'CHECKLIST');
-            return { pass: false, score: 0 };
+            return { pass: false, score: 0, reason: 'negative_expanded' };
         }
     }
-    const score = calculateRequiredWordScore(productNameLower, requiredWords || []);
-    if (score < REQUIRED_WORD_SCORE_THRESHOLD) {
-        log(`${checkLogPrefix}: FAIL (Score ${score.toFixed(2)} < ${REQUIRED_WORD_SCORE_THRESHOLD} vs [${(requiredWords || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
-        return { pass: false, score: score };
+
+    // --- 4. Expanded Required Words (Hard-coded Override OR AI Default) ---
+    // Use hard-coded synonym list if it exists, otherwise use AI's list
+    const wordsToUse = REQ_ANY[ingredient_id] || ingredientData.requiredWords || [];
+    const expandedRequired = expandWords(wordsToUse);
+    const titleTokens = normTokens(productNameLower);
+
+    if (expandedRequired.length > 0 && !hasAny(titleTokens, expandedRequired)) {
+         log(`${checkLogPrefix}: FAIL (RequiredWord-ANY: Tokens in title did not match any of [${expandedRequired.join(', ')}])`, 'DEBUG', 'CHECKLIST');
+        return { pass: false, score: 0, reason: 'required_any' };
     }
+    
+    // --- 5. AI-defined Allowed Categories (Soft-check) ---
+    // This is the original logic, kept as a secondary check
     const productCategory = product.product_category?.toLowerCase() || '';
     if (allowedCategories && allowedCategories.length > 0 && productCategory) {
         const hasCategoryMatch = allowedCategories.some(allowedCat => productCategory.includes(allowedCat.toLowerCase()));
         if (!hasCategoryMatch) {
-            log(`${checkLogPrefix}: FAIL (Category Mismatch: Product category "${productCategory}" not in allowlist [${allowedCategories.join(', ')}])`, 'DEBUG', 'CHECKLIST');
-            return { pass: false, score: score };
+            log(`${checkLogPrefix}: FAIL (Category Mismatch: Product category "${productCategory}" not in AI allowlist [${allowedCategories.join(', ')}])`, 'DEBUG', 'CHECKLIST');
+            return { pass: false, score: 0, reason: 'category_ai' };
         }
     }
-    log(`${checkLogPrefix}: PASS (Score: ${score.toFixed(2)})`, 'DEBUG', 'CHECKLIST');
-    return { pass: true, score: score };
+    
+    // --- 6. Pass ---
+    // We no longer use score, but will keep it 1.0 for compatibility with ladder telemetry
+    log(`${checkLogPrefix}: PASS (Category, Negatives, and RequiredWord-ANY checks passed)`, 'DEBUG', 'CHECKLIST');
+    return { pass: true, score: 1.0 }; 
 }
+// --- END MODIFICATION ---
 
 
 function isCreativePrompt(cuisinePrompt) {
@@ -498,7 +593,8 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                 const validProductsOnPage = [];
                 let pageBestScore = -1;
                 for (const rawProduct of rawProducts) {
-                    const checklistResult = runSmarterChecklist(rawProduct, ingredient, log); // Pass full ingredient object
+                    // --- MODIFIED (Mark 47): Pass full ingredient object to new checklist ---
+                    const checklistResult = runSmarterChecklist(rawProduct, ingredient, log); 
                     if (checklistResult.pass) {
                         validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: checklistResult.score });
                         pageBestScore = Math.max(pageBestScore, checklistResult.score);
@@ -537,6 +633,7 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                          bucket_wait_ms: bucketWaitMs
                      });
 
+                    // --- MODIFIED (Mark 47): Keep using score 1.0 for skip heuristic ---
                     if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                         log(`[${ingredientKey}] Skip heuristic hit (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
                         break;
@@ -705,7 +802,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
     } catch(e){ log(`Creative AI failed: ${e.message}`,'CRITICAL','LLM'); return ""; }
 }
 
-// --- MODIFICATION (Mark 46): Updated AI Phase 1 for Stable IDs ---
+// --- MODIFICATION (Mark 46 & 47): Updated AI Phase 1 for Stable IDs & Solver Mins ---
 async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = GEMINI_API_URL_BASE;
@@ -715,8 +812,8 @@ async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets,
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
     const australianTermNote = isAustralianStore ? " Use common Australian terms." : "";
 
-    // --- UPDATED SYSTEM PROMPT (Mark 46) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate shopping list ('ingredients') & meal plan ('mealPlan'). 2. INGREDIENTS: For each: a. 'originalIngredient': Full descriptive name. b. 'ingredient_id': UNIQUE slug (e.g., 'ing_chicken_breast', 'ing_rolled_oats'). Use ONLY this ID for links. c. 'tightQuery', 'normalQuery', 'wideQuery', 'nutritionQuery': As defined below. d. 'requiredWords': Array[1] CORE NOUN, lowercase (e.g., ["chicken"], ["oats"], ["spinach"], ["eggs"], ["tomatoes"]). e. 'negativeKeywords': Array[1-5] lowercase exclusions. f. 'category' (optional). g. 'allowedCategories' (optional). 3. QUERIES: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-3 CORE GENERIC WORDS ONLY, STORE-PREFIXED. EXCLUDE ALL modifiers: brands, sizes, forms (diced/shredded/spray), fat content, prep (microwave/canned). JUST CORE NAME (e.g., "Coles brown rice", "Coles tuna").${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. d. 'nutritionQuery': 1-2 CORE GENERIC WORDS ONLY, *NO STORE PREFIX*. For generic nutrition lookup (e.g., "chicken breast", "rolled oats"). 4. MEAL PLAN: Array of days. Each day: a. 'day_id': YYYY-MM-DD or simple day number. b. 'meals': Array of meals. Each meal: i. 'meal_id': UNIQUE slug (e.g., 'd1_m1_oats'). ii. 'title': Appealing name. iii. 'type': 'B', 'L', 'D', 'S1', 'S2'. iv. 'targets': {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Calculate these by distributing daily targets based on meal type (e.g., B=20%, L=30%, D=30%, S=10% each). v. 'tol' (Tolerances): {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Set reasonable ± tolerances (e.g., kcal±50, p±10, c±15, f±10). vi. 'items': Array of ingredients for this meal: {'ingredient_id': ID_FROM_LIST, 'display_name': originalIngredient, 'min_g': INT (usually 0), 'max_g': INT (e.g., 500)}. Include ALL ingredients needed for the meal. 'display_name' is UI ONLY. ALL JOINS USE ingredient_id. 5. VARIETY: Max repetitions per meal title = ${maxRepetitions}. Ensure variety across days if needed. 6. CONSISTENCY: Ensure every ingredient_id used in mealPlan.items exists in the main 'ingredients' list.`;
+    // --- UPDATED SYSTEM PROMPT (Mark 47) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate shopping list ('ingredients') & meal plan ('mealPlan'). 2. INGREDIENTS: For each: a. 'originalIngredient': Full descriptive name. b. 'ingredient_id': UNIQUE slug (e.g., 'ing_chicken_breast', 'ing_rolled_oats'). Use ONLY this ID for links. c. 'tightQuery', 'normalQuery', 'wideQuery', 'nutritionQuery': As defined below. d. 'requiredWords': Array[1-3] CORE NOUNS/SYNONYMS, lowercase (e.g., ["chicken"], ["oats"], ["spinach"], ["eggs"], ["tomato", "tomatoes"], ["pasta", "spaghetti"]). e. 'negativeKeywords': Array[1-5] lowercase exclusions. f. 'category' (optional). g. 'allowedCategories' (optional). 3. QUERIES: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-3 CORE GENERIC WORDS ONLY, STORE-PREFIXED. EXCLUDE ALL modifiers: brands, sizes, forms (diced/shredded/spray), fat content, prep (microwave/canned). JUST CORE NAME (e.g., "Coles brown rice", "Coles tuna").${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. d. 'nutritionQuery': 1-2 CORE GENERIC WORDS ONLY, *NO STORE PREFIX*. For generic nutrition lookup (e.g., "chicken breast", "rolled oats"). 4. MEAL PLAN: Array of days. Each day: a. 'day_id': YYYY-MM-DD or simple day number. b. 'meals': Array of meals. Each meal: i. 'meal_id': UNIQUE slug (e.g., 'd1_m1_oats'). ii. 'title': Appealing name. iii. 'type': 'B', 'L', 'D', 'S1', 'S2'. iv. 'targets': {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Calculate these by distributing daily targets based on meal type (e.g., B=20%, L=30%, D=30%, S=10% each). v. 'tol' (Tolerances): {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Set reasonable ± tolerances (e.g., kcal±50, p±10, c±15, f±10). vi. 'items': Array of ingredients for this meal: {'ingredient_id': ID_FROM_LIST, 'display_name': originalIngredient, 'min_g': INT, 'max_g': INT (e.g., 500)}. CRITICAL: Set a SENSIBLE CULINARY MINIMUM for 'min_g' (e.g., 50g for tomatoes in bolognese, 5g for garlic, 1g for oil spray, 100g for main protein). DO NOT default to 0 for core ingredients. Include ALL ingredients needed for the meal. 'display_name' is UI ONLY. ALL JOINS USE ingredient_id. 5. VARIETY: Max repetitions per meal title = ${maxRepetitions}. Ensure variety across days if needed. 6. CONSISTENCY: Ensure every ingredient_id used in mealPlan.items exists in the main 'ingredients' list.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Daily Target: ~${dailyNutritionalTargets.calories} kcal (P ~${dailyNutritionalTargets.protein}g, F ~${dailyNutritionalTargets.fat}g, C ~${dailyNutritionalTargets.carbs}g). Dietary: ${dietary}. Meals per day: ${eatingOccasions}. Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}. Return JSON matching schema.`;
 
@@ -1242,5 +1339,3 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
-
