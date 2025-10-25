@@ -167,7 +167,7 @@ async function fetchWithRetry(url, options, log) {
         try {
             // --- MODIFICATION (Mark 39): URL no longer contains the key ---
             log(`Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, options); 
+            const response = await fetch(url, options);
             if (response.ok) {
                 return response; // Success
             }
@@ -448,7 +448,7 @@ module.exports = async function handler(request, response) {
         }
         
         const numDays = parseInt(days, 10);
-        if (isNaN(numDays) || numDays < 1 || numDays > 7) { 
+        if (isNaN(numDays) || numDays < 1 || numDays > 7) {
              log(`Invalid number of days: ${days}. Proceeding with default 1.`, 'WARN', 'INPUT');
         }
         const weightKg = parseFloat(weight); // Parse weight for macro calc
@@ -489,9 +489,10 @@ module.exports = async function handler(request, response) {
         }
 
         // Sanitize the plan
-        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && ing.requiredWords && ing.negativeKeywords);
+        // --- MODIFICATION: Include nutritionQuery in sanitization ---
+        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && ing.nutritionQuery && ing.requiredWords && ing.negativeKeywords);
         if (ingredientPlan.length !== rawIngredientPlan.length) {
-            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - rawIngredientPlan.length} invalid entries.`, 'WARN', 'DATA');
+            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - rawIngredientPlan.length} invalid entries (missing required fields including nutritionQuery).`, 'WARN', 'DATA');
         }
         if (ingredientPlan.length === 0) {
             log("Blueprint fail: All ingredients failed sanitization.", 'CRITICAL', 'LLM');
@@ -500,7 +501,7 @@ module.exports = async function handler(request, response) {
         
         log(`AI Phase 1 success: ${ingredientPlan.length} valid ingredients.`, 'SUCCESS', 'PHASE');
         ingredientPlan.forEach((ing, index) => {
-            log(`AI Ingredient ${index + 1}: ${ing.originalIngredient}`, 'DEBUG', 'DATA', ing);
+            log(`AI Ingredient ${index + 1}: ${ing.originalIngredient} (NutriQuery: ${ing.nutritionQuery})`, 'DEBUG', 'DATA', ing);
         });
 
         // --- Execute Phases 3 & 4 (Market Run & Nutrition Fetch) ---
@@ -525,15 +526,24 @@ module.exports = async function handler(request, response) {
                 finalResults[ingredientKey].totalGramsRequired = finalIngredientTotals[ingredientKey].totalGrams;
                 finalResults[ingredientKey].quantityUnits = finalIngredientTotals[ingredientKey].quantityUnits;
             } else {
-                log(`Solver calculated grams for "${ingredientKey}", but it's missing from finalResults.`, 'WARN', 'SOLVER');
+                // Handle cases where solver included an ingredient AI didn't list (shouldn't happen with current logic)
+                log(`Solver calculated grams for "${ingredientKey}", but it's missing from AI Phase 1 ingredient list / finalResults. Adding dummy entry.`, 'WARN', 'SOLVER');
+                 finalResults[ingredientKey] = {
+                      originalIngredient: ingredientKey,
+                      source: 'solver_only', // Mark as special case
+                      totalGramsRequired: finalIngredientTotals[ingredientKey].totalGrams,
+                      quantityUnits: finalIngredientTotals[ingredientKey].quantityUnits,
+                      allProducts: [],
+                      currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
+                 };
             }
         }
         // --- END NEW ---
 
         // --- Phase 7: Assembling Final Response ---
         log("Phase 7: Final Response...", 'INFO', 'PHASE');
-        const finalResponseData = { 
-            mealPlan: finalMealPlan, 
+        const finalResponseData = {
+            mealPlan: finalMealPlan,
             uniqueIngredients: ingredientPlan, // The unique list from AI Phase 1
             results: finalResults, // The market data + solved gram totals
             nutritionalTargets: actualSolvedDailyTotals // The *actual* solved totals
@@ -712,37 +722,40 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
 
     for (const key in finalResults) {
         const result = finalResults[key];
-        // --- MODIFICATION (Mark 44): We fetch nutrition for ALL discovered products,
-        // not just ones with AI-estimated grams.
-        if (result && result.source === 'discovery') {
-            const selected = result.allProducts?.find(p => p.url === result.currentSelectionURL);
-            if (selected) {
-                itemsToFetchNutrition.push({
-                    ingredientKey: key, 
-                    barcode: selected.barcode, 
-                    query: selected.name,
-                    // No gram data yet
-                });
+        // --- MODIFICATION: Use AI's generic nutritionQuery ---
+        if (result && (result.source === 'discovery' || result.source === 'solver_only')) { // Include solver_only items just in case
+            const selected = result.source === 'discovery' ? result.allProducts?.find(p => p.url === result.currentSelectionURL) : null;
+            const barcodeToUse = selected?.barcode; // Prioritize barcode
+            const queryToUse = result.nutritionQuery; // Use the generic query from AI
+
+            if (barcodeToUse || queryToUse) {
+                 itemsToFetchNutrition.push({
+                     ingredientKey: key,
+                     barcode: barcodeToUse, // Pass barcode if available
+                     query: queryToUse,     // Pass generic query for fallback/primary lookup
+                     aiNutritionQuery: result.nutritionQuery // Keep original for logging
+                 });
+            } else {
+                 log(`[${key}] Cannot fetch nutrition: Missing both barcode and nutritionQuery.`, 'WARN', 'NUTRITION');
             }
         } else if (result && (result.source === 'failed' || result.source === 'error')) {
             // Still log, but can't fetch nutrition
             log(`[${key}] Market Run failed, cannot fetch nutrition.`, 'WARN', 'MARKET_RUN');
         }
     }
+    // --- END MODIFICATION ---
 
 
     if (itemsToFetchNutrition.length > 0) {
-        log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} products...`, 'INFO', 'HTTP');
+        log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} ingredients using barcode or generic query...`, 'INFO', 'HTTP');
         const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) =>
-            // fetchNutritionData now has SWR logic built-in
-            (item.barcode || item.query) ?
-            fetchNutritionData(item.barcode, item.query, log) // Pass log
+            // fetchNutritionData now uses barcode OR the generic query
+            fetchNutritionData(item.barcode, item.query, log) // Pass barcode first, then generic query
                 .then(nut => ({ ...item, nut }))
                 .catch(err => {
-                    log(`Unhandled Nutri fetch error ${item.ingredientKey}: ${err.message}`, 'CRITICAL', 'HTTP');
+                    log(`Unhandled Nutri fetch error for "${item.ingredientKey}" (Query: ${item.query}): ${err.message}`, 'CRITICAL', 'HTTP');
                     return { ...item, nut: { status: 'not_found', error: 'Unhandled fetch error' } };
                 })
-            : Promise.resolve({ ...item, nut: { status: 'not_found' } })
         );
 
         log("Nutrition fetch/calc complete.", 'SUCCESS', 'HTTP');
@@ -760,17 +773,22 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                     source: item.nut.source || 'unknown',
                     category: finalResults[item.ingredientKey]?.category || 'default' // Pass category for solver
                 };
+                 log(`Nutrition found for "${item.ingredientKey}" (Using: ${item.barcode ? 'barcode' : `query '${item.query}'`}, Source: ${item.nut.source})`, 'INFO', 'NUTRITION');
             } else {
-                 log(`No nutrition data found for "${item.ingredientKey}". It will be excluded from the solver.`, 'WARN', 'NUTRITION');
+                 // Log failure using the generic query
+                 log(`No nutrition data found for "${item.ingredientKey}" (Tried: ${item.barcode ? `barcode ${item.barcode} & ` : ''}query '${item.query}'). It will be excluded from the solver.`, 'WARN', 'NUTRITION');
             }
 
-            // Also attach to the final result object for the frontend
+            // Also attach to the final result object for the frontend (to the selected product if found)
             const result = finalResults[item.ingredientKey];
-            if (result && result.allProducts) {
+            if (result && result.allProducts && result.currentSelectionURL) {
                 const selectedProduct = result.allProducts.find(p => p.url === result.currentSelectionURL);
                 if (selectedProduct) {
-                    selectedProduct.nutrition = item.nut; // Attach the full nutrition object
+                    selectedProduct.nutrition = item.nut; // Attach the full nutrition object (even if 'not_found')
                 }
+            } else if (result && result.source === 'solver_only') {
+                 // If it was a solver_only item, attach nutrition directly to the result object
+                 result.nutrition = item.nut;
             }
         });
 
@@ -799,7 +817,7 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
     // --- MODIFICATION (Mark 39): Use base URL, key in header ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    const GEMINI_API_URL = GEMINI_API_URL_BASE;
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -849,24 +867,19 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
 
     // --- BUG FIX (Bug #3): Updated prompt rules 3 & 4 for plurals and negative keywords ---
     // --- BUG FIX (Market Failure): Updated prompt rule 3 to be less strict for spinach/chicken ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 3a. BE LESS STRICT: Often, ONE core noun is better. For "Baby Spinach Leaves", use just \`["spinach"]\`. For "Chicken Breast Fillets", use \`["chicken", "breast"]\` (singular). 3b. PLURALS ARE CRITICAL: Use the form found on packaging. For "Eggs", use \`["eggs"]\` (plural). For "Diced Tomatoes", use \`["tomatoes", "diced"]\`. Using the singular "egg" or "tomato" will fail. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. For "Eggs", MUST include \`["mayonnaise", "salad", "chocolate", "gummies"]\`. For "Tomatoes", MUST include \`["sauce", "paste", "soup"]\`. 5. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 6. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 7. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 8. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 9. CATEGORY (Optional): 'allowedCategories' string array. 10. MEAL PORTIONS: For 'mealPlan.description', MUST list ONLY the key ingredients (e.g., 'Chicken Breast, Jasmine Rice, Broccoli'). DO NOT specify grams or portions. A code solver will calculate amounts later. 11. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 12. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 11). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
+    // --- STRATEGY PIVOT: Added rule 2d for nutritionQuery, updated rule 2b ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-3 CORE GENERIC WORDS ONLY, STORE-PREFIXED. Use the ABSOLUTE MOST COMMON GENERIC NAME. CRITICAL: EXCLUDE ALL modifiers unless IMPOSSIBLE otherwise: NO brands, sizes (kg/g/ml/l/pack), fat content (full/skim/lean), forms (diced/shredded/floret/spray/whole/etc.), dryness, source (Australian), or preparation (microwave/canned/frozen/fresh). JUST THE CORE PRODUCT NAME (e.g., "Coles brown rice", "Coles tuna", "Coles olive oil", "Coles broccoli").${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. d. 'nutritionQuery': NEW! 1-2 CORE GENERIC WORDS ONLY, *NO STORE PREFIX*. This is ONLY for looking up generic nutritional data (e.g., "chicken breast", "rolled oats", "broccoli", "olive oil"). 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 3a. BE LESS STRICT: Often, ONE core noun is better. For "Baby Spinach Leaves", use just \`["spinach"]\`. For "Chicken Breast Fillets", use \`["chicken", "breast"]\` (singular). For "Rolled Oats", \`["oats"]\` might be better than \`["oats", "rolled"]\`. 3b. PLURALS ARE CRITICAL: Use the form found on packaging. For "Eggs", use \`["eggs"]\` (plural). For "Diced Tomatoes", use \`["tomatoes", "diced"]\`. Using the singular "egg" or "tomato" will fail. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. For "Eggs", MUST include \`["mayonnaise", "salad", "chocolate", "gummies"]\`. For "Tomatoes", MUST include \`["sauce", "paste", "soup"]\`. 5. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 6. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 7. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 8. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 9. CATEGORY (Optional): 'allowedCategories' string array. 10. MEAL PORTIONS: For 'mealPlan.description', MUST list ONLY the key ingredients (e.g., 'Chicken Breast, Jasmine Rice, Broccoli'). DO NOT specify grams or portions. A code solver will calculate amounts later. 11. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 12. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 11). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
 
-    // --- MODIFICATION (Mark 44): User query no longer includes retryContext ---
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
-
-    // Check userQuery before passing to payload
     if (userQuery.trim().length < 50) {
-        // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
         log("Critical Input Failure: User query is too short/empty due to missing form data or invalid template resolution.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery: userQuery, sanitizedData: getSanitizedFormData(formData) });
         throw new Error("Cannot generate plan: Invalid input data caused an empty prompt.");
     }
 
-    // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
     log("Technical Prompt (Phase 1 - Ideas)", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...', sanitizedData: getSanitizedFormData(formData) });
 
-    // --- MODIFICATION (Mark 44): Simplified Schema ---
-    // REMOVED: targetSize, totalGramsRequired, quantityUnits, aiEst...
+    // --- STRATEGY PIVOT: Added nutritionQuery to schema ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -885,11 +898,13 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
                                 "tightQuery": { "type": "STRING", nullable: true },
                                 "normalQuery": { "type": "STRING" },
                                 "wideQuery": { "type": "STRING", nullable: true },
+                                "nutritionQuery": { "type": "STRING" }, // ADDED FIELD
                                 "requiredWords": { type: "ARRAY", items: { "type": "STRING" } },
                                 "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } },
                                 "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }
                             },
-                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords"]
+                            // ADDED nutritionQuery to required fields
+                            required: ["originalIngredient", "normalQuery", "nutritionQuery", "requiredWords", "negativeKeywords"]
                         }
                     },
                     "mealPlan": {
@@ -905,7 +920,7 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
                                         properties: {
                                             "type": { "type": "STRING" },
                                             "name": { "type": "STRING" },
-                                            "description": { "type": "STRING" } // Now just an ingredient list, e.g., "Chicken, Rice"
+                                            "description": { "type": "STRING" }
                                         }
                                     }
                                 }
@@ -917,19 +932,19 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
             }
         }
     };
-    // --- END MODIFICATION ---
+    // --- END PIVOT ---
 
     try {
         const response = await fetchWithRetry(
-            GEMINI_API_URL, 
-            { 
-                method: 'POST', 
+            GEMINI_API_URL,
+            {
+                method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'x-goog-api-key': GEMINI_API_KEY // Pass key as header
                 },
-                body: JSON.stringify(payload) 
-            }, 
+                body: JSON.stringify(payload)
+            },
             log
         );
         const result = await response.json();
@@ -943,7 +958,6 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
             const parsed = JSON.parse(jsonText);
             log("Parsed Technical (Phase 1)", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
 
-            // Basic validation
             if (!parsed || typeof parsed !== 'object') {
                  log("Validation Error: Root response is not an object.", 'CRITICAL', 'LLM', parsed);
                  throw new Error("LLM response was not a valid object.");
@@ -971,7 +985,7 @@ async function generateLLMPlanAndMeals_Phase1(formData, calorieTarget, proteinTa
  */
 async function generateLLMMealDescription_Phase2(mealName, mealType, solvedIngredients, log) {
     // --- MODIFICATION (Mark 39): Use base URL, key in header ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    const GEMINI_API_URL = GEMINI_API_URL_BASE;
     
     const systemPrompt = `You are a food writer. Your job is to take a meal name and a precise list of ingredients and their weights, and write a simple, appealing, one-sentence meal description.
 RULES:
@@ -1132,7 +1146,7 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
     const budgetTemplate = MEAL_MACRO_BUDGETS[eatingOccasions] || MEAL_MACRO_BUDGETS['3'];
     
     // This will store the grand total grams needed for the whole plan
-    const finalIngredientTotals = {}; 
+    const finalIngredientTotals = {};
     
     // Store daily totals *as calculated by the solver*
     let solvedDailyTotalsAcc = { calories: 0, protein: 0, fat: 0, carbs: 0 };
@@ -1292,7 +1306,7 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
     };
     log("Final Solved Daily Averages:", 'SUCCESS', 'SOLVER', avgSolvedTotals);
 
-    return { 
+    return {
         finalMealPlan,          // The plan with new, rich descriptions
         finalIngredientTotals,  // The grand total of grams needed
         solvedDailyTotals: avgSolvedTotals // The *actual* solved daily totals
@@ -1454,10 +1468,10 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
     
     log(`Calculated Macro Targets (Dual-Validation) (Goal: ${goal}, Cals: ${calorieTarget}, Weight: ${validWeightKg}kg): P ${finalProteinGrams}g, F ${finalFatGrams}g, C ${finalCarbGrams}g`, 'INFO', 'CALC');
 
-    return { 
-        proteinGrams: finalProteinGrams, 
-        fatGrams: finalFatGrams, 
-        carbGrams: finalCarbGrams 
+    return {
+        proteinGrams: finalProteinGrams,
+        fatGrams: finalFatGrams,
+        carbGrams: finalCarbGrams
     };
 }
 
