@@ -5,7 +5,8 @@
   "dependencies": {
     "@vercel/kv": "^2.0.0",
     "axios": "^1.7.2",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "javascript-lp-solver": "^0.4.24"
   }
 }
 
