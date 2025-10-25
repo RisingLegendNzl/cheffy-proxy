@@ -1,8 +1,8 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
+// Mark 42: REPLACED macro calculation with industry-standard, dual-validation system.
 // Mark 40: PRIVACY FIX - Added redaction for PII (name, age, weight, height) in logs
 // Mark 39: CRITICAL SECURITY FIX - Moved API key from URL query to x-goog-api-key header
-// Mark 38: Patched macro calculation (g/kg) and AI variety prompt
 // ... (rest of changelog)
 
 /// ===== IMPORTS-START ===== \\\\
@@ -321,64 +321,11 @@ function isCreativePrompt(cuisinePrompt) {
     return cuisinePrompt.length > 30 || cuisinePrompt.includes(' like ') || cuisinePrompt.includes(' inspired by ') || cuisinePrompt.includes(' themed ');
 }
 
-/**
- * Calculates suggested macro targets in grams based on calorie target and goal.
- * ---
- * MODIFICATION (Mark 38):
- * - Changed signature to accept `weightKg`.
- * - Changed protein calculation from %-based to grams-per-kilogram (g/kg) based.
- * - Fat is calculated as a % of total calories.
- * - Carbs are calculated from the remaining calories.
- * This prevents absurdly high protein targets on high-calorie plans.
- * ---
- */
-function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
-    let proteinMultiplier = 1.8; // Default g/kg for 'maintain'
-    let fatPercent = 0.30;       // Default % for 'maintain'
-
-    // Use a g/kg multiplier for protein based on the goal
-    switch (goal) {
-        case 'cut_moderate':
-        case 'cut_aggressive':
-            proteinMultiplier = 2.2; // High protein (g/kg) for muscle preservation
-            fatPercent = 0.25;       // Lower fat %
-            break;
-        case 'bulk_lean':
-            proteinMultiplier = 2.2; // High protein (g/kg) for muscle growth
-            fatPercent = 0.25;       // Moderate fat %
-            break;
-        case 'bulk_aggressive':
-            proteinMultiplier = 2.0; // Slightly lower g/kg as calories are very high
-            fatPercent = 0.25;       // Moderate fat %
-            break;
-        case 'maintain':
-        default:
-             // Use default 1.8 g/kg and 30% fat
-             break;
-    }
-
-    // 1. Calculate Protein grams and calories
-    // Ensure weightKg is a valid number
-    const validWeightKg = (typeof weightKg === 'number' && weightKg > 0) ? weightKg : 75; // Default to 75kg if invalid
-    if (validWeightKg !== weightKg) {
-        log(`Invalid weight "${weightKg}" for macro calc, using default ${validWeightKg}kg.`, 'WARN', 'CALC');
-    }
-    const proteinGrams = Math.round(validWeightKg * proteinMultiplier);
-    const proteinCalories = proteinGrams * 4;
-
-    // 2. Calculate Fat grams and calories
-    const fatCalories = calorieTarget * fatPercent;
-    const fatGrams = Math.round(fatCalories / 9);
-
-    // 3. Calculate Carb grams and calories from the remainder
-    const carbCalories = calorieTarget - proteinCalories - fatCalories;
-    const carbGrams = Math.round(carbCalories / 4);
-    
-    // Log the new, sensible targets
-    log(`Calculated Macro Targets (g/kg) (Goal: ${goal}, Cals: ${calorieTarget}, Weight: ${validWeightKg}kg): P ${proteinGrams}g, F ${fatGrams}g, C ${carbGrams}g`, 'INFO', 'CALC');
-
-    return { proteinGrams, fatGrams, carbGrams };
-}
+// --- MODIFICATION (Mark 42): REMOVED old g/kg macro calculator ---
+// The old `calculateMacroTargets` function (Mark 38) has been deleted.
+// It is replaced by the new industry-standard, dual-validation
+// function at the end of this file (after `calculateCalorieTarget`).
+// --- END MODIFICATION ---
 
 
 /// ===== HELPERS-END ===== ////
@@ -475,10 +422,11 @@ module.exports = async function handler(request, response) {
 
         // --- Phase 2: Technical Blueprint ---
         log("Phase 2: Technical Blueprint...", 'INFO', 'PHASE');
+        // --- MODIFICATION (Mark 42): calculateCalorieTarget now uses Mifflin-St Jeor per spec ---
         const calorieTarget = calculateCalorieTarget(formData, log);
         log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
         
-        // --- MODIFICATION (Mark 38): Pass weightKg to macro calculator ---
+        // --- MODIFICATION (Mark 42): calculateMacroTargets now uses new dual-validation system ---
         const { proteinGrams, fatGrams, carbGrams } = calculateMacroTargets(calorieTarget, goal, weightKg, log); 
 
         let llmResult;
@@ -841,7 +789,8 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'allspice' not 'pimento')." : "";
 
     // --- MODIFICATION (Mark 38): Added rules 18 & 19 to system prompt ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS: For each meal in 'mealPlan.description', MUST specify clear portion sizes for key ingredients (e.g., '...150g chicken breast, 1 cup rice...'). 16. CRITICAL ADHERENCE RULE: Meal portions MUST sum precisely to 'totalGramsRequired'. Total estimated Calories, Protein, Fat, Carbs from ALL 'ingredients' (using 'totalGramsRequired' and AI estimates) MUST closely match ALL provided targets (+/- 10%). Double-check your calculations meticulously. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets. 18. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 19. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 18). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
+    // --- MODIFICATION (Mark 42): Updated macro rule 16 to emphasize targets ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS: For each meal in 'mealPlan.description', MUST specify clear portion sizes for key ingredients (e.g., '...150g chicken breast, 1 cup rice...'). 16. CRITICAL ADHERENCE RULE: Meal portions MUST sum precisely to 'totalGramsRequired'. Total estimated Calories, Protein, Fat, and Carbs from ALL 'ingredients' (using 'totalGramsRequired' and AI estimates) MUST closely match the provided daily targets (+/- 10%). You are provided with daily grams for P/F/C and a calorie target. HIT THESE TARGETS. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets. 18. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 19. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 18). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
 
 
     // Added macro targets to User Query
@@ -962,7 +911,18 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
 }
 
 
-// Updated calorie calculation function with percentage-based adjustments
+/// ===== API-CALLERS-END ===== ////
+
+
+/// ===== NUTRITION-CALC-START ===== \\\\
+// This block contains the new, industry-standard calculation stack
+// as specified in your request.
+
+/**
+ * SECTION 1 & 2 & 3: Calorie Target Calculation
+ * Implements Mifflin-St Jeor for BMR, applies TDEE factor, and Goal % modifier.
+ * This function was already compliant with the specification.
+ */
 function calculateCalorieTarget(formData, log = console.log) {
     const { weight, height, age, gender, activityLevel, goal } = formData;
     const weightKg = parseFloat(weight);
@@ -974,9 +934,13 @@ function calculateCalorieTarget(formData, log = console.log) {
         log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', getSanitizedFormData({ weight, height, age, gender, activityLevel, goal}));
         return 2000;
     }
+
+    // 1. BMR (Mifflin-St Jeor): (10W + 6.25H - 5A + S)
     let bmr = (gender === 'male')
         ? (10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5)
         : (10 * weightKg + 6.25 * heightCm - 5 * ageYears - 161);
+    
+    // 2. TDEE (Activity Factor)
     const activityMultipliers = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, veryActive: 1.9 };
     let multiplier = activityMultipliers[activityLevel];
      if (!multiplier) {
@@ -985,13 +949,14 @@ function calculateCalorieTarget(formData, log = console.log) {
      }
     const tdee = bmr * multiplier;
     
-    // Updated goal adjustments based on user specification
+    // 3. Goal Adjustment (Energy Modifier)
+    // Note: 'cut_moderate' maps to '-0.15' (Moderate Cut), etc.
     const goalAdjustments = {
         maintain: 0,
-        cut_moderate: - (tdee * 0.15), // ~15% deficit
-        cut_aggressive: - (tdee * 0.25), // 25% deficit
-        bulk_lean: + (tdee * 0.15),    // ~15% surplus
-        bulk_aggressive: + (tdee * 0.25)     // 25% surplus
+        cut_moderate: - (tdee * 0.15), // -15% deficit
+        cut_aggressive: - (tdee * 0.25), // -25% deficit
+        bulk_lean: + (tdee * 0.15),    // +15% surplus
+        bulk_aggressive: + (tdee * 0.25)     // +25% surplus
     };
     
     let adjustment = goalAdjustments[goal];
@@ -1002,8 +967,112 @@ function calculateCalorieTarget(formData, log = console.log) {
     
     log(`Calorie Calc: BMR=${bmr.toFixed(0)}, TDEE=${tdee.toFixed(0)}, Goal=${goal}, Adjustment=${adjustment.toFixed(0)}`, 'INFO', 'CALC');
     
+    // Final Target Calories
     return Math.max(1200, Math.round(tdee + adjustment));
 }
-/// ===== API-CALLERS-END ===== ////
 
+
+/**
+ * SECTION 4 & 5: Macronutrient Distribution (Dual Validation)
+ * This is the new, upgraded function that replaces the old g/kg model.
+ * It uses a percentage-based split (4a) and validates with
+ * g/kg body-weight checks and sanity layers (4b, 5).
+ */
+function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
+    
+    // 4a. Define Macronutrient Percentages by Goal
+    // These are sensible defaults selected from within your specified ranges.
+    const macroSplits = {
+        // Cut Goals: P: 35%, F: 25%, C: 40%
+        'cut_aggressive': { pPct: 0.35, fPct: 0.25, cPct: 0.40 },
+        'cut_moderate':   { pPct: 0.35, fPct: 0.25, cPct: 0.40 },
+        // Maintain Goal: P: 30%, F: 30%, C: 40%
+        'maintain':       { pPct: 0.30, fPct: 0.30, cPct: 0.40 },
+        // Lean Bulk Goal: P: 25%, F: 25%, C: 50%
+        'bulk_lean':      { pPct: 0.25, fPct: 0.25, cPct: 0.50 },
+        // Aggressive Bulk Goal: P: 20%, F: 25%, C: 55%
+        'bulk_aggressive':{ pPct: 0.20, fPct: 0.25, cPct: 0.55 }
+    };
+
+    // Get the split for the user's goal, or default to 'maintain'
+    const split = macroSplits[goal] || macroSplits['maintain'];
+    if (!macroSplits[goal]) {
+        log(`Invalid goal "${goal}" for macro split, using 'maintain' defaults.`, 'WARN', 'CALC');
+    }
+
+    // 8. Implementation Directive: Calculate initial grams from percentages
+    let proteinGrams = (calorieTarget * split.pPct) / 4;
+    let fatGrams = (calorieTarget * split.fPct) / 9;
+    let carbGrams = (calorieTarget * split.cPct) / 4;
+
+    // 4b & 5. Validation Layers
+    const validWeightKg = (typeof weightKg === 'number' && weightKg > 0) ? weightKg : 75; // Default to 75kg if invalid
+    let proteinPerKg = proteinGrams / validWeightKg;
+    let fatPerKg = fatGrams / validWeightKg;
+    let fatPercent = (fatGrams * 9) / calorieTarget;
+    let carbsNeedRecalc = false;
+
+    // --- Sanity Check 1: Protein (Layer 5) ---
+    // Rule: Protein ≤ 3.0 g/kg
+    const PROTEIN_MAX_G_PER_KG = 3.0;
+    if (proteinPerKg > PROTEIN_MAX_G_PER_KG) {
+        log(`ADJUSTMENT: Initial protein ${proteinPerKg.toFixed(1)}g/kg > ${PROTEIN_MAX_G_PER_KG}g/kg. Capping protein and recalculating carbs.`, 'WARN', 'CALC');
+        proteinGrams = PROTEIN_MAX_G_PER_KG * validWeightKg;
+        carbsNeedRecalc = true;
+    }
+
+    // --- Sanity Check 2: Fat (Layer 5) ---
+    // Rule: Fat ≤ 35% of calories
+    const FAT_MAX_PERCENT = 0.35;
+    if (fatPercent > FAT_MAX_PERCENT) {
+        log(`ADJUSTMENT: Initial fat ${fatPercent.toFixed(1)}% > ${FAT_MAX_PERCENT}%. Capping fat and recalculating carbs.`, 'WARN', 'CALC');
+        fatGrams = (calorieTarget * FAT_MAX_PERCENT) / 9;
+        carbsNeedRecalc = true;
+    }
+
+    // --- Recalculate Carbs (if any cap was hit) ---
+    if (carbsNeedRecalc) {
+        const proteinCalories = proteinGrams * 4;
+        const fatCalories = fatGrams * 9;
+        const carbCalories = calorieTarget - proteinCalories - fatCalories;
+        carbGrams = carbCalories / 4;
+        log(`RECALC: New Carb Target: ${carbGrams.toFixed(0)}g`, 'INFO', 'CALC');
+    }
+
+    // --- Guideline Logging (Layer 4b) ---
+    // Log warnings if targets fall outside *optimal* (but not *unsafe*) ranges
+    
+    // Protein g/kg guidelines
+    const PROTEIN_MIN_G_PER_KG = 1.6;
+    const PROTEIN_CUT_MAX_G_PER_KG = 2.4;
+    proteinPerKg = proteinGrams / validWeightKg; // Re-check after cap
+    if (proteinPerKg < PROTEIN_MIN_G_PER_KG) {
+        log(`GUIDELINE: Protein target ${proteinPerKg.toFixed(1)}g/kg is below the optimal ${PROTEIN_MIN_G_PER_KG}g/kg range.`, 'INFO', 'CALC');
+    }
+    if ((goal === 'cut_aggressive' || goal === 'cut_moderate') && proteinPerKg > PROTEIN_CUT_MAX_G_PER_KG) {
+         log(`GUIDELINE: Protein target ${proteinPerKg.toFixed(1)}g/kg is above the ${PROTEIN_CUT_MAX_G_PER_KG}g/kg recommendation for cutting.`, 'INFO', 'CALC');
+    }
+
+    // Fat g/kg guidelines
+    const FAT_MIN_G_PER_KG = 0.8;
+    fatPerKg = fatGrams / validWeightKg; // Re-check after cap
+    if (fatPerKg < FAT_MIN_G_PER_KG) {
+         log(`GUIDELINE: Fat target ${fatPerKg.toFixed(1)}g/kg is below the optimal ${FAT_MIN_G_PER_KG}g/kg minimum.`, 'INFO', 'CALC');
+    }
+
+    // Final rounding
+    const finalProteinGrams = Math.round(proteinGrams);
+    const finalFatGrams = Math.round(fatGrams);
+    const finalCarbGrams = Math.round(carbGrams);
+    
+    log(`Calculated Macro Targets (Dual-Validation) (Goal: ${goal}, Cals: ${calorieTarget}, Weight: ${validWeightKg}kg): P ${finalProteinGrams}g, F ${finalFatGrams}g, C ${finalCarbGrams}g`, 'INFO', 'CALC');
+
+    return { 
+        proteinGrams: finalProteinGrams, 
+        fatGrams: finalFatGrams, 
+        carbGrams: finalCarbGrams 
+    };
+}
+
+/// ===== NUTRITION-CALC-END ===== \\\\
 
