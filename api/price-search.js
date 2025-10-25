@@ -1,5 +1,13 @@
 const axios = require('axios');
-const { kv } = require('@vercel/kv'); // Import Vercel KV
+// --- MODIFICATION: Import createClient instead of the default kv instance ---
+const { createClient } = require('@vercel/kv');
+
+// --- MODIFICATION: Create a client instance using your Upstash variables ---
+const kv = createClient({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+// --- END MODIFICATION ---
 
 // --- CONFIGURATION ---
 const RAPID_API_HOSTS = {
@@ -27,9 +35,11 @@ const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
 // --- END MODIFICATION ---
 
 // --- HELPER TO CHECK KV STATUS ---
+// --- MODIFICATION: Check for your Upstash variables instead of Vercel's KV variables ---
 const isKvConfigured = () => {
-    return process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN;
+    return process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
 };
+// --- END MODIFICATION ---
 
 const normalizeKey = (str) => (str || '').toString().toLowerCase().trim().replace(/\s+/g, '_');
 const inflightRefreshes = new Set();
@@ -243,7 +253,9 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
     const keyType = 'price_search';
 
     if (!isKvConfigured()) {
-        log('CRITICAL: KV environment variables are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
+        // --- MODIFICATION: Updated error message to reflect correct env var names ---
+        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
+        // --- END MODIFICATION ---
         // Fallback to uncached fetch, still using rate limiting
         const { data: fetchedData, waitMs: fetchWaitMs } = await fetchStoreSafe(store, query, page, log);
         return { data: fetchedData, waitMs: fetchWaitMs };
