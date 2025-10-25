@@ -1,4 +1,6 @@
 const fetch = require('node-fetch');
+// --- MODIFICATION: Import axios for Dietagram fallback ---
+const axios = require('axios');
 // --- MODIFICATION: Import createClient instead of the default kv instance ---
 const { createClient } = require('@vercel/kv');
 
@@ -16,11 +18,12 @@ const TTL_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 7;    // 7 days
 const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;     // Stale While Revalidate after 2 days
 const CACHE_PREFIX_NUTRI = 'nutri';
 
+// --- DIETAGRAM API CONFIGURATION (NEW) ---
+const DIETAGRAM_API_KEY = process.env.DIETAGRAM_RAPIDAPI_KEY;
+const DIETAGRAM_API_HOST = process.env.DIETAGRAM_RAPIDAPI_HOST || 'dietagram.p.rapidapi.com';
+
 // --- CONSTANT FOR UNIT CORRECTION ---
 const KJ_TO_KCAL_FACTOR = 4.184;
-// --- MODIFICATION: Removed faulty threshold ---
-// const KCAL_CONVERSION_THRESHOLD = 100.0; 
-// ---
 
 // Keep track of ongoing background refreshes within this invocation
 const inflightRefreshes = new Set();
@@ -40,27 +43,72 @@ const isKvConfigured = () => {
 // --- END MODIFICATION ---
 
 
+// --- NEW: Dietagram Normalizer ---
 /**
- * Internal logic for fetching nutrition data from Open Food Facts API.
+ * Normalizes a response from the Dietagram API into our standard nutrition object.
+ * @param {object} dietagramResponse - The raw response from Dietagram API.
+ * @param {string} query - The original query, for logging.
+ * @param {function} log - The logger function.
+ * @returns {object} Our standard nutrition object, or null if data is invalid.
+ */
+function normalizeDietagramResponse(dietagramResponse, query, log) {
+    if (!dietagramResponse || !Array.isArray(dietagramResponse) || dietagramResponse.length === 0) {
+        log(`Dietagram: No results array found for query: ${query}`, 'INFO', 'DIETAGRAM_PARSE');
+        return null;
+    }
+    
+    // Attempt to find the best match (e.g., first one that isn't a category)
+    // This is a heuristic and might need refinement.
+    const product = dietagramResponse.find(item => item.name && item.kcal); 
+
+    if (!product) {
+        log(`Dietagram: No valid product with kcal found in results for: ${query}`, 'INFO', 'DIETAGRAM_PARSE');
+        return null;
+    }
+
+    log(`Dietagram: Found match "${product.name}" for query: ${query}`, 'SUCCESS', 'DIETAGRAM_PARSE');
+    
+    // Dietagram provides values per 100g
+    return {
+        status: 'found',
+        source: 'dietagram', // Add source tracking
+        servingUnit: '100g',
+        calories: parseFloat(product.kcal || 0),
+        protein: parseFloat(product.protein || 0),
+        fat: parseFloat(product.fat || 0),
+        saturatedFat: parseFloat(product.saturatedFat || 0),
+        carbs: parseFloat(product.carbohydrates || 0),
+        sugars: parseFloat(product.sugar || 0),
+        fiber: parseFloat(product.fiber || 0),
+        sodium: parseFloat(product.sodium || 0) / 1000, // Convert mg to g if needed (assuming sodium is mg)
+        ingredientsText: product.ingredients || null
+    };
+}
+// --- END NEW ---
+
+/**
+ * Internal logic for fetching nutrition data from Open Food Facts API (and Dietagram fallback).
  * Accepts a log function for consistency.
  */
 async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     let openFoodFactsURL = '';
     const identifier = barcode || query;
     const identifierType = barcode ? 'barcode' : 'query';
+    let nutritionResult = null;
 
     if (!identifier) {
         log('Missing barcode or query parameter for nutrition search.', 'WARN', 'INPUT');
         return { status: 'not_found', error: 'Missing barcode or query parameter' };
     }
 
+    // --- STAGE 1: Attempt Open Food Facts ---
     if (barcode) {
         openFoodFactsURL = `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`;
     } else if (query) {
         openFoodFactsURL = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=1`;
     }
 
-    log(`Requesting nutrition data for ${identifierType}: ${identifier}`, 'DEBUG', 'OFF_REQUEST');
+    log(`Requesting nutrition (OFF) for ${identifierType}: ${identifier}`, 'DEBUG', 'OFF_REQUEST');
     const startTime = Date.now();
 
     try {
@@ -72,51 +120,86 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
 
         if (!apiResponse.ok) {
             log(`Open Food Facts API returned: ${apiResponse.status} for ${identifierType}: ${identifier}`, 'WARN', 'OFF_RESPONSE', { status: apiResponse.status, latency_ms: latencyMs });
-            return { status: 'not_found' };
-        }
-
-        const data = await apiResponse.json();
-        const product = barcode ? data.product : (data.products && data.products[0]);
-
-        // --- MODIFICATION START: Robust calorie logic ---
-        if (product && product.nutriments) {
-            const nutriments = product.nutriments;
-            let calories = parseFloat(nutriments['energy-kcal_100g'] || 0);
-
-            // If kcal is missing or 0, try to calculate from kJ
-            if (!calories || calories === 0) {
-                const kj = parseFloat(nutriments['energy-kj_100g'] || 0);
-                if (kj && kj > 0) {
-                    calories = kj / KJ_TO_KCAL_FACTOR;
-                    log(`Used kJ fallback for ${identifierType}: ${identifier}. ${kj}kJ -> ${calories.toFixed(0)}kcal`, 'INFO', 'CALORIE_CONVERT');
-                }
-            }
-            // --- MODIFICATION END ---
-
-            log(`Successfully fetched nutrition for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
-            return {
-                status: 'found',
-                servingUnit: product.nutrition_data_per || '100g',
-                calories: calories, // Use the new robust value
-                protein: parseFloat(nutriments.proteins_100g || 0),
-                fat: parseFloat(nutriments.fat_100g || 0),
-                saturatedFat: parseFloat(nutriments['saturated-fat_100g'] || 0),
-                carbs: parseFloat(nutriments.carbohydrates_100g || 0),
-                sugars: parseFloat(nutriments.sugars_100g || 0),
-                fiber: parseFloat(nutriments.fiber_100g || 0),
-                sodium: parseFloat(nutriments.sodium_100g || 0),
-                ingredientsText: product.ingredients_text || null
-            };
+            // Don't return yet, fall through to Dietagram
         } else {
-            log(`Nutrition data not found in response for ${identifierType}: ${identifier}`, 'INFO', 'OFF_RESPONSE', { latency_ms: latencyMs });
-            return { status: 'not_found' };
-        }
+            const data = await apiResponse.json();
+            const product = barcode ? data.product : (data.products && data.products[0]);
 
+            if (product && product.nutriments) {
+                const nutriments = product.nutriments;
+                let calories = parseFloat(nutriments['energy-kcal_100g'] || 0);
+
+                if (!calories || calories === 0) {
+                    const kj = parseFloat(nutriments['energy-kj_100g'] || 0);
+                    if (kj && kj > 0) {
+                        calories = kj / KJ_TO_KCAL_FACTOR;
+                        log(`Used kJ fallback for ${identifierType}: ${identifier}. ${kj}kJ -> ${calories.toFixed(0)}kcal`, 'INFO', 'CALORIE_CONVERT');
+                    }
+                }
+                
+                // Only consider it "found" if we have core macros
+                if (calories > 0 && nutriments.proteins_100g && nutriments.fat_100g && nutriments.carbohydrates_100g) {
+                    log(`Successfully fetched nutrition (OFF) for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
+                    nutritionResult = {
+                        status: 'found',
+                        source: 'openfoodfacts', // Add source tracking
+                        servingUnit: product.nutrition_data_per || '100g',
+                        calories: calories,
+                        protein: parseFloat(nutriments.proteins_100g || 0),
+                        fat: parseFloat(nutriments.fat_100g || 0),
+                        saturatedFat: parseFloat(nutriments['saturated-fat_100g'] || 0),
+                        carbs: parseFloat(nutriments.carbohydrates_100g || 0),
+                        sugars: parseFloat(nutriments.sugars_100g || 0),
+                        fiber: parseFloat(nutriments.fiber_100g || 0),
+                        sodium: parseFloat(nutriments.sodium_100g || 0),
+                        ingredientsText: product.ingredients_text || null
+                    };
+                    return nutritionResult; // Found it, return immediately
+                } else {
+                     log(`Nutrition data incomplete (OFF) for ${identifierType}: ${identifier}`, 'INFO', 'OFF_RESPONSE', { latency_ms: latencyMs });
+                }
+            } else {
+                log(`Nutrition data not found in response (OFF) for ${identifierType}: ${identifier}`, 'INFO', 'OFF_RESPONSE', { latency_ms: latencyMs });
+            }
+        }
     } catch (error) {
         const latencyMs = Date.now() - startTime;
-        log(`Nutrition Fetch Error for ${identifierType} "${identifier}": ${error.message}`, 'ERROR', 'OFF_FAILURE', { latency_ms: latencyMs });
-        return { status: 'not_found', error: error.message };
+        log(`Nutrition Fetch Error (OFF) for ${identifierType} "${identifier}": ${error.message}`, 'ERROR', 'OFF_FAILURE', { latency_ms: latencyMs });
+        // Fall through to Dietagram
     }
+
+    // --- STAGE 2: Attempt Dietagram Fallback (only for queries) ---
+    if (query && DIETAGRAM_API_KEY) {
+        log(`OFF failed for query "${query}". Attempting Dietagram fallback...`, 'INFO', 'DIETAGRAM_REQUEST');
+        const options = {
+            method: 'GET',
+            url: `https://${DIETAGRAM_API_HOST}/apiFood.php`,
+            params: { name: query, lang: 'en' }, // Assuming 'en' for now
+            headers: {
+                'x-rapidapi-key': DIETAGRAM_API_KEY,
+                'x-rapidapi-host': DIETAGRAM_API_HOST
+            }
+        };
+
+        try {
+            const response = await axios.request(options);
+            const normalizedData = normalizeDietagramResponse(response.data, query, log);
+            
+            if (normalizedData) {
+                return normalizedData; // Success!
+            } else {
+                log(`Dietagram fallback failed to find valid data for: ${query}`, 'WARN', 'DIETAGRAM_RESPONSE');
+            }
+        } catch (error) {
+            log(`Dietagram API request failed for query "${query}": ${error.message}`, 'ERROR', 'DIETAGRAM_FAILURE', { status: error.response?.status });
+        }
+    } else if (barcode && !query) {
+        log(`OFF failed for barcode "${barcode}". No query provided, cannot use Dietagram fallback.`, 'WARN', 'NUTRITION_FAIL');
+    }
+
+    // --- STAGE 3: Definitive Failure ---
+    log(`All nutrition sources failed for ${identifierType}: ${identifier}`, 'WARN', 'NUTRITION_FAIL');
+    return { status: 'not_found' };
 }
 
 /**
