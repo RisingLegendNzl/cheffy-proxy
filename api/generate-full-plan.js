@@ -1,10 +1,13 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
-// Mark 44 (NEW): Re-architected pipeline ("AI-Code-AI Sandwich")
+// Mark 44.1 (FIX): Swapped 'javascript-lp-solver' for 'js-lpsolver' to fix build fail.
+// - Updated require statement.
+// - Updated solver model to place bounds inside 'variables' block.
+// - Updated solver call from .Solve() to .solve().
+// Mark 44: Re-architected pipeline ("AI-Code-AI Sandwich")
 // - REMOVED Mark 43 Verifier Loop. AI no longer does math.
 // - ADDED Code-based LP Solver to calculate exact grams (Step 5).
 // - ADDED AI Phase 2 (Food Writer) to describe meals using solver output (Step 6).
 // - MODIFIED AI Phase 1 (Idea Chef) to only generate ideas + query ladders.
-// Mark 43: (REMOVED) code-based verifier and self-correction loop.
 // Mark 42: REPLACED macro calculation with industry-standard, dual-validation system.
 // Mark 40: PRIVACY FIX - Added redaction for PII (name, age, weight, height) in logs
 // Mark 39: CRITICAL SECURITY FIX - Moved API key from URL query to x-goog-api-key header
@@ -17,8 +20,8 @@ const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
 
-// --- NEW (Mark 44): Import LP Solver ---
-const solver = require('javascript-lp-solver');
+// --- NEW (Mark 44.1): Import js-lpsolver ---
+const solver = require('js-lpsolver');
 
 /// ===== IMPORTS-END ===== ////
 
@@ -33,11 +36,6 @@ const GEMINI_API_URL_BASE = 'https://generativela-generateContent'; // Key remov
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
-
-// --- MODIFICATION (Mark 44): REMOVED Verifier Loop config ---
-// const CALORIE_TOLERANCE_PERCENT = 0.10; 
-// const MAX_PLAN_GENERATION_ATTEMPTS = 2; 
-// --- END MODIFICATION ---
 
 // --- NEW (Mark 44): Solver Configuration ---
 // Defines macro targets for each meal type as a percentage of the day's total.
@@ -492,11 +490,11 @@ module.exports = async function handler(request, response) {
 
         // --- NEW (Mark 44): Phase 5 (Code Solver) & Phase 6 (AI Food Writer) ---
         log("Phase 5 & 6: Running Code Solver and AI Food Writer...", 'INFO', 'PHASE');
-        const { finalMealPlan, finalIngredientTotals } = await solveAndDescribePlan(
+        const { finalMealPlan, finalIngredientTotals, solvedDailyTotals: actualSolvedDailyTotals } = await solveAndDescribePlan(
             creativeMealPlan, // The "idea" plan from AI Phase 1
             finalResults,     // The map of real products found
             nutritionDataMap, // The map of verified nutrition data
-            dailyNutritionalTargets, // The user's daily macro goals
+            dailyNutritionalTargets, // The user's *target* daily macro goals
             eatingOccasions,
             log
         );
@@ -520,7 +518,7 @@ module.exports = async function handler(request, response) {
             mealPlan: finalMealPlan, 
             uniqueIngredients: ingredientPlan, // The unique list from AI Phase 1
             results: finalResults, // The market data + solved gram totals
-            nutritionalTargets: finalDailyTotals // The *actual* solved totals
+            nutritionalTargets: actualSolvedDailyTotals // The *actual* solved totals
         };
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
         return response.status(200).json({ ...finalResponseData, logs });
@@ -1021,7 +1019,7 @@ RULES:
  * @param {Object} dailyTargets - The user's daily macro goals.
  * @param {string} eatingOccasions - The number of meals ('3', '4', '5').
  * @param {Function} log - The logger function.
- * @returns {Object} { finalMealPlan, finalIngredientTotals }
+ * @returns {Object} { finalMealPlan, finalIngredientTotals, solvedDailyTotals }
  */
 async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDataMap, dailyTargets, eatingOccasions, log) {
     const finalMealPlan = JSON.parse(JSON.stringify(creativeMealPlan)); // Deep copy
@@ -1031,7 +1029,7 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
     const finalIngredientTotals = {}; 
     
     // Store daily totals *as calculated by the solver*
-    let solvedDailyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+    let solvedDailyTotalsAcc = { calories: 0, protein: 0, fat: 0, carbs: 0 };
     let daysProcessed = 0;
     
     const mealDescriptionPromises = [];
@@ -1075,7 +1073,10 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
                         fat: nutrition.fat,
                         carbs: nutrition.carbs,
                         calories: nutrition.calories,
-                        [key]: 1 // Tag for bounds
+                        // --- FIX (Mark 44.1): Place bounds *inside* the variable ---
+                        min: SOLVER_MIN_GRAMS,
+                        max: SOLVER_MAX_GRAMS
+                        // --- END FIX ---
                     };
                 } else {
                     log(`[Meal: ${meal.name}] Skipping "${key}" in solver: No nutrition data.`, 'WARN', 'SOLVER');
@@ -1088,23 +1089,23 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
                 continue;
             }
 
-            // Add bounds (min/max grams)
-            const bounds = {};
-            for (const key in variables) {
-                bounds[key] = { min: SOLVER_MIN_GRAMS, max: SOLVER_MAX_GRAMS };
-            }
-
+            // --- FIX (Mark 44.1): Remove top-level 'bounds' key ---
             const model = {
                 optimize: "calories", // We'll optimize for calories
                 opType: "min",        // Minimize deviation (solver handles this)
                 constraints: constraints,
-                variables: variables,
-                bounds: bounds
+                variables: variables
+                // bounds: bounds // This was the bug
             };
+            // --- END FIX ---
             
             // Run the solver
             log(`Running solver for: ${meal.name}`, 'INFO', 'SOLVER', { mealTargets, variables: Object.keys(variables) });
-            const solution = solver.Solve(model, 1.0, (msg, level) => log(msg, level, 'LP_SOLVER')); // Add precision
+            
+            // --- FIX (Mark 44.1): Change call to solver.solve(model) ---
+            const solution = solver.solve(model);
+            // const solution = solver.Solve(model, 1.0, (msg, level) => log(msg, level, 'LP_SOLVER')); // Old
+            // --- END FIX ---
 
             if (!solution.feasible) {
                 log(`[Meal: ${meal.name}] Solver FAILED to find a feasible solution.`, 'CRITICAL', 'SOLVER', { solution });
@@ -1119,7 +1120,9 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
             let mealCals = 0, mealProt = 0, mealFat = 0, mealCarbs = 0;
 
             for (const key in variables) {
+                // --- FIX (Mark 44.1): Access solution[key] directly ---
                 const grams = Math.round(solution[key] || 0);
+                // --- END FIX ---
                 meal.solvedGrams[key] = grams;
 
                 // Add to this meal's totals
@@ -1137,10 +1140,10 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
             }
             
             // Add this meal's *actual* solved macros to the daily total
-            solvedDailyTotals.calories += mealCals;
-            solvedDailyTotals.protein += mealProt;
-            solvedDailyTotals.fat += mealFat;
-            solvedDailyTotals.carbs += mealCarbs;
+            solvedDailyTotalsAcc.calories += mealCals;
+            solvedDailyTotalsAcc.protein += mealProt;
+            solvedDailyTotalsAcc.fat += mealFat;
+            solvedDailyTotalsAcc.carbs += mealCarbs;
 
             log(`[Meal: ${meal.name}] Solved Grams:`, 'DEBUG', 'SOLVER', meal.solvedGrams);
             log(`[Meal: ${meal.name}] Solved Macros (Target vs Actual):`, 'DEBUG', 'SOLVER', {
@@ -1155,10 +1158,12 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
          const product = finalResults[key]?.allProducts?.find(p => p.url === finalResults[key].currentSelectionURL);
          const parsedSize = product ? parseSize(product.size) : null;
          let units = "units";
-         if (parsedSize) {
+         if (parsedSize && parsedSize.value > 0) { // Add check for value > 0
              const totalGrams = finalIngredientTotals[key].totalGrams;
              const numUnits = Math.ceil(totalGrams / parsedSize.value);
              units = `${numUnits} x ${product.size} ${parsedSize.unit === 'g' ? 'pack(s)' : 'bottle(s)'}`;
+         } else if (product) {
+             units = `(Check size: ${product.size})`; // Fallback if parse fails
          }
          finalIngredientTotals[key].quantityUnits = units;
     }
@@ -1196,17 +1201,17 @@ async function solveAndDescribePlan(creativeMealPlan, finalResults, nutritionDat
     
     // --- 5. Calculate final average daily totals ---
     const avgSolvedTotals = {
-        calories: Math.round(solvedDailyTotals.calories / (daysProcessed || 1)),
-        protein: Math.round(solvedDailyTotals.protein / (daysProcessed || 1)),
-        fat: Math.round(solvedDailyTotals.fat / (daysProcessed || 1)),
-        carbs: Math.round(solvedDailyTotals.carbs / (daysProcessed || 1)),
+        calories: Math.round(solvedDailyTotalsAcc.calories / (daysProcessed || 1)),
+        protein: Math.round(solvedDailyTotalsAcc.protein / (daysProcessed || 1)),
+        fat: Math.round(solvedDailyTotalsAcc.fat / (daysProcessed || 1)),
+        carbs: Math.round(solvedDailyTotalsAcc.carbs / (daysProcessed || 1)),
     };
     log("Final Solved Daily Averages:", 'SUCCESS', 'SOLVER', avgSolvedTotals);
 
     return { 
         finalMealPlan,          // The plan with new, rich descriptions
         finalIngredientTotals,  // The grand total of grams needed
-        finalDailyTotals: avgSolvedTotals // The *actual* solved daily totals
+        solvedDailyTotals: avgSolvedTotals // The *actual* solved daily totals
     };
 }
 // --- END NEW ---
@@ -1373,4 +1378,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
