@@ -1,12 +1,13 @@
 const axios = require('axios');
-// Import createClient to use our Upstash variables
+// --- MODIFICATION: Import createClient instead of the default kv instance ---
 const { createClient } = require('@vercel/kv');
 
-// Create a client instance using your Upstash variables
+// --- MODIFICATION: Create a client instance using your Upstash variables ---
 const kv = createClient({
     url: process.env.UPSTASH_REDIS_REST_URL,
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
+// --- END MODIFICATION ---
 
 // --- CONFIGURATION ---
 const RAPID_API_HOSTS = {
@@ -14,7 +15,7 @@ const RAPID_API_HOSTS = {
     Woolworths: 'woolworths-products-api.p.rapidapi.com'
 };
 const RAPID_API_KEY = process.env.RAPIDAPI_KEY;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 3; // Max internal retries for network issues
 const DELAY_MS = 1500;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -26,21 +27,25 @@ const CACHE_PREFIX_SEARCH = 'search';
 // --- TOKEN BUCKET CONFIGURATION ---
 const BUCKET_CAPACITY = 10;
 const BUCKET_REFILL_RATE = 8; // Tokens per second
-const BUCKET_RETRY_DELAY_MS = 700;
+const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
+
+// --- MODIFICATION (Mark 41): Removed stateful Bucket class ---
+// The old class Bucket and global `buckets` map have been removed.
+// They are replaced by a stateless KV-based rate limiter inside `fetchStoreSafe`.
+// --- END MODIFICATION ---
 
 // --- HELPER TO CHECK KV STATUS ---
-// Check for your Upstash variables
+// --- MODIFICATION: Check for your Upstash variables instead of Vercel's KV variables ---
 const isKvConfigured = () => {
     return process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
 };
+// --- END MODIFICATION ---
 
 const normalizeKey = (str) => (str || '').toString().toLowerCase().trim().replace(/\s+/g, '_');
 const inflightRefreshes = new Set();
 
 /**
- * Internal logic for fetching price data.
- * This is now a "dumb" fetcher. It does NOT run any checklist.
- * The checklist is now 100% controlled by generate-full-plan.js.
+ * Internal logic for fetching price data from the API.
  */
 async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log) {
     if (!RAPID_API_KEY) { 
@@ -71,9 +76,7 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
                 timeout: 30000
             });
             const attemptLatency = Date.now() - attemptStartTime;
-            log(`Successfully fetched products for "${query}" (Page ${page}).`, 'SUCCESS', 'RAPID_RESPONSE', { count: rapidResp.data.results?.length || 0, status: rapidResp.status, latency_ms: attemptLatency });
-            
-            // Return the raw data. The orchestrator will filter.
+            log(`Successfully fetched products for "${query}" (Page ${page}).`, 'SUCCESS', 'RAPID_RESPONSE', { count: rapidResp.data.results?.length || 0, status: rapidResp.status, currentPage: rapidResp.data.current_page, totalPages: rapidResp.data.total_pages, latency_ms: attemptLatency });
             return rapidResp.data;
 
         } catch (error) {
@@ -107,21 +110,26 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
 }
 
 
+// --- MODIFICATION (Mark 41): Replaced stateful bucket with stateless KV rate limiter ---
 /**
- * Wrapper for API calls using a STATELESS token bucket (Vercel KV).
+ * Wrapper for API calls using a STATELESS token bucket (Vercel KV) and adding a single 429 retry.
+ * This is CRITICAL for serverless environments.
+ * Returns { data, waitMs }
  */
 async function fetchStoreSafe(store, query, page = 1, log = console.log) {
     const storeKey = store?.toLowerCase();
-    if (!RAPID_API_HOSTS[store]) {
+    if (!RAPID_API_HOSTS[store]) { // Check against hosts map
         log(`Invalid store key "${storeKey}" for token bucket.`, 'CRITICAL', 'BUCKET_ERROR');
         return { data: { error: { message: `Internal configuration error: Invalid store key ${storeKey}`, status: 500 } }, waitMs: 0 };
     }
 
+    // --- STATELESS BUCKET LOGIC ---
     const bucketKey = `bucket:rapidapi:${storeKey}`;
     const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
     let waitMs = 0;
     const waitStart = Date.now();
 
+    // Loop until we successfully acquire a token
     while (true) {
         const now = Date.now();
         let bucketState = null;
@@ -131,14 +139,17 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
                 bucketState = await kv.get(bucketKey);
             } catch (kvError) {
                 log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message });
+                // Don't loop, just break and proceed with the API call.
                 break;
             }
         }
 
         if (!bucketState) {
+            // First run or KV error: Initialize and take one token
             log(`Initializing KV bucket: ${bucketKey}`, 'DEBUG', 'BUCKET_INIT');
             if (isKvConfigured()) {
                 try {
+                    // Set with capacity - 1, and a TTL (using search TTL / 10 as an example) to prevent stale buckets
                     await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) });
                 } catch (kvError) {
                     log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
@@ -147,12 +158,14 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
             break; // Acquired token
         }
 
+        // State exists, calculate refill
         const elapsedMs = now - bucketState.lastRefill;
         const tokensToAdd = elapsedMs * refillRatePerMs;
         let currentTokens = Math.min(BUCKET_CAPACITY, bucketState.tokens + tokensToAdd);
         const newLastRefill = now;
 
         if (currentTokens >= 1) {
+            // Take token and update KV
             currentTokens -= 1;
             if (isKvConfigured()) {
                 try {
@@ -161,21 +174,25 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
                     log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
                 }
             }
-            break;
+            break; // Acquired token
         } else {
+            // Not enough tokens, calculate wait time
             const tokensNeeded = 1 - currentTokens;
-            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs));
+            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs)); // Wait at least 50ms
+            
             log(`Rate limiter active. Waiting ${waitTime}ms for ${tokensNeeded.toFixed(2)} tokens...`, 'INFO', 'BUCKET_WAIT');
             await delay(waitTime);
+            // Loop will restart, re-getting state and refilling
         }
-    }
+    } // end while(true)
     
-    waitMs = Date.now() - waitStart;
+    waitMs = Date.now() - waitStart; // Total time spent in the loop
     log(`Acquired token for ${store} (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
+    // --- END STATELESS BUCKET LOGIC ---
 
     try {
         const data = await _fetchPriceDataFromApi(store, query, page, log);
-        return { data, waitMs };
+        return { data, waitMs }; // Return data and wait time
     } catch (error) {
         if (error.statusCode === 429) {
             log(`RapidAPI returned 429. Retrying once after ${BUCKET_RETRY_DELAY_MS}ms...`, 'WARN', 'BUCKET_RETRY', { store, query, page });
@@ -195,6 +212,35 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
          return { data: errorData, waitMs };
     }
 }
+// --- END MODIFICATION ---
+
+/**
+ * Initiates a background refresh for a given cache key.
+ */
+async function refreshInBackground(cacheKey, store, query, page, log, keyType) {
+    if (inflightRefreshes.has(cacheKey)) {
+        log(`Background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP', { key_type: keyType });
+        return;
+    }
+    inflightRefreshes.add(cacheKey);
+    log(`Starting background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType });
+
+    (async () => {
+        try {
+            const { data: freshData } = await fetchStoreSafe(store, query, page, log);
+            if (freshData && !freshData.error) {
+                await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: TTL_SEARCH_MS });
+                log(`Background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { key_type: keyType });
+            } else {
+                 log(`Background refresh failed to fetch data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { error: freshData?.error, key_type: keyType });
+            }
+        } catch (error) {
+            log(`Background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType });
+        } finally {
+            inflightRefreshes.delete(cacheKey);
+        }
+    })();
+}
 
 /**
  * Cache-wrapped function for fetching price data with SWR.
@@ -207,11 +253,15 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
     const keyType = 'price_search';
 
     if (!isKvConfigured()) {
-        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache.', 'CRITICAL', 'CONFIG_ERROR');
+        // --- MODIFICATION: Updated error message to reflect correct env var names ---
+        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
+        // --- END MODIFICATION ---
+        // Fallback to uncached fetch, still using rate limiting
         const { data: fetchedData, waitMs: fetchWaitMs } = await fetchStoreSafe(store, query, page, log);
         return { data: fetchedData, waitMs: fetchWaitMs };
     }
 
+    // 1. Check Cache (Only if KV is configured)
     let cachedItem = null;
     try {
         cachedItem = await kv.get(cacheKey);
@@ -234,10 +284,12 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
         }
     }
 
+    // 2. Cache Miss or Expired: Fetch using rate-limited wrapper
     log(`Cache Miss or Expired for ${cacheKey}`, 'INFO', 'CACHE_MISS', { key_type: keyType });
     const { data: fetchedData, waitMs: fetchWaitMs } = await fetchStoreSafe(store, query, page, log);
     const fetchLatencyMs = Date.now() - startTime;
 
+    // 3. Cache Result 
     if (fetchedData && !fetchedData.error) {
         try {
             await kv.set(cacheKey, { data: fetchedData, ts: Date.now() }, { px: TTL_SEARCH_MS });
@@ -253,7 +305,8 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
 }
 
 
-// Vercel Handler
+// --- Vercel Handler (MODIFIED Mark 41) ---
+// This handler now uses the public, cached, and rate-limited `fetchPriceData` function.
 module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -265,12 +318,15 @@ module.exports = async (req, res) => {
 
     try {
         const { store, query, page } = req.query;
+        
+        // --- MODIFICATION: Use the public, cached, rate-limited function ---
+        // We create a simple log function for this handler's scope
         const log = (message, level = 'INFO', tag = 'HANDLER') => {
             console.log(`[${level}] [${tag}] ${message}`);
         };
         
-        // This endpoint is just a raw pass-through for the RapidAPI
         const { data: result } = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1, log);
+        // --- END MODIFICATION ---
 
         if (result.error) {
             return res.status(result.error.status || 500).json(result.error);
@@ -281,6 +337,7 @@ module.exports = async (req, res) => {
         return res.status(500).json({ message: "Internal server error in price search handler.", details: error.message });
     }
 };
+// --- END MODIFICATION ---
 
 module.exports.fetchPriceData = fetchPriceData;
 
