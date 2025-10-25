@@ -46,6 +46,8 @@ const inflightRefreshes = new Set();
 
 /**
  * Internal logic for fetching price data from the API.
+ * --- MODIFICATION (Mark 44): This function is NO LONGER responsible for the checklist.
+ * It just fetches raw data from RapidAPI. The checklist is now in generate-full-plan.js.
  */
 async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log) {
     if (!RAPID_API_KEY) { 
@@ -77,6 +79,8 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
             });
             const attemptLatency = Date.now() - attemptStartTime;
             log(`Successfully fetched products for "${query}" (Page ${page}).`, 'SUCCESS', 'RAPID_RESPONSE', { count: rapidResp.data.results?.length || 0, status: rapidResp.status, currentPage: rapidResp.data.current_page, totalPages: rapidResp.data.total_pages, latency_ms: attemptLatency });
+            
+            // --- MODIFICATION (Mark 44): Return the *raw* data. The orchestrator will filter.
             return rapidResp.data;
 
         } catch (error) {
@@ -244,6 +248,8 @@ async function refreshInBackground(cacheKey, store, query, page, log, keyType) {
 
 /**
  * Cache-wrapped function for fetching price data with SWR.
+ * --- MODIFICATION (Mark 44): This function NO LONGER accepts the `ingredient` object.
+ * It is a simple, dumb fetcher. The orchestrator is responsible for filtering.
  */
 async function fetchPriceData(store, query, page = 1, log = console.log) {
     const startTime = Date.now();
@@ -325,6 +331,8 @@ module.exports = async (req, res) => {
             console.log(`[${level}] [${tag}] ${message}`);
         };
         
+        // --- MODIFICATION (Mark 44): The orchestrator now does filtering, so this
+        // basic endpoint can't support it. This endpoint is now just a raw pass-through.
         const { data: result } = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1, log);
         // --- END MODIFICATION ---
 
@@ -340,4 +348,5 @@ module.exports = async (req, res) => {
 // --- END MODIFICATION ---
 
 module.exports.fetchPriceData = fetchPriceData;
+
 
