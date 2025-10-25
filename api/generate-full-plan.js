@@ -1,4 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
+// Mark 49: Fixed Market Run failures for Olive Oil Spray and Brown Onion.
+// - Modified categoryOK to pass if product_category is missing (fixes Olive Oil).
+// - Added hardcoded REQ_ANY entry for ing_onion to include "brownonion" (fixes Onion).
 // Mark 48: Fixed heuristic fallback logic to allow independent decrease checks.
 // - The heuristic loop now checks for decreasing grams *separately* from increasing grams,
 //   allowing it to recover from an oversized starting point (e.g., when min_g values are too high).
@@ -58,10 +61,11 @@ const MEAL_MACRO_BUDGETS = {
 // Banned keywords for market run checklist
 const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum']; // Removed 'wrap', 'spray'
 
+// --- MODIFIED (Mark 49): Added onion variations ---
 // --- NEW (Mark 47): Hard-coded overrides for known-bad AI checklist data ---
 const REQ_ANY = {
   ing_wholemeal_pasta: ["pasta", "spaghetti", "penne", "fusilli", "rigatoni", "spirals"],
-  ing_onion: ["onion"], // 'lemmaVariants' will add 'onions'
+  ing_onion: ["onion", "onions", "brownonion"], // Added "brownonion" for cases without space
   ing_spinach: ["spinach"],
   ing_eggs: ["eggs"],
   ing_diced_tomatoes: ["tomatoes"]
@@ -240,6 +244,8 @@ function applyPriceOutlierGuard(products, log, ingredientKey) {
 
 // --- NEW (Mark 47): Helper functions for new checklist logic ---
 function normTokens(s){
+  // Added check for non-string input
+  if (typeof s !== 'string') return [];
   return s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
 }
 function hasAny(tokens, words){
@@ -259,10 +265,18 @@ function expandWords(words){
   return [...out];
 }
 
+// --- MODIFIED (Mark 49): Allow missing category ---
 // --- NEW (Mark 47): Category gating function ---
 function categoryOK(product, ingredient_id, log) {
   const prodCat = (product.product_category || '').toLowerCase();
-  // We'll be lenient since we may only have 'product_category'
+  // --- MODIFICATION START (Mark 49) ---
+  // If category is missing from API data, pass the check and rely on other filters
+  if (!prodCat) {
+      log(`Category Check [${ingredient_id || 'unknown_ing'}] for "${product.product_name}": PASS (Category missing from data, relying on other checks)`, 'DEBUG', 'CHECKLIST_CAT');
+      return true;
+  }
+  // --- MODIFICATION END (Mark 49) ---
+
   const logId = ingredient_id || 'unknown_ing';
   const checkLogPrefix = `Category Check [${logId}] for "${product.product_name}" (Cat: ${prodCat})`;
 
@@ -336,14 +350,15 @@ function runSmarterChecklist(product, ingredientData, log) {
     const titleTokens = normTokens(productNameLower);
 
     if (expandedRequired.length > 0 && !hasAny(titleTokens, expandedRequired)) {
-         log(`${checkLogPrefix}: FAIL (RequiredWord-ANY: Tokens in title did not match any of [${expandedRequired.join(', ')}])`, 'DEBUG', 'CHECKLIST');
+         log(`${checkLogPrefix}: FAIL (RequiredWord-ANY: Tokens [${titleTokens.join(', ')}] did not match any of [${expandedRequired.join(', ')}])`, 'DEBUG', 'CHECKLIST'); // Added tokens to log
         return { pass: false, score: 0, reason: 'required_any' };
     }
     
     // --- 5. AI-defined Allowed Categories (Soft-check) ---
     // This is the original logic, kept as a secondary check
     const productCategory = product.product_category?.toLowerCase() || '';
-    if (allowedCategories && allowedCategories.length > 0 && productCategory) {
+    // Only run this check if category exists AND AI provided allowed categories
+    if (productCategory && allowedCategories && allowedCategories.length > 0) {
         const hasCategoryMatch = allowedCategories.some(allowedCat => productCategory.includes(allowedCat.toLowerCase()));
         if (!hasCategoryMatch) {
             log(`${checkLogPrefix}: FAIL (Category Mismatch: Product category "${productCategory}" not in AI allowlist [${allowedCategories.join(', ')}])`, 'DEBUG', 'CHECKLIST');
@@ -1344,4 +1359,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
