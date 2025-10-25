@@ -235,8 +235,11 @@ module.exports = async (request, response) => {
 
     try {
         const { barcode, query } = request.query;
-        // Use internal fetch directly
-        const nutritionData = await _fetchNutritionDataFromApi(barcode, query);
+        
+        // --- MODIFICATION: Use the CACHED function, not the internal one ---
+        const nutritionData = await fetchNutritionData(barcode, query);
+        // --- END MODIFICATION ---
+
         // Return based on status
         if (nutritionData.status === 'found') {
              return response.status(200).json(nutritionData);
@@ -251,5 +254,4 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
-
 
