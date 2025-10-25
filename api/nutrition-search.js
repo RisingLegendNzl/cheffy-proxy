@@ -109,10 +109,16 @@ async function _fetchDietagramFromApi(query, log = console.log) {
     log('Using Nutrition API Key.', 'DEBUG', 'CONFIG'); // Added success log
     // --- END BUG FIX ---
 
+    // --- BUG FIX: Manually construct URL with query params for RapidAPI compatibility ---
+    const encodedQuery = encodeURIComponent(query);
+    const lang = 'en'; // Assuming 'en' for now
+    const url = `https://${DIETAGRAM_API_HOST}/apiFood.php?name=${encodedQuery}&lang=${lang}`;
+    // --- END BUG FIX ---
+
     const options = {
         method: 'GET',
-        url: `https://${DIETAGRAM_API_HOST}/apiFood.php`,
-        params: { name: query, lang: 'en' }, // Assuming 'en' for now
+        url: url, // Use the manually constructed URL
+        // params: { name: query, lang: 'en' }, // REMOVED params object
         headers: {
             'x-rapidapi-key': DIETAGRAM_API_KEY,
             'x-rapidapi-host': DIETAGRAM_API_HOST
@@ -121,7 +127,7 @@ async function _fetchDietagramFromApi(query, log = console.log) {
     };
     
     const attemptStartTime = Date.now();
-    log(`Attempting Dietagram fetch for: ${query}`, 'DEBUG', 'DIETAGRAM_REQUEST');
+    log(`Attempting Dietagram fetch for: ${query}`, 'DEBUG', 'DIETAGRAM_REQUEST', { url }); // Log the full URL
 
     try {
         const rapidResp = await axios.request(options);
@@ -494,4 +500,5 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
+
 
