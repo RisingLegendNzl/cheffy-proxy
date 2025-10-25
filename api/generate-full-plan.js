@@ -1,9 +1,14 @@
-// --- ORCHESTRATOR API for Cheffy Mark 44 (patched) ---
-// Adds targeted retry for high-carb set and uses the widened solver.
+// --- ORCHESTRATOR API for Cheffy Mark 44 (LLM wired) ---
+// Env:
+//   OPENAI_API_KEY
+//   LLM_MODEL   (e.g., "gpt-4o-mini" or "gpt-4o")
+//   LLM_MEALS_MIN (optional, default 4)
+//   LLM_MEALS_MAX (optional, default 6)
 
 "use strict";
 
 ///   IMPORTS-START   \\\\
+const axios = require("axios");
 const fetch = require("node-fetch");
 const { createClient } = require("@vercel/kv");
 
@@ -80,51 +85,177 @@ function sumMacrosFromLedger(ledger) {
   }
   return { calories: kcal, protein_g: p, fat_g: f, carbs_g: c };
 }
+
+function coerceNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
+}
 ///   UTIL-END     \\\\
 
 
 
-///   LLM-STUB-START   \\\\
-async function draftMealPlanLLM(userProfile, macroContract, logger) {
-  logger.log("INFO", "LLM", "draftMealPlanLLM() placeholder draft");
+///   LLM-WIRED-START   \\\\
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const LLM_MODEL = process.env.LLM_MODEL || "gpt-4o-mini";
+const LLM_MEALS_MIN = Number(process.env.LLM_MEALS_MIN || 4);
+const LLM_MEALS_MAX = Number(process.env.LLM_MEALS_MAX || 6);
+
+const HAVE_LLM = Boolean(OPENAI_API_KEY);
+
+const SYSTEM_PROMPT = `
+You are a deterministic nutrition planner for Australian supermarkets.
+Output strict JSON with key "meals".
+Each meal must include: mealName, portionNote, estMacrosPerPortion {kcal,protein_g,fat_g,carbs_g}, ingredients[] of {displayName, quantityGrams}.
+Bias: high-carb staples, moderate fat, steady protein. Avoid sauces masquerading as protein.
+No commentary. JSON only.
+`.trim();
+
+function llmUserPayload(userProfile, macroContract, biasNote = "") {
   return {
-    meals: [
-      {
-        mealName: "Chicken Breast + Rice + Veg",
-        portionNote: "plate",
-        estMacrosPerPortion: { kcal: 700, protein_g: 55, fat_g: 15, carbs_g: 80 },
-        ingredients: [
-          { displayName: "Chicken Breast Fillet (Raw, Skinless)", quantityGrams: 200 },
-          { displayName: "White Rice (Cooked)", quantityGrams: 250 },
-          { displayName: "Olive Oil (Cook)", quantityGrams: 10 },
-          { displayName: "Broccoli", quantityGrams: 100 }
-        ]
-      },
-      {
-        mealName: "Oats + Whey + Banana",
-        portionNote: "bowl",
-        estMacrosPerPortion: { kcal: 650, protein_g: 40, fat_g: 12, carbs_g: 85 },
-        ingredients: [
-          { displayName: "Rolled Oats", quantityGrams: 90 },
-          { displayName: "Whey Protein Powder", quantityGrams: 30 },
-          { displayName: "Banana", quantityGrams: 120 },
-          { displayName: "Peanut Butter", quantityGrams: 20 }
-        ]
-      },
-      {
-        mealName: "Greek Yogurt + Fruit + Honey",
-        portionNote: "bowl",
-        estMacrosPerPortion: { kcal: 400, protein_g: 30, fat_g: 5, carbs_g: 55 },
-        ingredients: [
-          { displayName: "Greek Yogurt (Low Fat)", quantityGrams: 250 },
-          { displayName: "Blueberries", quantityGrams: 100 },
-          { displayName: "Honey", quantityGrams: 15 }
-        ]
-      }
-    ]
+    instruction: "Generate meals with realistic portions for the macro targets.",
+    userProfile,
+    macroTargets: macroContract,
+    constraints: {
+      meals_min: LLM_MEALS_MIN,
+      meals_max: LLM_MEALS_MAX,
+      macro_bias: "high carbs, moderate fat, steady protein",
+      avoid: ["sauce-based proteins", "fried items", "protein waters", "olive oil spreads"],
+      bias_note: biasNote
+    },
+    required_shape: {
+      meals: [
+        {
+          mealName: "string",
+          portionNote: "string",
+          estMacrosPerPortion: { kcal: "number", protein_g: "number", fat_g: "number", carbs_g: "number" },
+          ingredients: [{ displayName: "string", quantityGrams: "number" }]
+        }
+      ]
+    }
   };
 }
-///   LLM-STUB-END     \\\\
+
+async function callOpenAIChatJson(systemPrompt, userPayload, logger) {
+  const url = "https://api.openai.com/v1/chat/completions";
+  const headers = {
+    Authorization: `Bearer ${OPENAI_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  const body = {
+    model: LLM_MODEL,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(userPayload) }
+    ],
+    temperature: 0.2
+  };
+
+  const resp = await axios.post(url, body, { headers, timeout: 45000 });
+  const content = resp?.data?.choices?.[0]?.message?.content || "{}";
+  let json;
+  try {
+    json = JSON.parse(content);
+  } catch {
+    const cleaned = content.replace(/```json|```/g, "").trim();
+    json = JSON.parse(cleaned);
+  }
+  logger.log("INFO", "LLM_OK", "Meals received", { meals: Array.isArray(json.meals) ? json.meals.length : 0 });
+  return json;
+}
+
+function validateMealsShape(obj) {
+  if (!obj || !Array.isArray(obj.meals)) return { ok: false, reason: "NO_MEALS_ARRAY" };
+  const meals = obj.meals.slice(0, Math.max(LLM_MEALS_MIN, 1));
+  if (meals.length < LLM_MEALS_MIN) return { ok: false, reason: "TOO_FEW_MEALS" };
+
+  for (const m of meals) {
+    if (!m || typeof m !== "object") return { ok: false, reason: "BAD_MEAL_OBJECT" };
+    if (!m.mealName || !m.portionNote) return { ok: false, reason: "MISSING_FIELDS" };
+    const e = m.estMacrosPerPortion || {};
+    if (![e.kcal, e.protein_g, e.fat_g, e.carbs_g].every(x => Number.isFinite(Number(x)))) {
+      return { ok: false, reason: "BAD_MACROS" };
+    }
+    if (!Array.isArray(m.ingredients) || m.ingredients.length === 0) {
+      return { ok: false, reason: "NO_INGREDIENTS" };
+    }
+    for (const ing of m.ingredients) {
+      if (!ing.displayName || !Number.isFinite(Number(ing.quantityGrams))) {
+        return { ok: false, reason: "BAD_INGREDIENT" };
+      }
+    }
+  }
+
+  // coerce numbers
+  const fixed = {
+    meals: obj.meals.map(m => ({
+      mealName: m.mealName,
+      portionNote: m.portionNote,
+      estMacrosPerPortion: {
+        kcal: coerceNumber(m.estMacrosPerPortion.kcal),
+        protein_g: coerceNumber(m.estMacrosPerPortion.protein_g),
+        fat_g: coerceNumber(m.estMacrosPerPortion.fat_g),
+        carbs_g: coerceNumber(m.estMacrosPerPortion.carbs_g)
+      },
+      ingredients: m.ingredients.map(g => ({
+        displayName: g.displayName,
+        quantityGrams: coerceNumber(g.quantityGrams)
+      }))
+    }))
+  };
+  return { ok: true, mealsObj: fixed };
+}
+
+async function draftMealPlanLLM(userProfile, macroContract, logger, biasNote = "") {
+  if (!HAVE_LLM) {
+    logger.log("WARN", "LLM_STUB", "OPENAI_API_KEY missing. Using placeholder draft.");
+    return {
+      meals: [
+        {
+          mealName: "Chicken Breast + Rice + Veg",
+          portionNote: "plate",
+          estMacrosPerPortion: { kcal: 700, protein_g: 55, fat_g: 15, carbs_g: 80 },
+          ingredients: [
+            { displayName: "Chicken Breast Fillet (Raw, Skinless)", quantityGrams: 200 },
+            { displayName: "White Rice (Cooked)", quantityGrams: 250 },
+            { displayName: "Olive Oil (Cook)", quantityGrams: 10 },
+            { displayName: "Broccoli", quantityGrams: 100 }
+          ]
+        },
+        {
+          mealName: "Oats + Whey + Banana",
+          portionNote: "bowl",
+          estMacrosPerPortion: { kcal: 650, protein_g: 40, fat_g: 12, carbs_g: 85 },
+          ingredients: [
+            { displayName: "Rolled Oats", quantityGrams: 90 },
+            { displayName: "Whey Protein Powder", quantityGrams: 30 },
+            { displayName: "Banana", quantityGrams: 120 },
+            { displayName: "Peanut Butter", quantityGrams: 20 }
+          ]
+        },
+        {
+          mealName: "Greek Yogurt + Fruit + Honey",
+          portionNote: "bowl",
+          estMacrosPerPortion: { kcal: 400, protein_g: 30, fat_g: 5, carbs_g: 55 },
+          ingredients: [
+            { displayName: "Greek Yogurt (Low Fat)", quantityGrams: 250 },
+            { displayName: "Blueberries", quantityGrams: 100 },
+            { displayName: "Honey", quantityGrams: 15 }
+          ]
+        }
+      ]
+    };
+  }
+
+  const payload = llmUserPayload(userProfile, macroContract, biasNote);
+  const raw = await callOpenAIChatJson(SYSTEM_PROMPT, payload, logger);
+
+  const v = validateMealsShape(raw);
+  if (!v.ok) throw new Error(`LLM_BAD_OUTPUT:${v.reason}`);
+
+  return v.mealsObj;
+}
+///   LLM-WIRED-END     \\\\
 
 
 
@@ -247,25 +378,28 @@ module.exports = async function handler(req, res) {
     const macroContract = buildMacroContract(userProfile);
     log("INFO", "MACRO_CONTRACT", "Computed", macroContract);
 
-    // 2) First draft
-    const llmDraft = await draftMealPlanLLM(userProfile, macroContract, { log });
-    log("INFO", "LLM_DRAFT", "Meals", { mealsCount: llmDraft.meals.length });
+    // 2) First draft from LLM
+    let llmDraft;
+    try {
+      llmDraft = await draftMealPlanLLM(userProfile, macroContract, { log });
+    } catch (e) {
+      log("ERROR", "LLM_FAIL", "Primary LLM call failed", { message: e.message });
+      // hard fallback only if no LLM key or bad output
+      llmDraft = await draftMealPlanLLM(userProfile, macroContract, { log }, "");
+    }
+    log("INFO", "LLM_DRAFT", "Meals received", { mealsCount: llmDraft.meals.length });
 
     // 3) Fit portions
     let fitResult = fitMealsToContract(llmDraft.meals, macroContract, { log });
 
-    // 3b) Targeted retry with carb bias if needed
-    if (!fitResult.feasible) {
-      log("WARN", "MACRO_SOLVER_RETRY", "Retrying with high-carb meal bias");
+    // 3b) Targeted retry with explicit carb bias if needed
+    if (!fitResult.feasible && HAVE_LLM) {
+      log("WARN", "MACRO_SOLVER_RETRY", "Retrying with high-carb meal bias via LLM");
       const llmDraft2 = await draftMealPlanLLM(
-        {
-          ...userProfile,
-          cuisinePrompt:
-            (userProfile.cuisinePrompt || "") +
-            " | emphasize rice, pasta, breads, fruit; keep fats moderate; protein steady"
-        },
+        { ...userProfile, cuisinePrompt: (userProfile.cuisinePrompt || "") },
         macroContract,
-        { log }
+        { log },
+        "emphasize rice, pasta, breads, fruit; keep fats moderate; protein steady"
       );
       fitResult = fitMealsToContract(llmDraft2.meals, macroContract, { log });
     }
@@ -337,6 +471,7 @@ module.exports = async function handler(req, res) {
 
   } catch (err) {
     console.error("UNCAUGHT_ERROR", err);
+    const { log, getLogs } = makeLogger(); // ensure logs exist
     log("CRITICAL", "UNCAUGHT", "Unhandled error", { message: err.message, stack: err.stack });
     return res.status(500).json({ error: "UNCAUGHT", message: err.message, logs: getLogs() });
   }
