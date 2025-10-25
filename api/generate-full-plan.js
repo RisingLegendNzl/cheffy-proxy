@@ -1,8 +1,8 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
+// Mark 40: PRIVACY FIX - Added redaction for PII (name, age, weight, height) in logs
 // Mark 39: CRITICAL SECURITY FIX - Moved API key from URL query to x-goog-api-key header
-// + Mark 38: Patched macro calculation (g/kg) and AI variety prompt
-// + Mark 37: Reverted API key handling to original method (manual append)
+// Mark 38: Patched macro calculation (g/kg) and AI variety prompt
 // ... (rest of changelog)
 
 /// ===== IMPORTS-START ===== \\\\
@@ -47,6 +47,26 @@ const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (Not Found)", brand: "MOCK DA
 
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- MODIFICATION (Mark 40): Added PII Redaction Helper ---
+/**
+ * Sanitizes form data to remove Personally Identifiable Information (PII) for logging.
+ * @param {object} formData - The raw form data from the user.
+ * @returns {object} A new object with PII fields redacted.
+ */
+function getSanitizedFormData(formData) {
+    try {
+        const { name, height, weight, age, bodyFat, ...rest } = formData;
+        return {
+            ...rest, // Keep non-sensitive fields
+            user_profile: "[REDACTED]" // Replace sensitive fields with a single key
+        };
+    } catch (e) {
+        // Fallback in case formData is not an object
+        return { error: "Failed to sanitize form data." };
+    }
+}
+// --- END MODIFICATION ---
 
 async function concurrentlyMap(array, limit, asyncMapper) {
     const results = [];
@@ -432,7 +452,8 @@ module.exports = async function handler(request, response) {
         
         // Ensure critical fields are present/valid before proceeding
         if (!store || !days || !goal || isNaN(parseFloat(formData.weight)) || isNaN(parseFloat(formData.height))) { // Added goal check
-             log("CRITICAL: Missing core form data (store, days, goal, weight, or height). Cannot calculate plan.", 'CRITICAL', 'INPUT', formData);
+             // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
+             log("CRITICAL: Missing core form data (store, days, goal, weight, or height). Cannot calculate plan.", 'CRITICAL', 'INPUT', getSanitizedFormData(formData));
              throw new Error("Missing critical profile data required for plan generation (store, days, goal, weight, height).");
         }
         
@@ -829,12 +850,13 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
 
     // Check userQuery before passing to payload
     if (userQuery.trim().length < 50) {
-        log("Critical Input Failure: User query is too short/empty due to missing form data or invalid template resolution.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery: userQuery, formData: formData });
+        // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
+        log("Critical Input Failure: User query is too short/empty due to missing form data or invalid template resolution.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery: userQuery, sanitizedData: getSanitizedFormData(formData) });
         throw new Error("Cannot generate plan: Invalid input data caused an empty prompt.");
     }
 
-
-    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...' });
+    // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
+    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...', sanitizedData: getSanitizedFormData(formData) });
 
     // Schema (Mark 25 - Remains Valid)
     const payload = {
@@ -948,7 +970,8 @@ function calculateCalorieTarget(formData, log = console.log) {
     const ageYears = parseInt(age, 10);
 
     if (isNaN(weightKg) || isNaN(heightCm) || isNaN(ageYears) || !gender || !activityLevel || !goal) {
-        log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', { weight, height, age, gender, activityLevel, goal});
+        // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
+        log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', getSanitizedFormData({ weight, height, age, gender, activityLevel, goal}));
         return 2000;
     }
     let bmr = (gender === 'male')
