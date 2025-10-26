@@ -790,6 +790,9 @@ if (unitPrice > 0 && unitPrice < 1000) {
 } else {
   log(`[${ingredientKey}] Rejecting product "${rawProduct.product_name}" due to invalid calculated unit price: ${unitPrice}`, 'WARN', 'DATA_VALIDATION');
 }
+} 
+
+
 
                 // Apply price outlier guard
                 const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
