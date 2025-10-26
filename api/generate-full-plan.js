@@ -1339,7 +1339,12 @@ function buildLP(rows, targets, tolerances, log) {
         };
          model.ints[r.id] = 1; // Specify that grams should be integers
     }
-
+// Bind grams within catalog bounds
+const _meta = getMeta(ingredient.ingredient_id, ingredient.category);
+const _dim = `bound_${varName}`;                 // unique dimension
+model.variables[varName][_dim] = 1;              // coefficient for this var
+model.constraints = model.constraints || {};
+model.constraints[_dim] = { min: _meta.solver_min, max: _meta.solver_max };
     // Define constraints for each macro (kcal, p, c, f)
     const macros = ['kcal', 'p', 'c', 'f'];
     macros.forEach(macro => {
