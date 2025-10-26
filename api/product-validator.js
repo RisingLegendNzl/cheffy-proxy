@@ -1,86 +1,78 @@
 /// ========= PRODUCT-VALIDATOR-START ========= \\\\
+// File: api/product-validator.js
+
 const fetch = require('node-fetch');
 const crypto = require('crypto');
-const { createClient } = require('@vercel/kv');
+const { kv } = require('@vercel/kv');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 
-const kv = createClient({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+// --- utils ---
+const sha1 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex');
+const tokenize = (s = '') => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+const j = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-function sha1(s) { return crypto.createHash('sha1').update(String(s)).digest('hex'); }
-function isKvReady() { return !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN); }
+// --- policy ---
+const RISKY_TOKENS_BY_ID = {
+  ing_eggs: ['mayo','mayonnaise','aioli','custard','powder','substitute','vegan','plant','noodle'],
+  ing_olive_oil_spray: ['canola','sunflower','vegetable','eucalyptus'],
+  ing_canola_oil_spray: ['olive','sunflower','vegetable','eucalyptus'],
+};
 
-function tokenize(s='') {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
-}
-
-function j(s){ try{ return JSON.parse(s); } catch { return null; } }
-
+// --- router: decide if LLM is needed ---
 function shouldLLMValidate(product, ingredientData) {
   const title = (product.product_name || '').toLowerCase();
   const cat = (product.product_category || '').toLowerCase();
-  const id = ingredientData.ingredient_id || '';
+  const id = ingredientData?.ingredient_id || '';
 
-  // risky tokens per-ingredient
-  const riskyById = {
-    ing_eggs: ['mayo','mayonnaise','aioli','custard','powder','substitute','vegan','plant'],
-    ing_olive_oil_spray: ['canola','sunflower','vegetable','eucalyptus'],
-    ing_canola_oil_spray: ['olive','sunflower','vegetable','eucalyptus'],
-  };
-  const risky = riskyById[id] || [];
+  const risky = RISKY_TOKENS_BY_ID[id] || [];
+  const hasRisk = risky.some(w => title.includes(w));
 
-  // token overlap check
-  const must = new Set([...(ingredientData.requiredWords||[]).map(s=>s.toLowerCase())]);
+  const must = new Set((ingredientData?.requiredWords || []).map(s => s.toLowerCase()));
   const toks = new Set(tokenize(title));
   const overlap = [...must].some(w => toks.has(w));
 
-  const allowedCats = (ingredientData.allowedCategories||[]).map(s=>s.toLowerCase());
+  const allowedCats = (ingredientData?.allowedCategories || []).map(s => s.toLowerCase());
   const catOK = allowedCats.length === 0 ? true : allowedCats.some(c => cat.includes(c));
 
-  const hasRisk = risky.some(w => title.includes(w));
   const ambiguous = !overlap || !catOK;
-
-  // Call LLM only on doubtful cases
   return hasRisk || ambiguous;
 }
 
+// --- LLM validator ---
 async function validateWithGeminiFlash(product, ingredientData, log = console.log) {
   if (!GEMINI_API_KEY) {
-    log('Validator: GEMINI_API_KEY missing. Skipping LLM.', 'WARN', 'VALIDATOR');
+    log('Validator: GEMINI_API_KEY missing. Bypass.', 'WARN', 'VALIDATOR');
     return { pass: true, reason: 'no_api_key', flags: [] };
   }
 
-  const id = ingredientData.ingredient_id || 'unknown';
-  const must = (ingredientData.requiredWords||[]).map(s=>s.toLowerCase());
-  const neg = (ingredientData.negativeKeywords||[]).map(s=>s.toLowerCase());
-  const extraNeg = {
-    ing_eggs: ['mayonnaise','mayo','powder','plant','vegan','substitute','noodle','custard'],
-  }[id] || [];
-  const allowedCats = (ingredientData.allowedCategories||[]).map(s=>s.toLowerCase());
+  const id = ingredientData?.ingredient_id || 'unknown';
+  const must = (ingredientData?.requiredWords || []).map(s => s.toLowerCase());
+  const neg = (ingredientData?.negativeKeywords || []).map(s => s.toLowerCase());
+  const extraNeg = RISKY_TOKENS_BY_ID[id] || [];
+  const allowedCats = (ingredientData?.allowedCategories || []).map(s => s.toLowerCase());
 
   const cacheKey = `val:v1:${id}:${sha1(
     `${product.product_name}|${product.product_category}|${product.product_brand}|${product.product_size}`
   )}`;
 
   // cache read
-  if (isKvReady()) {
-    try {
-      const cached = await kv.get(cacheKey);
-      if (cached) return cached;
-    } catch(e){ log(`Validator KV get fail: ${e.message}`, 'WARN', 'VALIDATOR_KV'); }
+  try {
+    const cached = await kv.get(cacheKey);
+    if (cached) return cached;
+  } catch (e) {
+    log(`Validator KV get fail: ${e.message}`, 'WARN', 'VALIDATOR_KV');
   }
 
-  const sys = `You validate supermarket products for a target ingredient. Output strict JSON only. Rules:
+  const sys = `You validate supermarket products for a target ingredient. Output strict JSON only.
+Rules:
 - Fail if title contains any MUST_EXCLUDE tokens.
 - Pass only if title has at least one MUST_INCLUDE token and category is plausible.
 - Be conservative.`;
 
   const user = {
-    TARGET_INGREDIENT: ingredientData.originalIngredient || id,
+    TARGET_INGREDIENT: ingredientData?.originalIngredient || id,
     MUST_INCLUDE: must,
     MUST_EXCLUDE: [...new Set([...neg, ...extraNeg])],
     ALLOWED_CATEGORIES: allowedCats,
@@ -115,9 +107,10 @@ async function validateWithGeminiFlash(product, ingredientData, log = console.lo
   }
 
   // cache write
-  if (isKvReady()) {
-    try { await kv.set(cacheKey, result, { ex: 60 * 60 * 24 * 7 }); } // 7d
-    catch(e){ log(`Validator KV set fail: ${e.message}`, 'WARN', 'VALIDATOR_KV'); }
+  try {
+    await kv.set(cacheKey, result, { ex: 60 * 60 * 24 * 7 }); // 7 days
+  } catch (e) {
+    log(`Validator KV set fail: ${e.message}`, 'WARN', 'VALIDATOR_KV');
   }
 
   return result;
