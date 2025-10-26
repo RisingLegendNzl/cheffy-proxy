@@ -23,7 +23,7 @@ const fetch = require('node-fetch');
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
 const { shouldLLMValidate, validateWithGeminiFlash } = require('./product-validator.js');
-
+const { getMeta, toHousehold } = require('./ingredient-catalog');
 
 // --- NEW (Mark 46): Import LP Solver ---
 const solver = require('javascript-lp-solver');
