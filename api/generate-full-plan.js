@@ -26,8 +26,6 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 // --- NEW (Mark 46): Import LP Solver ---
 const solver = require('javascript-lp-solver');
 
-
-const { getMeta, toHousehold } = require('./ingredient-catalog');
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
