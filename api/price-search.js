@@ -48,16 +48,16 @@ const inflightRefreshes = new Set();
  * Internal logic for fetching price data from the API.
  */
 async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log) {
-    if (!RAPID_API_KEY) { 
+    if (!RAPID_API_KEY) {
         log('Configuration Error: RAPIDAPI_KEY is not set.', 'CRITICAL', 'CONFIG');
         return { error: { message: 'Server configuration error: API key missing.', status: 500 } };
     }
-    if (!store || !query) { 
+    if (!store || !query) {
         log('Missing required parameters: store and query.', 'WARN', 'INPUT', { store, query });
         return { error: { message: 'Missing required parameters: store and query.', status: 400 } };
     }
     const host = RAPID_API_HOSTS[store];
-    if (!host) { 
+    if (!host) {
         log(`Invalid store specified: ${store}. Must be "Coles" or "Woolworths".`, 'WARN', 'INPUT');
         return { error: { message: 'Invalid store specified. Must be "Coles" or "Woolworths".', status: 400 } };
     }
@@ -70,6 +70,7 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
         log(`Attempt ${attempt + 1}/${MAX_RETRIES}: Requesting product data (Page ${page}).`, 'DEBUG', 'RAPID_REQUEST', { store, query, page, endpoint: endpointUrl });
 
         try {
+            // *** Uses axios here ***
             const rapidResp = await axios.get(endpointUrl, {
                 params: apiParams,
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
@@ -179,13 +180,13 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
             // Not enough tokens, calculate wait time
             const tokensNeeded = 1 - currentTokens;
             const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs)); // Wait at least 50ms
-            
+
             log(`Rate limiter active. Waiting ${waitTime}ms for ${tokensNeeded.toFixed(2)} tokens...`, 'INFO', 'BUCKET_WAIT');
             await delay(waitTime);
             // Loop will restart, re-getting state and refilling
         }
     } // end while(true)
-    
+
     waitMs = Date.now() - waitStart; // Total time spent in the loop
     log(`Acquired token for ${store} (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
     // --- END STATELESS BUCKET LOGIC ---
@@ -289,7 +290,7 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
     const { data: fetchedData, waitMs: fetchWaitMs } = await fetchStoreSafe(store, query, page, log);
     const fetchLatencyMs = Date.now() - startTime;
 
-    // 3. Cache Result 
+    // 3. Cache Result
     if (fetchedData && !fetchedData.error) {
         try {
             await kv.set(cacheKey, { data: fetchedData, ts: Date.now() }, { px: TTL_SEARCH_MS });
@@ -318,13 +319,13 @@ module.exports = async (req, res) => {
 
     try {
         const { store, query, page } = req.query;
-        
+
         // --- MODIFICATION: Use the public, cached, rate-limited function ---
         // We create a simple log function for this handler's scope
         const log = (message, level = 'INFO', tag = 'HANDLER') => {
             console.log(`[${level}] [${tag}] ${message}`);
         };
-        
+
         const { data: result } = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1, log);
         // --- END MODIFICATION ---
 
