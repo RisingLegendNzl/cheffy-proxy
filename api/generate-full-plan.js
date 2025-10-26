@@ -22,12 +22,12 @@ const fetch = require('node-fetch');
 // Now importing the CACHE-WRAPPED versions with SWR and Token Buckets
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
-const { shouldLLMValidate, validateWithGeminiFlash } = require('./product-validator.js');
-
 
 // --- NEW (Mark 46): Import LP Solver ---
 const solver = require('javascript-lp-solver');
 
+
+const { getMeta, toHousehold } = require('./ingredient-catalog');
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
@@ -67,11 +67,8 @@ const NEG_EXTRA = {
   ing_olive_oil_spray: ["canola", "vegetable", "eucalyptus", "sunflower"],
   ing_canola_oil_spray: ["olive", "vegetable", "eucalyptus", "sunflower"], // Added for canola spray
   ing_diced_tomatoes: ["paste", "sundried", "cherry", "soup", "puree"],
-  ing_wholemeal_pasta: ["bread", "loaf", "flour", "rolls"],
-  ing_eggs: ["mayonnaise","mayo","aioli","custard","powder","substitute","vegan","plant"]
+  ing_wholemeal_pasta: ["bread", "loaf", "flour", "rolls"]
 };
-
-
 
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
@@ -754,45 +751,26 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                 // Validate each product
                 for (const rawProduct of rawProducts) {
                     // --- Run checklist ---
-const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
-if (!checklistResult.pass) {
-  continue; // early skip
-}
-
-// --- Optional LLM validator ---
-let llmPass = true;
-if (shouldLLMValidate(rawProduct, ingredient)) {
-  const verdict = await validateWithGeminiFlash(rawProduct, ingredient, log);
-  llmPass = !!verdict.pass;
-  if (!llmPass) {
-    log(`[${ingredientKey}] LLM validator rejected "${rawProduct.product_name}": ${verdict.reason} (${(verdict.flags||[]).join('|')})`, 'INFO', 'VALIDATOR');
-    if (Array.isArray(verdict.suggested_negatives) && verdict.suggested_negatives.length) {
-      ingredient.negativeKeywords = Array.from(new Set([...(ingredient.negativeKeywords||[]), ...verdict.suggested_negatives.map(s => String(s).toLowerCase())]));
-    }
-    continue; // reject this candidate and move on
-  }
-}
-
-// --- Unit price and add ---
-const unitPrice = calculateUnitPrice(rawProduct.current_price, rawProduct.product_size);
-if (unitPrice > 0 && unitPrice < 1000) {
-  validProductsOnPage.push({
-    product: {
-      name: rawProduct.product_name, brand: rawProduct.product_brand,
-      price: rawProduct.current_price, size: rawProduct.product_size,
-      url: rawProduct.url, barcode: rawProduct.barcode,
-      unit_price_per_100: unitPrice,
-      product_category: rawProduct.product_category || ''
-    },
-    score: checklistResult.score
-  });
-  pageBestScore = Math.max(pageBestScore, checklistResult.score);
-} else {
-  log(`[${ingredientKey}] Rejecting product "${rawProduct.product_name}" due to invalid calculated unit price: ${unitPrice}`, 'WARN', 'DATA_VALIDATION');
-}
-} 
-
-
+                    const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
+                    if (checklistResult.pass) {
+                        // Calculate unit price and validate
+                        const unitPrice = calculateUnitPrice(rawProduct.current_price, rawProduct.product_size);
+                        if (unitPrice > 0 && unitPrice < 1000) { // Basic sanity check on price/100 units
+                             validProductsOnPage.push({
+                                 product: { // Structure the product object
+                                     name: rawProduct.product_name, brand: rawProduct.product_brand,
+                                     price: rawProduct.current_price, size: rawProduct.product_size,
+                                     url: rawProduct.url, barcode: rawProduct.barcode,
+                                     unit_price_per_100: unitPrice
+                                 },
+                                 score: checklistResult.score // Keep score if needed later
+                             });
+                             pageBestScore = Math.max(pageBestScore, checklistResult.score);
+                        } else {
+                            log(`[${ingredientKey}] Rejecting product "${rawProduct.product_name}" due to invalid calculated unit price: ${unitPrice}`, 'WARN', 'DATA_VALIDATION');
+                        }
+                    }
+                }
 
                 // Apply price outlier guard
                 const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
