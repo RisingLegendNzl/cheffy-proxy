@@ -73,6 +73,121 @@ const PRICE_OUTLIER_Z_SCORE = 2.0;
 
 /// ===== CONFIG-END ===== ////
 
+
+
+//////////// VALIDATOR (IN-PROCESS) START \\\\\\\\\\\\
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+async function geminiJudge(items, model = 'gemini-1.5-flash') {
+  if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY not set');
+  const sys = `You are a strict product-matching judge. Require same base food and form. Size ±15%. Reject unrelated categories. Return JSON array [{"verdict":"pass|fail|unsure","confidence":0-1,"reason":"..."}].`;
+  const user = `Evaluate:\n${JSON.stringify(items, null, 2)}\nReturn JSON only.`;
+  const body = {
+    contents: [
+      { role: 'system', parts: [{ text: sys }] },
+      { role: 'user', parts: [{ text: user }] }
+    ],
+    generationConfig: { temperature: 0.2, topP: 0.9, maxOutputTokens: 512, responseMimeType: 'application/json' }
+  };
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+  const t0 = Date.now();
+  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const json = await resp.json().catch(()=> ({}));
+  const text = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? '[]';
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = JSON.parse((text.match(/\[[\s\S]*\]/) || ['[]'])[0]); }
+  console.log('[VALIDATOR][Gemini]', { items: items.length, model, latency_ms: Date.now() - t0 });
+  return parsed;
+}
+
+function parseSize(text='') {
+  const t = String(text).toLowerCase().replace(/×/g,'x').replace(/,/g,' ').trim();
+  const mult = t.match(/(\d+)\s*x\s*(\d+(\.\d+)?)\s*([a-z]+)\b/);
+  const single = t.match(/(\d+(\.\d+)?)\s*([a-z]+)\b/);
+  const count = t.match(/\b(\d+)\s*(pack|pk|count|pcs?)\b/);
+  if (mult) return toSize(Number(mult[1]) * Number(mult[2]), mult[4]);
+  if (single) return toSize(Number(single[1]), single[3]);
+  if (count) return { amount: Number(count[1]), unit: 'count', kind: 'count' };
+  const justNum = t.match(/^\s*(\d+)\s*$/);
+  if (justNum) return { amount: Number(justNum[1]), unit: 'count', kind: 'count' };
+  return null;
+}
+function toSize(amount, unitRaw) {
+  const u = String(unitRaw).toLowerCase();
+  const W = { g:1, gram:1, grams:1, kg:1000, kilogram:1000, kilograms:1000 };
+  const V = { ml:1, millilitre:1, millilitres:1, l:1000, litre:1000, litres:1000 };
+  if (u in W) return { amount: amount * W[u], unit: 'g', kind: 'weight' };
+  if (u in V) return { amount: amount * V[u], unit: 'ml', kind: 'volume' };
+  if (['count','pack','pc','pcs','ea','each','ct'].includes(u)) return { amount, unit: 'count', kind: 'count' };
+  return null;
+}
+function withinTol(a, b, pct=15, countSlack=1) {
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === 'count') return Math.abs(a.amount - b.amount) <= countSlack;
+  const tol = (pct/100) * a.amount;
+  return Math.abs(a.amount - b.amount) <= tol;
+}
+const BANNED_CAT = ['condiment','sauce','mayonnaise','aioli','dessert','chocolate','drink','alcohol','pet','cleaning','vitamin','meal kit','ready meal'];
+const BANNED_TITLE = ['mayonnaise','aioli','dressing','sauce kit','meal kit','powdered','protein powder','dessert'];
+const FORM_BANS = {
+  raw: ['pasteurised whites','liquid egg','mayonnaise','aioli','powder'],
+  fresh: ['powder','kit','sauce'],
+  dry: ['sauce','kit','ready meal']
+};
+function quickRule(spec, cand) {
+  const title = (cand.product_name || cand.name || '').toLowerCase();
+  const path = (Array.isArray(cand.breadcrumbs) ? cand.breadcrumbs.join('>') : String(cand.breadcrumbs||'')).toLowerCase();
+  if (BANNED_CAT.some(w=>path.includes(w)) || BANNED_TITLE.some(w=>title.includes(w)))
+    return { verdict:'fail', conf:0.1, reason:'banned token' };
+  if (spec.form && (FORM_BANS[spec.form]||[]).some(w=>title.includes(w)))
+    return { verdict:'fail', conf:0.2, reason:'form mismatch' };
+  let conf = 0.5;
+  const ingSize = spec.quantity ? parseSize(`${spec.quantity.amount}${spec.quantity.unit}`) : null;
+  const candSize = parseSize(cand.product_size || cand.pack_size || cand.size || title);
+  if (ingSize && candSize) conf += withinTol(ingSize, candSize) ? 0.2 : -0.2;
+  if (title.includes((spec.originalIngredient || spec.name || '').toLowerCase().split(' ')[0])) conf += 0.1;
+  if (conf >= 0.8) return { verdict:'pass', conf, reason:'rule pass' };
+  if (conf <= 0.3) return { verdict:'fail', conf, reason:'rule fail' };
+  return { verdict:'unsure', conf, reason:'needs ai' };
+}
+
+async function validateAndSelect(spec, candidates, model='gemini-1.5-flash', logFn) {
+  const t0 = Date.now();
+  try { logFn?.(`[VALIDATOR_REQUEST] ${spec.originalIngredient || spec.name} count=${candidates.length}`, 'DEBUG', 'VALIDATOR'); } catch {}
+  // rules first
+  const outs = [];
+  const toAI = [];
+  for (let i=0;i<candidates.length;i++){
+    const r = quickRule(spec, candidates[i]);
+    outs[i] = { verdict: r.verdict, confidence: r.conf, reason: r.reason, signals: { rule_conf: r.conf } };
+    if (r.verdict === 'unsure') {
+      toAI.push({ idx:i, item:{
+        ingredient: spec.originalIngredient || spec.name || '',
+        candidate_title: candidates[i].product_name || candidates[i].name || '',
+        candidate_category: Array.isArray(candidates[i].breadcrumbs) ? candidates[i].breadcrumbs.join('>') : String(candidates[i].breadcrumbs||''),
+        candidate_size: candidates[i].product_size || candidates[i].pack_size || candidates[i].size
+      }});
+    }
+  }
+  if (toAI.length){
+    const ai = await geminiJudge(toAI.map(x=>x.item), model);
+    for (let j=0;j<toAI.length;j++){
+      const i = toAI[j].idx;
+      const a = ai[j] || {};
+      const finalVerdict = a.confidence >= 0.7 ? a.verdict : 'unsure';
+      outs[i] = { verdict: finalVerdict, confidence: Math.max(outs[i].confidence || 0.5, a.confidence || 0.5), reason: a.reason || outs[i].reason, signals: { rule_conf: outs[i].signals.rule_conf, ai_conf: a.confidence } };
+      try { console.log('[VALIDATOR][Item]', { ingredient: spec.originalIngredient || spec.name, product: candidates[i].product_name || candidates[i].name, verdict: outs[i].verdict, conf: outs[i].confidence }); } catch {}
+    }
+  }
+  const pickedIndex = outs.findIndex(x => x.verdict === 'pass' && x.confidence >= 0.7);
+  const picked = pickedIndex >= 0 ? candidates[pickedIndex] : undefined;
+  try {
+    logFn?.(`[VALIDATOR_DECISION] passes=${outs.filter(x=>x.verdict==='pass').length} fails=${outs.filter(x=>x.verdict==='fail').length} pickedIndex=${pickedIndex} t=${Date.now()-t0}ms`, 'DEBUG', 'VALIDATOR');
+  } catch {}
+  return { picked, results: outs };
+}
+//////////// VALIDATOR (IN-PROCESS) END \\\\\\\\\\\\
+
+
 //////////// VALIDATOR-CALLER START \\\\\\\\\\\\
 const VALIDATOR_ENDPOINT =
   process.env.VALIDATOR_ENDPOINT
