@@ -750,6 +750,15 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                 for (const rawProduct of rawProducts) {
                     // --- Run checklist ---
                     const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
+                    //////////// VALIDATOR-CALL START \\\\\\\\\\\\
+const validatorSpec = { name: ingredient.originalIngredient };
+const validatorCandidates = [rawProduct];
+const { picked, results: validatorResults } = await validateAndSelect(validatorSpec, validatorCandidates);
+if (picked && validatorResults[0]?.verdict !== 'pass') {
+  log(`[${ingredientKey}] Validator rejected product "${rawProduct.product_name}"`, 'DEBUG', 'VALIDATOR');
+  continue; // skip this product
+}
+//////////// VALIDATOR-CALL END \\\\\\\\\\\\
                     if (checklistResult.pass) {
                         // Calculate unit price and validate
                         const unitPrice = calculateUnitPrice(rawProduct.current_price, rawProduct.product_size);
