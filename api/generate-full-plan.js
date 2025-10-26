@@ -751,26 +751,43 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                 // Validate each product
                 for (const rawProduct of rawProducts) {
                     // --- Run checklist ---
-                    const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
-                    if (checklistResult.pass) {
-                        // Calculate unit price and validate
-                        const unitPrice = calculateUnitPrice(rawProduct.current_price, rawProduct.product_size);
-                        if (unitPrice > 0 && unitPrice < 1000) { // Basic sanity check on price/100 units
-                             validProductsOnPage.push({
-                                 product: { // Structure the product object
-                                     name: rawProduct.product_name, brand: rawProduct.product_brand,
-                                     price: rawProduct.current_price, size: rawProduct.product_size,
-                                     url: rawProduct.url, barcode: rawProduct.barcode,
-                                     unit_price_per_100: unitPrice
-                                 },
-                                 score: checklistResult.score // Keep score if needed later
-                             });
-                             pageBestScore = Math.max(pageBestScore, checklistResult.score);
-                        } else {
-                            log(`[${ingredientKey}] Rejecting product "${rawProduct.product_name}" due to invalid calculated unit price: ${unitPrice}`, 'WARN', 'DATA_VALIDATION');
-                        }
-                    }
-                }
+const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
+if (checklistResult.pass) {
+  // OPTIONAL LLM validation
+  let llmPass = true;
+  if (shouldLLMValidate(rawProduct, ingredient)) {
+    const verdict = await validateWithGeminiFlash(rawProduct, ingredient, log);
+    llmPass = !!verdict.pass;
+    if (!llmPass) {
+      log(`[${ingredientKey}] LLM validator rejected "${rawProduct.product_name}": ${verdict.reason} (${(verdict.flags||[]).join('|')})`, 'INFO', 'VALIDATOR');
+      // Learn new negatives for this run
+      if (Array.isArray(verdict.suggested_negatives) && verdict.suggested_negatives.length) {
+        ingredient.negativeKeywords = Array.from(new Set([...(ingredient.negativeKeywords||[]), ...verdict.suggested_negatives.map(s=>String(s).toLowerCase())]));
+      }
+    }
+  }
+  if (!llmPass) {
+    // skip this product
+  } else {
+    // Calculate unit price and validate
+    const unitPrice = calculateUnitPrice(rawProduct.current_price, rawProduct.product_size);
+    if (unitPrice > 0 && unitPrice < 1000) {
+      validProductsOnPage.push({
+        product: {
+          name: rawProduct.product_name, brand: rawProduct.product_brand,
+          price: rawProduct.current_price, size: rawProduct.product_size,
+          url: rawProduct.url, barcode: rawProduct.barcode,
+          unit_price_per_100: unitPrice,
+          product_category: rawProduct.product_category || ''
+        },
+        score: checklistResult.score
+      });
+      pageBestScore = Math.max(pageBestScore, checklistResult.score);
+    } else {
+      log(`[${ingredientKey}] Rejecting product "${rawProduct.product_name}" due to invalid calculated unit price: ${unitPrice}`, 'WARN', 'DATA_VALIDATION');
+    }
+  }
+}
 
                 // Apply price outlier guard
                 const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
