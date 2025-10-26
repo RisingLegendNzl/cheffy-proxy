@@ -1,6 +1,6 @@
 const fetch = require('node-fetch');
-// --- MODIFICATION: Import axios for Dietagram fallback ---
-const axios = require('axios');
+// --- REMOVED (Mark 51): Import axios (no longer needed) ---
+// const axios = require('axios');
 // --- MODIFICATION: Import createClient instead of the default kv instance ---
 const { createClient } = require('@vercel/kv');
 
@@ -12,23 +12,23 @@ const kv = createClient({
 // --- END MODIFICATION ---
 
 // --- CACHE CONFIGURATION ---
-const TTL_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const TTL_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 30; // 30 days (OFF Barcode)
 const SWR_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 10; // Stale While Revalidate after 10 days
-const TTL_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 7;    // 7 days
+const TTL_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 7;    // 7 days (OFF Name, USDA Name)
 const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;     // Stale While Revalidate after 2 days
 const CACHE_PREFIX_NUTRI = 'nutri';
 
-// --- DIETAGRAM API CONFIGURATION (NEW) ---
-// --- BUG FIX: Use the correct environment variable 'RAPIDAPI_KEY' as specified by user ---
-const DIETAGRAM_API_KEY = process.env.RAPIDAPI_KEY;
-// const DIETAGRAM_API_KEY = process.env.DIETAGRAM_RAPIDAPI_KEY; // Old
-// --- END BUG FIX ---
-const DIETAGRAM_API_HOST = process.env.DIETAGRAM_RAPIDAPI_HOST || 'dietagram.p.rapidapi.com';
+// --- REMOVED (Mark 51): DIETAGRAM API CONFIGURATION ---
 
-// --- TOKEN BUCKET CONFIGURATION (NEW - copied from price-search.js) ---
-const BUCKET_CAPACITY = 10;
-const BUCKET_REFILL_RATE = 8; // Tokens per second (same as other RapidAPI)
-const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
+// --- NEW (Mark 51): USDA API CONFIGURATION ---
+const USDA_API_KEY = process.env.USDA_API_KEY;
+const USDA_SEARCH_URL = 'https://api.nal.usda.gov/fdc/v1/foods/search';
+const USDA_DETAILS_URL = 'https://api.nal.usda.gov/fdc/v1/food/'; // Append {fdcId}?api_key=...
+
+// --- TOKEN BUCKET CONFIGURATION (Now for USDA) ---
+const BUCKET_CAPACITY = 10; // Keep capacity reasonable
+const BUCKET_REFILL_RATE = 1; // USDA default limit is lower (1 req/sec), adjust if needed based on plan
+const BUCKET_RETRY_DELAY_MS = 1100; // Delay slightly longer than 1 sec after a 429
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // --- END NEW ---
 
@@ -52,119 +52,218 @@ const isKvConfigured = () => {
 };
 // --- END MODIFICATION ---
 
+// --- REMOVED (Mark 51): Dietagram Normalizer ---
 
-// --- NEW: Dietagram Normalizer ---
+// --- NEW (Mark 51): USDA Normalizer ---
 /**
- * Normalizes a response from the Dietagram API into our standard nutrition object.
- * @param {object} dietagramResponse - The raw response from Dietagram API.
+ * Normalizes a response from the USDA FoodData Central API (details endpoint)
+ * into our standard nutrition object.
+ * @param {object} usdaDetailsResponse - The raw response from USDA details API.
  * @param {string} query - The original query, for logging.
  * @param {function} log - The logger function.
  * @returns {object} Our standard nutrition object, or null if data is invalid.
  */
-function normalizeDietagramResponse(dietagramResponse, query, log) {
-    if (!dietagramResponse || !Array.isArray(dietagramResponse) || dietagramResponse.length === 0) {
-        log(`Dietagram: No results array found for query: ${query}`, 'INFO', 'DIETAGRAM_PARSE');
+function normalizeUsdaResponse(usdaDetailsResponse, query, log) {
+    if (!usdaDetailsResponse || !Array.isArray(usdaDetailsResponse.foodNutrients)) {
+        log(`USDA: No valid foodNutrients array found for query: ${query}`, 'WARN', 'USDA_PARSE');
         return null;
     }
 
-    // Attempt to find the best match (e.g., first one that isn't a category)
-    // This is a heuristic and might need refinement.
-    const product = dietagramResponse.find(item => item.name && item.kcal);
+    const nutrients = usdaDetailsResponse.foodNutrients;
+    const findNutrient = (ids, targetUnit = 'G', allowNameFallback = true) => {
+        for (const id of ids) {
+            const nutrient = nutrients.find(n => n.nutrient?.id === id);
+            if (nutrient && nutrient.amount !== undefined && nutrient.amount !== null) {
+                // Basic unit check/conversion
+                const unit = (nutrient.unitName || '').toUpperCase();
+                let amount = parseFloat(nutrient.amount);
+                if (isNaN(amount)) continue;
 
-    if (!product) {
-        log(`Dietagram: No valid product with kcal found in results for: ${query}`, 'INFO', 'DIETAGRAM_PARSE');
+                if (unit === targetUnit.toUpperCase()) {
+                    return amount;
+                } else if (targetUnit.toUpperCase() === 'G' && unit === 'MG') {
+                    return amount / 1000; // Convert mg to g
+                } else if (targetUnit.toUpperCase() === 'KCAL' && unit === 'KJ') {
+                    return amount / KJ_TO_KCAL_FACTOR; // Convert kJ to kcal
+                }
+                // Add other conversions if needed
+                log(`USDA: Nutrient ID ${id} found but unit mismatch (${unit} vs ${targetUnit})`, 'DEBUG', 'USDA_PARSE');
+                // Don't return if unit is wrong unless it's a convertible unit
+            }
+        }
+         // Fallback to searching by name if IDs fail and allowed
+         if (allowNameFallback) {
+             const nameMap = {
+                 208: /energy/i, // kcal
+                 203: /protein/i,
+                 204: /fat|lipid/i,
+                 205: /carbohydrate/i,
+                 606: /fatty acids, total saturated/i,
+                 269: /sugars/i,
+                 291: /fiber/i,
+                 307: /sodium/i,
+             };
+             for (const id of ids) {
+                 const nameRegex = nameMap[id];
+                 if (!nameRegex) continue;
+                 const nutrient = nutrients.find(n => n.nutrient?.name && nameRegex.test(n.nutrient.name));
+                  if (nutrient && nutrient.amount !== undefined && nutrient.amount !== null) {
+                       const unit = (nutrient.unitName || '').toUpperCase();
+                       let amount = parseFloat(nutrient.amount);
+                       if (isNaN(amount)) continue;
+                       if (unit === targetUnit.toUpperCase()) return amount;
+                       // Add conversions as above
+                        else if (targetUnit.toUpperCase() === 'G' && unit === 'MG') return amount / 1000;
+                        else if (targetUnit.toUpperCase() === 'KCAL' && unit === 'KJ') return amount / KJ_TO_KCAL_FACTOR;
+                        log(`USDA: Nutrient Name ${nameRegex} found but unit mismatch (${unit} vs ${targetUnit})`, 'DEBUG', 'USDA_PARSE');
+                  }
+             }
+         }
+
+        return 0; // Default to 0 if not found or invalid
+    };
+
+    // Common USDA Nutrient IDs:
+    const kcalIds = [208, 1008]; // Energy (kcal)
+    const proteinIds = [203, 1003]; // Protein
+    const fatIds = [204, 1004]; // Total lipid (fat)
+    const carbIds = [205, 1005]; // Carbohydrate, by difference
+    const satFatIds = [606, 1258]; // Fatty acids, total saturated
+    const sugarsIds = [269, 2000]; // Sugars, total including NLEA
+    const fiberIds = [291, 1079]; // Fiber, total dietary
+    const sodiumIds = [307]; // Sodium, Na
+
+    const calories = findNutrient(kcalIds, 'KCAL');
+    const protein = findNutrient(proteinIds, 'G');
+    const fat = findNutrient(fatIds, 'G');
+    const carbs = findNutrient(carbIds, 'G');
+
+    // Only consider it found if we have core macros
+    if (calories <= 0 || protein <= 0 || fat <= 0 || carbs <= 0) {
+        log(`USDA: Core macros missing or zero for query: ${query} (FDC ID: ${usdaDetailsResponse.fdcId})`, 'INFO', 'USDA_PARSE', { calories, protein, fat, carbs });
         return null;
     }
 
-    log(`Dietagram: Found match "${product.name}" for query: ${query}`, 'SUCCESS', 'DIETAGRAM_PARSE');
+    log(`USDA: Successfully parsed data for query: ${query} (FDC ID: ${usdaDetailsResponse.fdcId}, Name: "${usdaDetailsResponse.description}")`, 'SUCCESS', 'USDA_PARSE');
 
-    // Dietagram provides values per 100g
     return {
         status: 'found',
-        source: 'dietagram', // Add source tracking
-        servingUnit: '100g',
-        calories: parseFloat(product.kcal || 0),
-        protein: parseFloat(product.protein || 0),
-        fat: parseFloat(product.fat || 0),
-        saturatedFat: parseFloat(product.saturatedFat || 0),
-        carbs: parseFloat(product.carbohydrates || 0),
-        sugars: parseFloat(product.sugar || 0),
-        fiber: parseFloat(product.fiber || 0),
-        sodium: parseFloat(product.sodium || 0) / 1000, // Convert mg to g if needed (assuming sodium is mg)
-        ingredientsText: product.ingredients || null
+        source: 'usda', // Add source tracking
+        servingUnit: '100g', // USDA data is typically per 100g
+        calories: calories,
+        protein: protein,
+        fat: fat,
+        saturatedFat: findNutrient(satFatIds, 'G'),
+        carbs: carbs,
+        sugars: findNutrient(sugarsIds, 'G'),
+        fiber: findNutrient(fiberIds, 'G'),
+        sodium: findNutrient(sodiumIds, 'G'), // Target unit G (will convert from MG if needed)
+        ingredientsText: usdaDetailsResponse.ingredients || null
     };
 }
 // --- END NEW ---
 
-// --- NEW (Mark 44.2): Internal Dietagram API fetcher ---
+// --- REMOVED (Mark 51): Internal Dietagram API fetcher ---
+
+// --- NEW (Mark 51): Internal USDA API fetcher ---
 /**
- * Internal logic for fetching from Dietagram API.
+ * Internal logic for fetching from USDA API (Search then Details).
  */
-async function _fetchDietagramFromApi(query, log = console.log) {
-    // --- BUG FIX: Updated check to reflect new variable and provide clearer logging ---
-    if (!DIETAGRAM_API_KEY) {
-        log('Configuration Error: Nutrition API key (RAPIDAPI_KEY) is not set.', 'CRITICAL', 'CONFIG');
-        return { error: { message: 'Server configuration error: Nutrition API key missing.', status: 500 } };
+async function _fetchUsdaFromApi(query, log = console.log) {
+    if (!USDA_API_KEY) {
+        log('Configuration Error: USDA_API_KEY is not set.', 'CRITICAL', 'CONFIG');
+        return { error: { message: 'Server configuration error: USDA API key missing.', status: 500 } };
     }
-    log('Using Nutrition API Key.', 'DEBUG', 'CONFIG'); // Added success log
-    // --- END BUG FIX ---
 
-    // --- BUG FIX: Manually construct URL with query params for RapidAPI compatibility ---
-    const encodedQuery = encodeURIComponent(query);
-    const lang = 'en'; // Assuming 'en' for now
-    const url = `https://${DIETAGRAM_API_HOST}/apiFood.php?name=${encodedQuery}&lang=${lang}`;
-    // --- END BUG FIX ---
+    // --- Step 1: Search ---
+    const searchStartTime = Date.now();
+    const searchUrl = `${USDA_SEARCH_URL}?api_key=${USDA_API_KEY}&query=${encodeURIComponent(query)}&pageSize=5&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS)`; // Prioritize non-branded types
 
-    const options = {
-        method: 'GET',
-        url: url, // Use the manually constructed URL
-        // params: { name: query, lang: 'en' }, // REMOVED params object
-        headers: {
-            'x-rapidapi-key': DIETAGRAM_API_KEY,
-            'x-rapidapi-host': DIETAGRAM_API_HOST
-        },
-        timeout: 10000 // 10 second timeout
-    };
+    log(`Attempting USDA search for: ${query}`, 'DEBUG', 'USDA_REQUEST', { url: searchUrl.split('?')[0] + '?query=...' });
 
-    const attemptStartTime = Date.now();
-    log(`Attempting Dietagram fetch for: ${query}`, 'DEBUG', 'DIETAGRAM_REQUEST', { url }); // Log the full URL
+    let searchResponseData;
+    try {
+        const searchResponse = await fetch(searchUrl);
+        const searchLatencyMs = Date.now() - searchStartTime;
+        if (!searchResponse.ok) {
+            const errorBody = await searchResponse.text();
+            log(`USDA search failed for "${query}" with status ${searchResponse.status}`, 'WARN', 'USDA_FAILURE', { status: searchResponse.status, latency_ms: searchLatencyMs, body: errorBody });
+            return { error: { message: `USDA search failed. Status: ${searchResponse.status}`, status: searchResponse.status, details: errorBody } };
+        }
+        searchResponseData = await searchResponse.json();
+        log(`USDA search successful for "${query}". Found ${searchResponseData?.totalHits} potential matches.`, 'DEBUG', 'USDA_RESPONSE', { latency_ms: searchLatencyMs });
+
+    } catch (error) {
+        const searchLatencyMs = Date.now() - searchStartTime;
+        log(`USDA search network error for "${query}": ${error.message}`, 'ERROR', 'USDA_FAILURE', { latency_ms: searchLatencyMs });
+        return { error: { message: `USDA search network error: ${error.message}`, status: 504 } };
+    }
+
+    // --- Step 2: Find Best FDC ID ---
+    if (!searchResponseData || !Array.isArray(searchResponseData.foods) || searchResponseData.foods.length === 0) {
+        log(`USDA search for "${query}" returned no food results.`, 'INFO', 'USDA_RESPONSE');
+        return { error: { message: 'No results found in USDA search', status: 404 } }; // Use 404 for no results
+    }
+
+    // Prioritize Foundation, SR Legacy, FNDDS. Find the first one.
+    let bestFdcId = null;
+    let foundFoodDescription = '';
+    const preferredTypes = ['Foundation', 'SR Legacy', 'Survey (FNDDS)'];
+    for (const type of preferredTypes) {
+        const foundFood = searchResponseData.foods.find(food => food.dataType === type);
+        if (foundFood) {
+            bestFdcId = foundFood.fdcId;
+            foundFoodDescription = foundFood.description;
+            log(`USDA selected FDC ID ${bestFdcId} ("${foundFoodDescription}", Type: ${type}) for query "${query}"`, 'INFO', 'USDA_SELECT');
+            break;
+        }
+    }
+
+    // Fallback to the very first result if no preferred type found
+    if (!bestFdcId) {
+        bestFdcId = searchResponseData.foods[0].fdcId;
+        foundFoodDescription = searchResponseData.foods[0].description;
+        log(`USDA falling back to first result FDC ID ${bestFdcId} ("${foundFoodDescription}", Type: ${searchResponseData.foods[0].dataType}) for query "${query}"`, 'INFO', 'USDA_SELECT');
+    }
+
+    // --- Step 3: Fetch Details ---
+    const detailsStartTime = Date.now();
+    const detailsUrl = `${USDA_DETAILS_URL}${bestFdcId}?api_key=${USDA_API_KEY}`;
+    log(`Attempting USDA details fetch for FDC ID: ${bestFdcId}`, 'DEBUG', 'USDA_REQUEST', { url: detailsUrl.split('?')[0] + '?api_key=...' });
 
     try {
-        const rapidResp = await axios.request(options);
-        const attemptLatency = Date.now() - attemptStartTime;
-        log(`Successfully fetched Dietagram for "${query}".`, 'SUCCESS', 'DIETAGRAM_RESPONSE', { status: rapidResp.status, latency_ms: attemptLatency });
-        return rapidResp.data; // Return the raw data
-    } catch (error) {
-        const attemptLatency = Date.now() - attemptStartTime;
-        const status = error.response?.status;
-        const is429 = status === 429;
-
-        log(`Dietagram fetch failed for "${query}"`, 'WARN', 'DIETAGRAM_FAILURE', { status: status || 'Network/Timeout', message: error.message, is429, latency_ms: attemptLatency });
-
-        if (is429) {
-            error.statusCode = 429;
-            throw error; // Re-throw 429 to be handled by fetchDietagramSafe
+        const detailsResponse = await fetch(detailsUrl);
+        const detailsLatencyMs = Date.now() - detailsStartTime;
+        if (!detailsResponse.ok) {
+            const errorBody = await detailsResponse.text();
+            log(`USDA details fetch failed for FDC ID ${bestFdcId} with status ${detailsResponse.status}`, 'WARN', 'USDA_FAILURE', { status: detailsResponse.status, latency_ms: detailsLatencyMs, body: errorBody });
+            return { error: { message: `USDA details fetch failed. Status: ${detailsResponse.status}`, status: detailsResponse.status, details: errorBody } };
         }
+        const detailsData = await detailsResponse.json();
+        log(`USDA details fetch successful for FDC ID ${bestFdcId}`, 'SUCCESS', 'USDA_RESPONSE', { latency_ms: detailsLatencyMs });
+        return detailsData; // Return the raw details data
 
-        const finalErrorMessage = `Request failed. Status: ${status || 'Network/Timeout'}.`;
-        return { error: { message: finalErrorMessage, status: status || 504, details: error.message } };
+    } catch (error) {
+        const detailsLatencyMs = Date.now() - detailsStartTime;
+        log(`USDA details network error for FDC ID ${bestFdcId}: ${error.message}`, 'ERROR', 'USDA_FAILURE', { latency_ms: detailsLatencyMs });
+        return { error: { message: `USDA details network error: ${error.message}`, status: 504 } };
     }
 }
 // --- END NEW ---
 
-// --- NEW (Mark 44.2): Rate-limited wrapper for Dietagram ---
+// --- REMOVED (Mark 51): Rate-limited wrapper for Dietagram ---
+
+// --- NEW (Mark 51): Rate-limited wrapper for USDA ---
 /**
- * Wrapper for Dietagram API calls using a STATELESS token bucket (Vercel KV).
- * This is CRITICAL for serverless environments.
- * Returns { data, waitMs }
+ * Wrapper for USDA API calls using a STATELESS token bucket (Vercel KV).
  */
-async function fetchDietagramSafe(query, log = console.log) {
-    const bucketKey = `bucket:dietagram`; // Single bucket for the API
+async function fetchUsdaSafe(query, log = console.log) {
+    const bucketKey = `bucket:usda`; // Dedicated bucket for the USDA API
     const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
     let waitMs = 0;
     const waitStart = Date.now();
 
-    // Loop until we successfully acquire a token
+    // Loop until we successfully acquire a token (Same logic as Dietagram/Price search)
     while (true) {
         const now = Date.now();
         let bucketState = null;
@@ -174,7 +273,7 @@ async function fetchDietagramSafe(query, log = console.log) {
                 bucketState = await kv.get(bucketKey);
             } catch (kvError) {
                 log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message });
-                break; // Bypassing loop
+                break;
             }
         }
 
@@ -182,62 +281,67 @@ async function fetchDietagramSafe(query, log = console.log) {
             log(`Initializing KV bucket: ${bucketKey}`, 'DEBUG', 'BUCKET_INIT');
             if (isKvConfigured()) {
                 try {
-                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: Math.ceil(TTL_NUTRI_NAME_MS / 1000) });
+                    // Use a reasonable TTL (e.g., 1 day)
+                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: 86400 });
                 } catch (kvError) {
                     log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
                 }
             }
-            break; // Acquired token
+            break;
         }
 
-        // State exists, calculate refill
         const elapsedMs = now - bucketState.lastRefill;
         const tokensToAdd = elapsedMs * refillRatePerMs;
         let currentTokens = Math.min(BUCKET_CAPACITY, bucketState.tokens + tokensToAdd);
         const newLastRefill = now;
 
         if (currentTokens >= 1) {
-            // Take token and update KV
             currentTokens -= 1;
             if (isKvConfigured()) {
                 try {
-                    await kv.set(bucketKey, { tokens: currentTokens, lastRefill: newLastRefill }, { ex: Math.ceil(TTL_NUTRI_NAME_MS / 1000) });
+                    await kv.set(bucketKey, { tokens: currentTokens, lastRefill: newLastRefill }, { ex: 86400 });
                 } catch (kvError) {
                     log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
                 }
             }
-            break; // Acquired token
+            break;
         } else {
-            // Not enough tokens, calculate wait time
             const tokensNeeded = 1 - currentTokens;
-            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs)); // Wait at least 50ms
-            log(`Rate limiter active (Dietagram). Waiting ${waitTime}ms...`, 'INFO', 'BUCKET_WAIT');
+            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs));
+            log(`Rate limiter active (USDA). Waiting ${waitTime}ms...`, 'INFO', 'BUCKET_WAIT');
             await delay(waitTime);
         }
     } // end while(true)
 
     waitMs = Date.now() - waitStart;
-    log(`Acquired token for Dietagram (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
+    log(`Acquired token for USDA (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
+
+    // Note: USDA involves potentially two API calls (search + details) per token.
+    // If rate limits become an issue, we might need separate buckets or adjust logic.
+    // For now, assume one token covers the entire process for one query.
 
     try {
-        const data = await _fetchDietagramFromApi(query, log);
-        return { data, waitMs }; // Return data and wait time
+        // --- Call the internal function that performs BOTH search and details fetch ---
+        const data = await _fetchUsdaFromApi(query, log);
+        return { data, waitMs };
     } catch (error) {
-        if (error.statusCode === 429) {
-            log(`Dietagram returned 429. Retrying once after ${BUCKET_RETRY_DELAY_MS}ms...`, 'WARN', 'BUCKET_RETRY', { query });
+        // Handle 429 specifically if _fetchUsdaFromApi throws it (though unlikely with fetch)
+        if (error.statusCode === 429) { // Check if error object has statusCode property
+            log(`USDA returned 429 (unexpected with fetch). Retrying once after ${BUCKET_RETRY_DELAY_MS}ms...`, 'WARN', 'BUCKET_RETRY', { query });
             await delay(BUCKET_RETRY_DELAY_MS);
              try {
-                 const retryData = await _fetchDietagramFromApi(query, log);
+                 const retryData = await _fetchUsdaFromApi(query, log);
                  return { data: retryData, waitMs };
              } catch (retryError) {
-                  log(`Retry after 429 failed (Dietagram): ${retryError.message}`, 'ERROR', 'BUCKET_RETRY_FAIL', { query });
-                  const status = retryError.response?.status || retryError.statusCode || 500;
+                  log(`Retry after 429 failed (USDA): ${retryError.message}`, 'ERROR', 'BUCKET_RETRY_FAIL', { query });
+                  const status = retryError.status || retryError.statusCode || 500;
                   const errorData = { error: { message: `Retry after 429 failed. Status: ${status}`, status: status, details: retryError.message } };
                   return { data: errorData, waitMs };
              }
         }
-        log(`Unhandled error during fetchDietagramSafe: ${error.message}`, 'CRITICAL', 'BUCKET_ERROR', { query });
-         const errorData = { error: { message: `Unexpected error during safe fetch: ${error.message}`, status: 500 } };
+        // General errors during the fetch process
+        log(`Unhandled error during fetchUsdaSafe: ${error.message}`, 'CRITICAL', 'BUCKET_ERROR', { query });
+         const errorData = { error: { message: `Unexpected error during safe USDA fetch: ${error.message}`, status: error.status || 500 } };
          return { data: errorData, waitMs };
     }
 }
@@ -245,10 +349,10 @@ async function fetchDietagramSafe(query, log = console.log) {
 
 
 /**
- * Internal logic for fetching nutrition data from Open Food Facts API (and Dietagram fallback).
+ * Internal logic for fetching nutrition data from Open Food Facts API (and USDA fallback).
  * Accepts a log function for consistency.
  */
-// --- MODIFICATION (Mark 50): Add Dietagram fallback query attempt ---
+// --- MODIFICATION (Mark 51): Replace Dietagram with USDA fallback ---
 async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     let openFoodFactsURL = '';
     const identifier = barcode || query;
@@ -279,7 +383,7 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
 
         if (!apiResponse.ok) {
             log(`Open Food Facts API returned: ${apiResponse.status} for ${identifierType}: ${identifier}`, 'WARN', 'OFF_RESPONSE', { status: apiResponse.status, latency_ms: latencyMs });
-            // Don't return yet, fall through to Dietagram
+            // Don't return yet, fall through to USDA
         } else {
             const data = await apiResponse.json();
             const product = barcode ? data.product : (data.products && data.products[0]);
@@ -288,7 +392,8 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
                 const nutriments = product.nutriments;
                 let calories = parseFloat(nutriments['energy-kcal_100g'] || 0);
 
-                if (!calories || calories === 0) {
+                // Check for kJ fallback
+                if (!calories || calories <= 0) { // Changed condition to <= 0
                     const kj = parseFloat(nutriments['energy-kj_100g'] || 0);
                     if (kj && kj > 0) {
                         calories = kj / KJ_TO_KCAL_FACTOR;
@@ -297,7 +402,7 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
                 }
 
                 // Only consider it "found" if we have core macros
-                if (calories > 0 && nutriments.proteins_100g && nutriments.fat_100g && nutriments.carbohydrates_100g) {
+                if (calories > 0 && nutriments.proteins_100g !== undefined && nutriments.fat_100g !== undefined && nutriments.carbohydrates_100g !== undefined) {
                     log(`Successfully fetched nutrition (OFF) for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
                     nutritionResult = {
                         status: 'found',
@@ -324,73 +429,29 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     } catch (error) {
         const latencyMs = Date.now() - startTime;
         log(`Nutrition Fetch Error (OFF) for ${identifierType} "${identifier}": ${error.message}`, 'ERROR', 'OFF_FAILURE', { latency_ms: latencyMs });
-        // Fall through to Dietagram
+        // Fall through to USDA
     }
 
-    // --- STAGE 2: Attempt Dietagram Fallback (only for queries) ---
-    // --- MODIFICATION (Mark 44.2): Use fetchDietagramSafe ---
+    // --- STAGE 2: Attempt USDA Fallback (only for queries) ---
     if (query) {
-        log(`OFF failed for query "${query}". Attempting rate-limited Dietagram fallback...`, 'INFO', 'DIETAGRAM_REQUEST');
+        log(`OFF failed for query "${query}". Attempting rate-limited USDA fallback...`, 'INFO', 'USDA_REQUEST');
 
-        let normalizedData = null;
-        let dietagramFetchError = null;
+        // --- Use fetchUsdaSafe ---
+        const { data: usdaData } = await fetchUsdaSafe(query, log);
 
-        // --- Attempt 1: Original Query ---
-        try {
-            const { data: dietagramData } = await fetchDietagramSafe(query, log);
-            if (dietagramData && !dietagramData.error) {
-                normalizedData = normalizeDietagramResponse(dietagramData, query, log);
-                if (normalizedData) {
-                    return normalizedData; // Success!
-                } else {
-                     log(`Dietagram primary query failed to parse valid data for: ${query}`, 'WARN', 'DIETAGRAM_RESPONSE');
-                }
+        if (usdaData && !usdaData.error) {
+            // Pass the raw details data to the normalizer
+            const normalizedData = normalizeUsdaResponse(usdaData, query, log);
+            if (normalizedData) {
+                return normalizedData; // Success!
             } else {
-                 dietagramFetchError = dietagramData?.error; // Store error for logging later
-                 log(`Dietagram primary query fetch failed for: ${query}`, 'WARN', 'DIETAGRAM_FAILURE', { error: dietagramFetchError });
+                log(`USDA fallback failed to parse valid data for: ${query}`, 'WARN', 'USDA_RESPONSE');
             }
-        } catch (err) {
-            // Should be caught within fetchDietagramSafe, but just in case
-            log(`Unexpected error during primary Dietagram fetch for: ${query}: ${err.message}`, 'CRITICAL', 'DIETAGRAM_FAILURE');
+        } else {
+             log(`USDA fallback fetch failed for: ${query}`, 'ERROR', 'USDA_FAILURE', { error: usdaData?.error });
         }
-
-
-        // --- Attempt 2: Simplified Fallback Query (NEW - Mark 50) ---
-        if (!normalizedData) {
-            const queryParts = query.split(' ');
-            // Take first 1 or 2 words, prioritizing core nouns if possible (simple heuristic)
-            let simplifiedQuery = queryParts[0];
-            if (queryParts.length > 1 && !['in', 'with', 'on'].includes(queryParts[1].toLowerCase())) {
-                 simplifiedQuery = `${queryParts[0]} ${queryParts[1]}`;
-            }
-
-            if (simplifiedQuery !== query && simplifiedQuery.length > 2) { // Only try if different and non-trivial
-                log(`Dietagram primary failed for "${query}". Attempting simplified fallback query: "${simplifiedQuery}"...`, 'INFO', 'DIETAGRAM_FALLBACK');
-                try {
-                    const { data: fallbackData } = await fetchDietagramSafe(simplifiedQuery, log);
-                    if (fallbackData && !fallbackData.error) {
-                        normalizedData = normalizeDietagramResponse(fallbackData, simplifiedQuery, log);
-                        if (normalizedData) {
-                             log(`Dietagram fallback query successful for: "${simplifiedQuery}" (original: "${query}")`, 'SUCCESS', 'DIETAGRAM_FALLBACK');
-                            return normalizedData; // Success on fallback!
-                        } else {
-                            log(`Dietagram fallback query failed to parse valid data for: ${simplifiedQuery}`, 'WARN', 'DIETAGRAM_FALLBACK');
-                        }
-                    } else {
-                         log(`Dietagram fallback query fetch failed for: ${simplifiedQuery}`, 'WARN', 'DIETAGRAM_FALLBACK', { error: fallbackData?.error });
-                    }
-                } catch (err) {
-                     log(`Unexpected error during fallback Dietagram fetch for: ${simplifiedQuery}: ${err.message}`, 'CRITICAL', 'DIETAGRAM_FALLBACK');
-                }
-            } else {
-                 log(`Skipping Dietagram fallback for "${query}" (query too short or identical).`, 'DEBUG', 'DIETAGRAM_FALLBACK');
-            }
-        }
-        // If we reach here, both primary and potentially fallback failed
-         log(`All Dietagram attempts failed for original query: ${query}`, 'ERROR', 'DIETAGRAM_FAILURE', { primary_error: dietagramFetchError });
-
     } else if (barcode && !query) {
-        log(`OFF failed for barcode "${barcode}". No query provided, cannot use Dietagram fallback.`, 'WARN', 'NUTRITION_FAIL');
+        log(`OFF failed for barcode "${barcode}". No query provided, cannot use USDA fallback.`, 'WARN', 'NUTRITION_FAIL');
     }
     // --- END MODIFICATION ---
 
@@ -414,6 +475,7 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
     // Fire and forget
     (async () => {
         try {
+            // Calls the updated _fetchNutritionDataFromApi with the new fallback logic
             const freshData = await _fetchNutritionDataFromApi(barcode, query, log);
             // Cache both 'found' and 'not_found' results
             if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
@@ -441,6 +503,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
         // --- MODIFICATION: Updated error message to reflect correct env var names ---
         log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
         // --- END MODIFICATION ---
+        // --- Calls the updated function with new fallback ---
         return await _fetchNutritionDataFromApi(barcode, query, log);
     }
     // --- END DEGRADATION CHECK ---
@@ -497,6 +560,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
     // 2. Cache Miss or Expired: Fetch Fresh Data
     log(`Cache Miss or Expired for ${cacheKey}`, 'INFO', 'CACHE_MISS', { key_type: keyType });
+    // --- Calls the updated function with new fallback ---
     const fetchedData = await _fetchNutritionDataFromApi(barcode, query, log);
     const fetchLatencyMs = Date.now() - startTime;
 
@@ -516,7 +580,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 }
 
 
-// --- Vercel Handler (Not used by orchestrator, doesn't use cache or advanced logging) ---
+// --- Vercel Handler (Now uses the updated fetchNutritionData) ---
 module.exports = async (request, response) => {
     // Standard headers and OPTIONS handling
     response.setHeader('Access-Control-Allow-Origin', '*');
@@ -529,7 +593,7 @@ module.exports = async (request, response) => {
     try {
         const { barcode, query } = request.query;
 
-        // --- MODIFICATION: Use the CACHED function, not the internal one ---
+        // --- Use the public CACHED function (which now includes USDA fallback) ---
         const nutritionData = await fetchNutritionData(barcode, query);
         // --- END MODIFICATION ---
 
@@ -546,5 +610,7 @@ module.exports = async (request, response) => {
     }
 };
 
+// Export the main function for the orchestrator
 module.exports.fetchNutritionData = fetchNutritionData;
+
 
