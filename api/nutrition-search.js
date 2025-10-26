@@ -1,12 +1,13 @@
 /// ========= NUTRITION-SEARCH-START ========= \\\\
 // File: api/nutrition-search.js
-// Pipeline: Avocavo → OFF → USDA → Canonical, with parallel first-pass and robust fallbacks
-// Caching: Memory + Upstash (Vercel KV). Final responses cached separately.
-// Exports:
-//   module.exports (Vercel handler)
-//   module.exports.fetchNutritionData(barcode, query, log)
+// Pipeline: Avocavo → OFF → USDA → Canonical (last-resort)
+// Parallel first pass, strict Avocavo parsing, USDA link on matches
+// Caching: Memory + Upstash (Vercel KV) with final-response cache
 //
-// All macros are per 100 g.
+// Exports:
+//   - module.exports            (Vercel handler)
+//   - module.exports.fetchNutritionData(barcode, query, log)
+// All macros per 100 g.
 
 const fetch = require('node-fetch');
 const { createClient } = require('@vercel/kv');
@@ -19,7 +20,7 @@ const USDA_KEY    = process.env.USDA_API_KEY || '';
 const KV_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
 const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
-const CACHE_PREFIX = 'nutri:v5';              // bump to invalidate old finals
+const CACHE_PREFIX = 'nutri:v6';              // bump to invalidate old finals
 const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days for final responses
 const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7; // 7 days for Avocavo ingredient cache
 const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 *30; // 30 days for Avocavo UPC cache
@@ -39,13 +40,8 @@ async function cacheGet(key) {
   const m = memGet(key);
   if (m) return m;
   if (!kvReady) return null;
-  try {
-    const hit = await kv.get(key);
-    if (hit) memSet(key, hit);
-    return hit;
-  } catch { return null; }
+  try { const hit = await kv.get(key); if (hit) memSet(key, hit); return hit; } catch { return null; }
 }
-
 async function cacheSet(key, val, ttlMs) {
   memSet(key, val);
   if (!kvReady) return;
@@ -56,10 +52,8 @@ async function cacheSet(key, val, ttlMs) {
 const normalizeKey = (s='') => s.toString().toLowerCase().trim().replace(/\s+/g, '_');
 const normFood = (q='') => q.replace(/\bbananas\b/i,'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
-function softLogTimeout(name,q){ try{ console.log(`[WARN][NUTRI_TIMEOUT] ${name} (${q})`);}catch{} }
-function withTimeout(promise, ms) {
-  return Promise.race([ promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms)) ]);
-}
+function withTimeout(promise, ms) { return Promise.race([ promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms)) ]); }
+function softLog(name,q){ try{ console.log(`[NUTRI] ${name}: ${q}`);}catch{} }
 
 // ---------- Canonical fallbacks (per 100 g) ----------
 const CANON = {
@@ -75,14 +69,7 @@ const CANON = {
   canned_tuna_in_water:       { calories: 110, protein: 25,   fat: 1.0, carbs: 0    },
   tuna_in_brine_drained:      { calories: 116, protein: 26,   fat: 0.8, carbs: 0    },
   bread_white:                { calories: 265, protein: 9,    fat: 3.2, carbs: 49   },
-  wholegrain_bread_slice:     { calories: 250, protein: 10,   fat: 3.5, carbs: 40   },
-  baby_spinach:               { calories: 23,  protein: 2.9,  fat: 0.4,  carbs: 3.6 },
-  greek_yoghurt_natural:      { calories: 60,  protein: 10,   fat: 0.3,  carbs: 3.6 },
-  whey_protein_powder:        { calories: 412, protein: 80,   fat: 7,    carbs: 6   },
-  natural_peanut_butter:      { calories: 590, protein: 25,   fat: 50,   carbs: 16  },
-  basmati_rice:               { calories: 365, protein: 7.1,  fat: 0.7,  carbs: 78.9 },
-  frozen_mixed_vegetables:    { calories: 72,  protein: 3,    fat: 0.5,  carbs: 11  },
-  chicken_breast_fillet:      { calories: 120, protein: 22,   fat: 2.6,  carbs: 0   }
+  wholegrain_bread_slice:     { calories: 250, protein: 10,   fat: 3.5, carbs: 40   }
 };
 
 function canonical(query) {
@@ -90,74 +77,97 @@ function canonical(query) {
   const k = normalizeKey(query);
   const c = CANON[k];
   if (!c) return null;
-  return { status: 'found', source: 'canonical', servingUnit: '100g', ...c };
+  return { status: 'found', source: 'canonical', servingUnit: '100g', usda_link: null, ...c };
 }
 
-// ---------- Avocavo ----------
+// ---------- USDA link helpers ----------
+function extractFdcId(any){
+  const c = [
+    any?.fdc_id, any?.fdcId, any?.fdc_id_str,
+    any?.usda_fdc_id, any?.usda?.fdc_id,
+    any?.match?.fdc_id, any?.matches?.[0]?.fdc_id,
+    any?.product?.fdc_id, any?.meta?.fdc_id
+  ];
+  const id = c.find(v => v != null && String(v).match(/^\d+$/));
+  return id ? String(id) : null;
+}
+function usdaLinkFromId(id){ return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
+
+// ---------- Avocavo strict extractor ----------
+function pick(obj, keys){ for (const k of keys){ const v = obj && obj[k]; if (v != null) return Number(v); } return null; }
+
+function extractAvocavoNutrition(n, raw) {
+  if (!n) return null;
+  const src = n.per_100g || n;
+
+  const kcal = pick(src, ['calories_total','energy_kcal','calories']);
+  const prot = pick(src, ['protein_total','proteins','protein']);
+  const fat  = pick(src, ['total_fat_total','fat','total_fat']);
+  const carb = pick(src, ['carbohydrates_total','carbohydrates','carbs']);
+
+  // Reject incomplete or all-zero
+  if ([kcal, prot, fat, carb].some(v => v == null)) return null;
+  if (kcal === 0 && prot === 0 && fat === 0 && carb === 0) return null;
+
+  const fdcId = extractFdcId(src) || extractFdcId(n) || extractFdcId(raw);
+  return {
+    status: 'found', source: 'avocavo', servingUnit: '100g',
+    calories: kcal, protein: prot, fat, carbs: carb,
+    fdcId, usda_link: usdaLinkFromId(fdcId)
+  };
+}
+
+// ---------- Avocavo calls ----------
 async function avocavoIngredient(query) {
   if (!AVOCAVO_KEY) return null;
   const key = `${CACHE_PREFIX}:avq:${normalizeKey(query)}`;
-  const c = await cacheGet(key);
-  if (c) return c;
-  const res = await fetch(`${AVOCAVO_URL}/nutrition/ingredient`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
-    body: JSON.stringify({ ingredient: query })
-  });
-  const j = await res.json().catch(() => null);
-  if (!res.ok || !j?.success) return null;
-  const n = j.nutrition || {};
-  const out = {
-    status: 'found', source: 'avocavo', servingUnit: '100g',
-    calories: Number(n.calories_total ?? n.energy_kcal ?? 0),
-    protein:  Number(n.protein_total  ?? n.proteins    ?? 0),
-    fat:      Number(n.total_fat_total?? n.fat         ?? 0),
-    carbs:    Number(n.carbohydrates_total ?? n.carbohydrates ?? 0)
-  };
-  await cacheSet(key, out, TTL_AVO_Q_MS);
-  return out;
+  const c = await cacheGet(key); if (c) return c;
+
+  try {
+    const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/ingredient`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
+      body: JSON.stringify({ ingredient: query })
+    }), 10000);
+    const j = await res.json().catch(()=>null);
+    const n = j?.nutrition || j?.result?.nutrition || j?.results?.[0]?.nutrition || null;
+    const out = extractAvocavoNutrition(n, j);
+    if (!out) return null;
+    await cacheSet(key, out, TTL_AVO_Q_MS);
+    return out;
+  } catch { softLog('avocavo:ing timeout', query); return null; }
 }
 
 async function avocavoUPC(barcode) {
   if (!AVOCAVO_KEY) return null;
   const key = `${CACHE_PREFIX}:avupc:${normalizeKey(barcode)}`;
-  const c = await cacheGet(key);
-  if (c) return c;
-  const res = await fetch(`${AVOCAVO_URL}/upc/ingredient`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
-    body: JSON.stringify({ upc: String(barcode) })
-  });
-  const j = await res.json().catch(() => null);
-  if (!res.ok || !j?.success) return null;
-  const n = j.product?.nutrition || {};
-  const out = {
-    status: 'found', source: 'avocavo', servingUnit: '100g',
-    calories: Number(n.energy_kcal ?? n.calories_total ?? 0),
-    protein:  Number(n.proteins    ?? n.protein_total  ?? 0),
-    fat:      Number(n.fat         ?? n.total_fat_total?? 0),
-    carbs:    Number(n.carbohydrates ?? n.carbohydrates_total ?? 0)
-  };
-  await cacheSet(key, out, TTL_AVO_U_MS);
-  return out;
+  const c = await cacheGet(key); if (c) return c;
+
+  try {
+    const res = await withTimeout(fetch(`${AVOCAVO_URL}/upc/ingredient`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
+      body: JSON.stringify({ upc: String(barcode) })
+    }), 10000);
+    const j = await res.json().catch(()=>null);
+    const n = j?.product?.nutrition || j?.nutrition || null;
+    const out = extractAvocavoNutrition(n, j);
+    if (!out) return null;
+    await cacheSet(key, out, TTL_AVO_U_MS);
+    return out;
+  } catch { softLog('avocavo:upc timeout', barcode); return null; }
 }
 
-// Soft wrappers that never throw
+// Soft wrapper that never throws and has its own timeout
 async function tryAvocavo(arg, isUPC) {
-  try {
-    const p = isUPC ? avocavoUPC(arg) : avocavoIngredient(arg);
-    return await withTimeout(p, 3500);
-  } catch {
-    softLogTimeout('avocavo', arg);
-    return null;
-  }
+  try { return await withTimeout(isUPC ? avocavoUPC(arg) : avocavoIngredient(arg), 3500); }
+  catch { return null; }
 }
 
 // ---------- OpenFoodFacts ----------
 async function offByBarcode(barcode) {
   const key = `${CACHE_PREFIX}:off:barcode:${normalizeKey(barcode)}`;
-  const c = await cacheGet(key);
-  if (c) return c;
+  const c = await cacheGet(key); if (c) return c;
   try {
     const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json`;
     const res = await withTimeout(fetch(url), 12000);
@@ -167,7 +177,7 @@ async function offByBarcode(barcode) {
     const nutr = json.product.nutriments || {};
     const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
     const out = {
-      status: 'found', source: 'openfoodfacts', servingUnit: '100g',
+      status: 'found', source: 'openfoodfacts', servingUnit: '100g', usda_link: null,
       calories: toNumber(kcal),
       protein:  toNumber(nutr['proteins_100g']),
       fat:      toNumber(nutr['fat_100g']),
@@ -178,16 +188,12 @@ async function offByBarcode(barcode) {
       return out;
     }
     return null;
-  } catch {
-    softLogTimeout('off:barcode', barcode);
-    return null;
-  }
+  } catch { softLog('off:barcode timeout', barcode); return null; }
 }
 
 async function offByQuery(q) {
   const key = `${CACHE_PREFIX}:off:query:${normalizeKey(q)}`;
-  const c = await cacheGet(key);
-  if (c) return c;
+  const c = await cacheGet(key); if (c) return c;
   try {
     const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=3`;
     const res = await withTimeout(fetch(url), 12000);
@@ -198,7 +204,7 @@ async function offByQuery(q) {
       const nutr = p.nutriments || {};
       const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
       const out = {
-        status: 'found', source: 'openfoodfacts', servingUnit: '100g',
+        status: 'found', source: 'openfoodfacts', servingUnit: '100g', usda_link: null,
         calories: toNumber(kcal),
         protein:  toNumber(nutr['proteins_100g']),
         fat:      toNumber(nutr['fat_100g']),
@@ -210,10 +216,7 @@ async function offByQuery(q) {
       }
     }
     return null;
-  } catch {
-    softLogTimeout('off:query', q);
-    return null;
-  }
+  } catch { softLog('off:query timeout', q); return null; }
 }
 
 // ---------- USDA ----------
@@ -242,8 +245,7 @@ function pickBestFdc(list, query) {
 async function usdaByQuery(q) {
   if (!USDA_KEY) return null;
   const key = `${CACHE_PREFIX}:usda:${normalizeKey(q)}`;
-  const c = await cacheGet(key);
-  if (c) return c;
+  const c = await cacheGet(key); if (c) return c;
   try {
     const sURL = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_KEY}&query=${encodeURIComponent(q)}&pageSize=7`;
     const sres = await withTimeout(fetch(sURL), 12000);
@@ -272,16 +274,17 @@ async function usdaByQuery(q) {
     const carb = findAmt([1005, 205]);
     if ([kcal, prot, fat, carb].some(v => v == null)) return null;
 
-    const out = { status:'found', source:'usda', servingUnit:'100g', calories:kcal, protein:prot, fat:fat, carbs:carb };
+    const out = {
+      status:'found', source:'usda', servingUnit:'100g',
+      calories:kcal, protein:prot, fat:fat, carbs:carb,
+      fdcId: String(id), usda_link: usdaLinkFromId(String(id))
+    };
     await cacheSet(key, out, TTL_NAME_MS);
     return out;
-  } catch {
-    softLogTimeout('usda:query', q);
-    return null;
-  }
+  } catch { softLog('usda:query timeout', q); return null; }
 }
 
-// ---------- Resolver with parallel first-pass ----------
+// ---------- Resolver with parallel first pass ----------
 async function fetchNutritionData(barcode, query, log = console.log) {
   query = query ? normFood(query) : query;
   const finalKey = `${CACHE_PREFIX}:final:${normalizeKey(barcode || query || '')}`;
@@ -295,9 +298,8 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
   let out = null;
   if (tasks.length) {
-    try {
-      out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null)));
-    } catch { out = null; }
+    try { out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); }
+    catch { out = null; }
   }
 
   // If race fails, fallback sequentially and include OFF barcode
@@ -306,7 +308,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
   // Canonical last
   if (!out)            out = canonical(query);
-  if (!out)            out = { status:'not_found', source:'error', reason:'no_source_succeeded' };
+  if (!out)            out = { status:'not_found', source:'error', reason:'no_source_succeeded', usda_link: null };
 
   await cacheSet(finalKey, out, TTL_FINAL_MS);
   return out;
