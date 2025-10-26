@@ -73,6 +73,66 @@ const PRICE_OUTLIER_Z_SCORE = 2.0;
 
 /// ===== CONFIG-END ===== ////
 
+//////////// VALIDATOR-CALLER START \\\\\\\\\\\\
+const VALIDATOR_ENDPOINT =
+  process.env.VALIDATOR_ENDPOINT
+  || (process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}/api/validate-products`
+      : 'http://localhost:3000/api/validate-products');
+
+/**
+ * validateAndSelect
+ * - Calls the /api/validate-products endpoint with a single-ingredient spec and candidate list
+ * - Logs request and decision
+ * - Picks first pass with confidence ≥ 0.7
+ */
+async function validateAndSelect(spec, candidates, model = 'gemini-1.5-flash', logFn) {
+  const start = Date.now();
+  const specPayload = {
+    name: spec.originalIngredient || spec.name || '',
+    form: spec.form,                             // optional
+    quantity: spec.quantity                      // optional { amount, unit: 'g'|'ml'|'count' }
+  };
+  const candPayload = candidates.map(c => ({
+    productId: String(c.product_id ?? c.id ?? ''),
+    title: c.product_name ?? c.name ?? '',
+    sizeText: c.product_size ?? c.pack_size ?? c.size ?? '',
+    categoryPath: Array.isArray(c.breadcrumbs)
+      ? c.breadcrumbs
+      : (typeof c.breadcrumbs === 'string' ? c.breadcrumbs.split('>') : [])
+  }));
+
+  try { logFn?.(`[VALIDATOR_REQUEST] ${specPayload.name} count=${candPayload.length}`, 'DEBUG', 'VALIDATOR'); } catch {}
+
+  const res = await fetch(VALIDATOR_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ spec: specPayload, candidates: candPayload, model })
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(()=> '');
+    try { logFn?.(`[VALIDATOR_ERROR] ${res.status} ${text}`, 'ERROR', 'VALIDATOR'); } catch {}
+    return { picked: undefined, results: [] };
+  }
+
+  const json = await res.json().catch(()=> ({ results: [] }));
+  const results = Array.isArray(json.results) ? json.results : [];
+  const pickedIndex = results.findIndex(r => r?.verdict === 'pass' && (r?.confidence ?? 0) >= 0.7);
+  const picked = pickedIndex >= 0 ? candidates[pickedIndex] : undefined;
+
+  try {
+    logFn?.(
+      `[VALIDATOR_DECISION] passes=${results.filter(r=>r.verdict==='pass').length} fails=${results.filter(r=>r.verdict==='fail').length} pickedIndex=${pickedIndex} t=${Date.now()-start}ms`,
+      'DEBUG',
+      'VALIDATOR'
+    );
+  } catch {}
+
+  return { picked, results };
+}
+//////////// VALIDATOR-CALLER END \\\\\\\\\\\\
+
 
 /// ===== MOCK-START ===== \\\\
 
