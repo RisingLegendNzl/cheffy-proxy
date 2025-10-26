@@ -66,10 +66,10 @@ function normalizeDietagramResponse(dietagramResponse, query, log) {
         log(`Dietagram: No results array found for query: ${query}`, 'INFO', 'DIETAGRAM_PARSE');
         return null;
     }
-    
+
     // Attempt to find the best match (e.g., first one that isn't a category)
     // This is a heuristic and might need refinement.
-    const product = dietagramResponse.find(item => item.name && item.kcal); 
+    const product = dietagramResponse.find(item => item.name && item.kcal);
 
     if (!product) {
         log(`Dietagram: No valid product with kcal found in results for: ${query}`, 'INFO', 'DIETAGRAM_PARSE');
@@ -77,7 +77,7 @@ function normalizeDietagramResponse(dietagramResponse, query, log) {
     }
 
     log(`Dietagram: Found match "${product.name}" for query: ${query}`, 'SUCCESS', 'DIETAGRAM_PARSE');
-    
+
     // Dietagram provides values per 100g
     return {
         status: 'found',
@@ -102,7 +102,7 @@ function normalizeDietagramResponse(dietagramResponse, query, log) {
  */
 async function _fetchDietagramFromApi(query, log = console.log) {
     // --- BUG FIX: Updated check to reflect new variable and provide clearer logging ---
-    if (!DIETAGRAM_API_KEY) { 
+    if (!DIETAGRAM_API_KEY) {
         log('Configuration Error: Nutrition API key (RAPIDAPI_KEY) is not set.', 'CRITICAL', 'CONFIG');
         return { error: { message: 'Server configuration error: Nutrition API key missing.', status: 500 } };
     }
@@ -125,7 +125,7 @@ async function _fetchDietagramFromApi(query, log = console.log) {
         },
         timeout: 10000 // 10 second timeout
     };
-    
+
     const attemptStartTime = Date.now();
     log(`Attempting Dietagram fetch for: ${query}`, 'DEBUG', 'DIETAGRAM_REQUEST', { url }); // Log the full URL
 
@@ -145,7 +145,7 @@ async function _fetchDietagramFromApi(query, log = console.log) {
             error.statusCode = 429;
             throw error; // Re-throw 429 to be handled by fetchDietagramSafe
         }
-        
+
         const finalErrorMessage = `Request failed. Status: ${status || 'Network/Timeout'}.`;
         return { error: { message: finalErrorMessage, status: status || 504, details: error.message } };
     }
@@ -215,7 +215,7 @@ async function fetchDietagramSafe(query, log = console.log) {
             await delay(waitTime);
         }
     } // end while(true)
-    
+
     waitMs = Date.now() - waitStart;
     log(`Acquired token for Dietagram (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
 
@@ -248,6 +248,7 @@ async function fetchDietagramSafe(query, log = console.log) {
  * Internal logic for fetching nutrition data from Open Food Facts API (and Dietagram fallback).
  * Accepts a log function for consistency.
  */
+// --- MODIFICATION (Mark 50): Add Dietagram fallback query attempt ---
 async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     let openFoodFactsURL = '';
     const identifier = barcode || query;
@@ -294,7 +295,7 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
                         log(`Used kJ fallback for ${identifierType}: ${identifier}. ${kj}kJ -> ${calories.toFixed(0)}kcal`, 'INFO', 'CALORIE_CONVERT');
                     }
                 }
-                
+
                 // Only consider it "found" if we have core macros
                 if (calories > 0 && nutriments.proteins_100g && nutriments.fat_100g && nutriments.carbohydrates_100g) {
                     log(`Successfully fetched nutrition (OFF) for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
@@ -330,19 +331,64 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     // --- MODIFICATION (Mark 44.2): Use fetchDietagramSafe ---
     if (query) {
         log(`OFF failed for query "${query}". Attempting rate-limited Dietagram fallback...`, 'INFO', 'DIETAGRAM_REQUEST');
-        
-        const { data: dietagramData } = await fetchDietagramSafe(query, log);
 
-        if (dietagramData && !dietagramData.error) {
-            const normalizedData = normalizeDietagramResponse(dietagramData, query, log);
-            if (normalizedData) {
-                return normalizedData; // Success!
+        let normalizedData = null;
+        let dietagramFetchError = null;
+
+        // --- Attempt 1: Original Query ---
+        try {
+            const { data: dietagramData } = await fetchDietagramSafe(query, log);
+            if (dietagramData && !dietagramData.error) {
+                normalizedData = normalizeDietagramResponse(dietagramData, query, log);
+                if (normalizedData) {
+                    return normalizedData; // Success!
+                } else {
+                     log(`Dietagram primary query failed to parse valid data for: ${query}`, 'WARN', 'DIETAGRAM_RESPONSE');
+                }
             } else {
-                log(`Dietagram fallback failed to parse valid data for: ${query}`, 'WARN', 'DIETAGRAM_RESPONSE');
+                 dietagramFetchError = dietagramData?.error; // Store error for logging later
+                 log(`Dietagram primary query fetch failed for: ${query}`, 'WARN', 'DIETAGRAM_FAILURE', { error: dietagramFetchError });
             }
-        } else {
-             log(`Dietagram fallback fetch failed for: ${query}`, 'ERROR', 'DIETAGRAM_FAILURE', { error: dietagramData?.error });
+        } catch (err) {
+            // Should be caught within fetchDietagramSafe, but just in case
+            log(`Unexpected error during primary Dietagram fetch for: ${query}: ${err.message}`, 'CRITICAL', 'DIETAGRAM_FAILURE');
         }
+
+
+        // --- Attempt 2: Simplified Fallback Query (NEW - Mark 50) ---
+        if (!normalizedData) {
+            const queryParts = query.split(' ');
+            // Take first 1 or 2 words, prioritizing core nouns if possible (simple heuristic)
+            let simplifiedQuery = queryParts[0];
+            if (queryParts.length > 1 && !['in', 'with', 'on'].includes(queryParts[1].toLowerCase())) {
+                 simplifiedQuery = `${queryParts[0]} ${queryParts[1]}`;
+            }
+
+            if (simplifiedQuery !== query && simplifiedQuery.length > 2) { // Only try if different and non-trivial
+                log(`Dietagram primary failed for "${query}". Attempting simplified fallback query: "${simplifiedQuery}"...`, 'INFO', 'DIETAGRAM_FALLBACK');
+                try {
+                    const { data: fallbackData } = await fetchDietagramSafe(simplifiedQuery, log);
+                    if (fallbackData && !fallbackData.error) {
+                        normalizedData = normalizeDietagramResponse(fallbackData, simplifiedQuery, log);
+                        if (normalizedData) {
+                             log(`Dietagram fallback query successful for: "${simplifiedQuery}" (original: "${query}")`, 'SUCCESS', 'DIETAGRAM_FALLBACK');
+                            return normalizedData; // Success on fallback!
+                        } else {
+                            log(`Dietagram fallback query failed to parse valid data for: ${simplifiedQuery}`, 'WARN', 'DIETAGRAM_FALLBACK');
+                        }
+                    } else {
+                         log(`Dietagram fallback query fetch failed for: ${simplifiedQuery}`, 'WARN', 'DIETAGRAM_FALLBACK', { error: fallbackData?.error });
+                    }
+                } catch (err) {
+                     log(`Unexpected error during fallback Dietagram fetch for: ${simplifiedQuery}: ${err.message}`, 'CRITICAL', 'DIETAGRAM_FALLBACK');
+                }
+            } else {
+                 log(`Skipping Dietagram fallback for "${query}" (query too short or identical).`, 'DEBUG', 'DIETAGRAM_FALLBACK');
+            }
+        }
+        // If we reach here, both primary and potentially fallback failed
+         log(`All Dietagram attempts failed for original query: ${query}`, 'ERROR', 'DIETAGRAM_FAILURE', { primary_error: dietagramFetchError });
+
     } else if (barcode && !query) {
         log(`OFF failed for barcode "${barcode}". No query provided, cannot use Dietagram fallback.`, 'WARN', 'NUTRITION_FAIL');
     }
@@ -352,6 +398,7 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     log(`All nutrition sources failed for ${identifierType}: ${identifier}`, 'WARN', 'NUTRITION_FAIL');
     return { status: 'not_found' };
 }
+// --- END MODIFICATION ---
 
 /**
  * Initiates a background refresh for a nutrition cache key.
@@ -388,7 +435,7 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
  */
 async function fetchNutritionData(barcode, query, log = console.log) {
     const startTime = Date.now();
-    
+
     // --- DEGRADATION CHECK ---
     if (!isKvConfigured()) {
         // --- MODIFICATION: Updated error message to reflect correct env var names ---
@@ -481,7 +528,7 @@ module.exports = async (request, response) => {
 
     try {
         const { barcode, query } = request.query;
-        
+
         // --- MODIFICATION: Use the CACHED function, not the internal one ---
         const nutritionData = await fetchNutritionData(barcode, query);
         // --- END MODIFICATION ---
@@ -500,5 +547,4 @@ module.exports = async (request, response) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
-
 
