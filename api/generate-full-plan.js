@@ -67,8 +67,11 @@ const NEG_EXTRA = {
   ing_olive_oil_spray: ["canola", "vegetable", "eucalyptus", "sunflower"],
   ing_canola_oil_spray: ["olive", "vegetable", "eucalyptus", "sunflower"], // Added for canola spray
   ing_diced_tomatoes: ["paste", "sundried", "cherry", "soup", "puree"],
-  ing_wholemeal_pasta: ["bread", "loaf", "flour", "rolls"]
+  ing_wholemeal_pasta: ["bread", "loaf", "flour", "rolls"],
+  ing_eggs: ["mayonnaise","mayo","aioli","custard","powder","substitute","vegan","plant"]
 };
+
+
 
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
