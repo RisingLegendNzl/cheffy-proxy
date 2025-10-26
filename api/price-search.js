@@ -9,6 +9,8 @@ const kv = createClient({
 });
 // --- END MODIFICATION ---
 
+const { validateProduct, selectBest } = require('./product-validator');
+
 // --- CONFIGURATION ---
 const RAPID_API_HOSTS = {
     Coles: 'coles-product-price-api.p.rapidapi.com',
@@ -340,5 +342,48 @@ module.exports = async (req, res) => {
 };
 // --- END MODIFICATION ---
 
+
+
+// === Validator integration helpers ===
+function buildSpec(ingredient = {}) {
+  const id = String(ingredient.ingredient_id || '').toLowerCase();
+  const spec = { requiredWords: [], negativeWords: [], mustIncludeTokens: [], mustExcludeTokens: [], allowedCategories: [] };
+  const PRODUCE_NEG = ['bread','chips','crisps','plantain','dried','muffin','cake','pie','pastry'];
+
+  if (id.includes('banana')) {
+    spec.requiredWords = ['banana'];
+    spec.negativeWords = PRODUCE_NEG;
+    spec.allowedCategories = ['produce','fruit'];
+  }
+  if (id.includes('blueberr') && id.includes('frozen')) {
+    spec.requiredWords = ['blueberr','frozen'];
+    spec.negativeWords = ['carrot','mix','medley','baton','vegetable','strawberry'];
+    spec.allowedCategories = ['frozen'];
+  }
+  if (id.includes('canola_spray') || id.includes('olive_oil_spray') || id.includes('cooking_spray')) {
+    spec.requiredWords = ['spray'];
+    spec.mustIncludeTokens = ['spray'];
+    spec.mustExcludeTokens = ['bottle','refill','pump'];
+    spec.negativeWords = ['bottle','refill','pump'];
+    spec.allowedCategories = ['oils','pantry','cooking'];
+  }
+  if (id.includes('egg')) {
+    spec.requiredWords = ['egg'];
+    spec.negativeWords = ['mayonnaise','mayo','sauce'];
+    spec.allowedCategories = ['produce','dairy','eggs'];
+  }
+  return spec;
+}
+
+function selectBestForIngredient(results = [], ingredient = {}) {
+  const spec = buildSpec(ingredient);
+  const filtered = results.filter(p => validateProduct(p, spec).ok);
+  return selectBest(filtered, spec);
+}
+
+
 module.exports.fetchPriceData = fetchPriceData;
+module.exports.selectBestForIngredient = selectBestForIngredient;
+module.exports.buildSpec = buildSpec;
+
 
