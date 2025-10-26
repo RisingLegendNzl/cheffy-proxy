@@ -1,4 +1,7 @@
 // --- ORCHESTRATOR API for Cheffy V4 ---
+// Mark 51: Further fixes based on log analysis
+// - Corrected Final Average Macro Calculation: Use actual min_g values when heuristic validation fails.
+// - Reduced MAX_DESCRIPTION_CONCURRENCY to 2 to further mitigate 429s.
 // Mark 50: Implemented fixes based on log analysis
 // - Added MAX_DESCRIPTION_CONCURRENCY and used concurrentlyMap for AI Phase 2 (Food Writer) to prevent 429s.
 // - Updated AI Phase 1 prompt to suggest wider tolerances for simple meals/snacks.
@@ -51,8 +54,10 @@ const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/mo
 const MAX_RETRIES = 3; // Retries for Gemini calls
 const MAX_NUTRITION_CONCURRENCY = 5; // Concurrency for Nutrition phase
 const MAX_MARKET_RUN_CONCURRENCY = 5; // K value for Parallel Market Run
-// --- NEW (Mark 50): Concurrency limit for AI description generation ---
-const MAX_DESCRIPTION_CONCURRENCY = 5;
+// --- MODIFICATION (Mark 51): Reduced description concurrency ---
+const MAX_DESCRIPTION_CONCURRENCY = 2; // K value for AI Phase 2 (Food Writer)
+// --- END MODIFICATION ---
+
 
 // Defines macro targets for each meal type as a percentage of the day's total.
 // NOTE: These are less critical now as targets are generated per meal by AI Phase 1
@@ -118,27 +123,31 @@ function getSanitizedFormData(formData) {
     }
 }
 
+/**
+ * Maps an array concurrently with a specified limit.
+ * Includes error handling for each item.
+ */
 async function concurrentlyMap(array, limit, asyncMapper) {
     const results = [];
     const executing = [];
     for (const item of array) {
         // Wrap asyncMapper call in a promise handler to catch errors and identify the item
-        // --- MODIFICATION (Mark 46): Use ingredient_id for error reporting if available ---
-        // --- MODIFICATION (Mark 50): Handle meal items passed for description generation ---
-        const identifier = item?.ingredient_id || item?.meal_id || item?.originalIngredient || 'unknown';
+        const identifier = item?.ingredient_id || item?.originalIngredient || item?.meal_id || 'unknown'; // Use meal_id as fallback identifier
         const promise = asyncMapper(item)
             .then(result => {
                 const index = executing.indexOf(promise);
                 if (index > -1) executing.splice(index, 1);
-                return result;
+                return result; // Return successful result
             })
             .catch(error => {
                 console.error(`Error processing item "${identifier}" in concurrentlyMap:`, error);
                 const index = executing.indexOf(promise);
                 if (index > -1) executing.splice(index, 1);
+                // Return an object indicating failure for this specific item
                 return {
                     error: error.message || 'Unknown error during async mapping',
-                    itemIdentifier: identifier // Use consistent identifier key
+                    itemIdentifier: identifier,
+                    failedItem: item // Include the original item for context if needed
                 };
             });
 
@@ -149,39 +158,81 @@ async function concurrentlyMap(array, limit, asyncMapper) {
             await Promise.race(executing);
         }
     }
-    return Promise.all(results);
+    // Use Promise.allSettled to ensure all promises resolve, even if some fail
+    const settledResults = await Promise.allSettled(results);
+
+    // Process settled results to return a consistent array (either success result or error object)
+    return settledResults.map(result => {
+        if (result.status === 'fulfilled') {
+            return result.value; // This could be the successful mapper result OR the error object we created in .catch()
+        } else {
+            // This happens if the promise itself was rejected before our .catch() could handle it (less likely)
+             console.error(`Unhandled rejection processing item in concurrentlyMap:`, result.reason);
+             // Try to find the original item based on the reason (might be fragile)
+             const failedItem = array.find(i => (i?.ingredient_id || i?.originalIngredient || i?.meal_id) === result.reason?.itemIdentifier);
+            return {
+                error: result.reason?.message || 'Unhandled rejection during async mapping',
+                itemIdentifier: result.reason?.itemIdentifier || failedItem?.ingredient_id || failedItem?.originalIngredient || failedItem?.meal_id || 'unknown_rejection',
+                failedItem: failedItem || null
+            };
+        }
+    });
 }
 
 
+/**
+ * Fetches data from a URL with retry logic for network errors and specific HTTP statuses (429, 5xx).
+ * Accepts a log function for consistent logging.
+ */
 async function fetchWithRetry(url, options, log) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             log(`Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
             const response = await fetch(url, options);
-            if (response.ok) return response;
+
+            if (response.ok) return response; // Success
+
+            // Check for retryable statuses
             if (response.status === 429 || response.status >= 500) {
-                log(`Attempt ${attempt}: Received retryable error ${response.status} from API. Retrying...`, 'WARN', 'HTTP');
+                 log(`Attempt ${attempt}: Received retryable error ${response.status} from API. Retrying...`, 'WARN', 'HTTP');
+                 // Throw an error specifically for 429 to allow distinct handling if needed upstream
+                 if (response.status === 429) {
+                     const rateLimitError = new Error(`API rate limit exceeded (429) on attempt ${attempt}.`);
+                     rateLimitError.statusCode = 429;
+                     rateLimitError.attempt = attempt;
+                     throw rateLimitError;
+                 }
             } else {
+                // Non-retryable client error (4xx other than 429)
                 const errorBody = await response.text();
                 log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from API.`, 'CRITICAL', 'HTTP', { body: errorBody });
                 throw new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`);
             }
         } catch (error) {
-             if (!error.message?.startsWith('API call failed with client error')) {
+             // Handle specific 429 error re-thrown above
+             if (error.statusCode === 429) {
+                 log(`Attempt ${error.attempt}: API Rate Limit Hit (429). Retrying...`, 'WARN', 'HTTP_RETRY');
+                 // Proceed to delay and retry logic below
+             }
+             // Handle generic network errors or errors from response.text()
+             else if (!error.message?.startsWith('API call failed with client error')) {
                 log(`Attempt ${attempt}: Fetch failed for API with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
                 console.error(`Fetch Error Details (Attempt ${attempt}):`, error);
-            } else {
+            }
+            // Non-retryable client error, re-throw immediately
+            else {
                  throw error;
             }
         }
+        // If we reached here, it was a retryable error (5xx, 429, or network issue)
         if (attempt < MAX_RETRIES) {
-            // --- Implement Exponential Backoff for 429 errors ---
-            // Example: 1s, 2s, 4s for retries 1, 2, 3
-            const delayTime = Math.pow(2, attempt) * 1000;
-            log(`Waiting ${delayTime / 1000}s before next retry...`, 'INFO', 'HTTP_RETRY');
+            // Exponential backoff
+            const delayTime = Math.pow(2, attempt - 1) * 2000; // 2s, 4s
+            log(`Waiting ${delayTime / 1000}s before next retry...`, 'INFO', 'HTTP_RETRY')
             await delay(delayTime);
         }
     }
+    // If loop completes without success
     log(`API call failed definitively after ${MAX_RETRIES} attempts to ${url}.`, 'CRITICAL', 'HTTP');
     throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
 }
@@ -287,6 +338,7 @@ function categoryOK(product, ingredient_id, log) {
 
   switch(ingredient_id){
     case 'ing_olive_oil_spray':
+    case 'ing_canola_oil_spray': // Added generic spray check
       if (!(prodCat.includes('oil') || prodCat.includes('spray') || prodCat.includes('pantry'))) {
         log(`${checkLogPrefix}: FAIL (Cat must include 'oil', 'spray', or 'pantry')`, 'DEBUG', 'CHECKLIST_CAT');
         return false;
@@ -311,7 +363,13 @@ function categoryOK(product, ingredient_id, log) {
       }
       return true;
     default:
-      return true; // Pass by default if no specific rule
+      // General check: Reject obvious non-food categories unless explicitly allowed
+      const genericBannedCats = ['health & beauty', 'household', 'baby', 'pet'];
+       if (genericBannedCats.some(banned => prodCat.includes(banned))) {
+            log(`${checkLogPrefix}: FAIL (Generic Banned Category: "${prodCat}")`, 'DEBUG', 'CHECKLIST_CAT');
+            return false;
+       }
+      return true; // Pass by default if no specific rule and not obviously non-food
   }
 }
 
@@ -380,7 +438,6 @@ function runSmarterChecklist(product, ingredientData, log) {
 
 
 function isCreativePrompt(cuisinePrompt) {
-    // (Existing logic - unchanged)
     if (!cuisinePrompt || cuisinePrompt.toLowerCase() === 'none') return false;
     const simpleKeywords = ['italian', 'mexican', 'chinese', 'thai', 'indian', 'japanese', 'mediterranean', 'french', 'spanish', 'korean', 'vietnamese', 'greek', 'american', 'british', 'german', 'russian', 'brazilian', 'caribbean', 'african', 'middle eastern', 'spicy', 'mild', 'sweet', 'sour', 'savoury', 'quick', 'easy', 'simple', 'fast', 'budget', 'cheap', 'healthy', 'low carb', 'keto', 'low fat', 'high protein', 'high fiber', 'vegetarian', 'vegan', 'gluten free', 'dairy free', 'pescatarian', 'paleo'];
     const promptLower = cuisinePrompt.toLowerCase().trim();
@@ -406,13 +463,13 @@ module.exports = async function handler(request, response) {
                 tag: tag.toUpperCase(),
                 message,
                 data: data ? JSON.parse(JSON.stringify(data, (key, value) =>
-                    typeof value === 'object' && value !== null ? value : value
+                    typeof value === 'object' && value !== null ? value : String(value) // Ensure non-object values are stringified
                 )) : null
             };
             logs.push(logEntry);
             console.log(`[${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
              if (data && (level === 'ERROR' || level === 'CRITICAL' || level === 'WARN')) {
-                 console.warn("Log Data:", data);
+                 console.warn("Log Data:", JSON.stringify(data, null, 2)); // Pretty print data for errors
              }
             return logEntry;
         } catch (error) {
@@ -523,7 +580,7 @@ module.exports = async function handler(request, response) {
 
         // --- Execute Phases 3 & 4 (Market Run & Nutrition Fetch) ---
         // --- MODIFICATION (Mark 46): Pass ingredientPlan to key nutrition map ---
-        const { finalResults, finalDailyTotals, nutritionDataMap } = await executeMarketAndNutrition(ingredientPlan, numDays, store, log);
+        const { finalResults, nutritionDataMap } = await executeMarketAndNutrition(ingredientPlan, numDays, store, log);
 
         // --- Phase 5 (Solver) & Phase 6 (AI Food Writer) ---
         log("Phase 5 & 6: Running Solver and AI Food Writer...", 'INFO', 'PHASE');
@@ -551,7 +608,8 @@ module.exports = async function handler(request, response) {
                       totalGramsRequired: finalIngredientTotals[ingredientId].totalGrams,
                       quantityUnits: finalIngredientTotals[ingredientId].quantityUnits,
                       allProducts: [],
-                      currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
+                      currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url,
+                      searchAttempts: [] // Add empty attempts array
                  };
             }
         }
@@ -561,11 +619,17 @@ module.exports = async function handler(request, response) {
         const finalResponseData = {
             // --- MODIFICATION (Mark 46): Return the plan with solution details ---
             mealPlan: finalMealPlanWithSolution,
-            uniqueIngredients: ingredientPlan.map(({ ingredient_id, originalIngredient, category, quantityUnits }) => ({ ingredient_id, originalIngredient, category, quantityUnits })), // Frontend needs original name
+            uniqueIngredients: ingredientPlan.map(({ ingredient_id, originalIngredient, category }) => ({ // Removed quantityUnits, added category
+                 ingredient_id,
+                 originalIngredient,
+                 category: category || 'Uncategorized', // Add category here for frontend grouping
+                 // Quantity units are now calculated per-ingredient after solver
+             })),
             results: finalResults, // The market data + solved gram totals (keyed by original name)
             nutritionalTargets: actualSolvedDailyTotals // The *actual* solved totals
         };
         log("Orchestrator finished successfully.", 'SUCCESS', 'SYSTEM');
+        // --- MODIFICATION (Mark 51): Add logs to successful response for frontend viewer ---
         return response.status(200).json({ ...finalResponseData, logs });
 
     } catch (error) {
@@ -580,7 +644,7 @@ module.exports = async function handler(request, response) {
 /**
  * Helper to run Market & Nutrition phases (Phases 3 & 4).
  * @param {Array} ingredientPlan - The FULL ingredient list from the LLM, including ingredient_id.
- * @returns {Object} - { finalResults, finalDailyTotals, nutritionDataMap }
+ * @returns {Object} - { finalResults, nutritionDataMap } - Removed finalDailyTotals
  */
 async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
 
@@ -599,7 +663,6 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
             let bucketWaitMs = 0;
 
             for (const [index, { type, query }] of queriesToTry.entries()) {
-                // (Existing query loop logic - unchanged, uses ingredientKey for logs)
                 if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
                 log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
                 const { data: priceData, waitMs: currentWaitMs } = await fetchPriceData(store, query, 1, log);
@@ -609,7 +672,7 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                 if (priceData.error) {
                     log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
                     currentAttemptLog.status = 'fetch_error';
-                    continue;
+                    continue; // Continue to next query type
                 }
                 const rawProducts = priceData.results || [];
                 currentAttemptLog.rawCount = rawProducts.length;
@@ -619,8 +682,14 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                     // --- MODIFIED (Mark 47): Pass full ingredient object to new checklist ---
                     const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
                     if (checklistResult.pass) {
-                        validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: checklistResult.score });
-                        pageBestScore = Math.max(pageBestScore, checklistResult.score);
+                        const unitPrice = calculateUnitPrice(rawProduct.current_price, rawProduct.product_size);
+                        // Add basic validation for unit price
+                        if (unitPrice > 0 && unitPrice < 1000) { // Reject obviously wrong unit prices
+                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: unitPrice }, score: checklistResult.score });
+                             pageBestScore = Math.max(pageBestScore, checklistResult.score);
+                        } else {
+                            log(`[${ingredientKey}] Rejecting product "${rawProduct.product_name}" due to invalid unit price: ${unitPrice}`, 'WARN', 'DATA_VALIDATION');
+                        }
                     }
                 }
                 const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
@@ -630,12 +699,13 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                     log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}, Score: ${pageBestScore.toFixed(2)}).`, 'INFO', 'DATA');
                     const currentUrls = new Set(result.allProducts.map(p => p.url));
                     filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); currentUrls.add(vp.product.url); } });
+                    // Select cheapest from the *combined* list of valid products found so far
                     foundProduct = result.allProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, result.allProducts[0]);
                     result.currentSelectionURL = foundProduct.url;
                     result.source = 'discovery';
                     currentAttemptLog.status = 'success';
                     bestScoreSoFar = Math.max(bestScoreSoFar, pageBestScore);
-                    // (Telemetry capture logic - unchanged)
+
                     let priceZ = null;
                      if (result.allProducts.length >= 3 && foundProduct.unit_price_per_100 > 0) {
                         const prices = result.allProducts.map(p => p.unit_price_per_100).filter(p => p > 0);
@@ -652,30 +722,31 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                          pages_touched: 1, // Simplified assumption
                          kept_count: result.allProducts.length,
                          price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null,
-                         mode: 'speed',
+                         mode: 'speed', // Still using speed mode
                          bucket_wait_ms: bucketWaitMs
                      });
 
                     // --- MODIFIED (Mark 47): Keep using score 1.0 for skip heuristic ---
                     if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                         log(`[${ingredientKey}] Skip heuristic hit (Score ${bestScoreSoFar.toFixed(2)}).`, 'INFO', 'MARKET_RUN');
-                        break;
+                        break; // Stop trying wider queries if tight query yields perfect score
                     }
-                    break; // "speed" mode
+                     // --- MODIFICATION (Mark 50): Remove break for speed mode - always try all queries ---
+                     // break; // "speed" mode removed - let it try normal/wide even if tight succeeds
                 } else {
                     log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA');
                     currentAttemptLog.status = 'no_match';
                 }
             } // End query loop
 
-            if (result.source === 'failed') { log(`[${ingredientKey}] Definitive fail.`, 'WARN', 'MARKET_RUN'); }
+            if (result.source === 'failed') { log(`[${ingredientKey}] Definitive fail after trying all queries.`, 'WARN', 'MARKET_RUN'); }
             // --- MODIFICATION (Mark 46): Return keyed by originalIngredient name for consistency, but keep ID ---
             return { [ingredientKey]: { ...result, ingredient_id: ingredientId } };
 
         } catch(e) {
             log(`CRITICAL Error processing single ingredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
              // --- MODIFICATION (Mark 46): Return keyed by originalIngredient name ---
-            return { [ingredient?.originalIngredient || 'unknown_error_item']: { ...(ingredient || {}), source: 'error', error: e.message } };
+            return { [ingredient?.originalIngredient || 'unknown_error_item']: { ...(ingredient || {}), source: 'error', error: e.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, searchAttempts: [{ status: 'processing_error', error: e.message}] } };
         }
     }; // End processSingleIngredient
 
@@ -702,7 +773,7 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
         if(ingredientKey && currentResult[ingredientKey]?.source === 'error') {
             log(`Processing Error for "${ingredientKey}": ${currentResult[ingredientKey].error}`, 'CRITICAL', 'MARKET_RUN');
             const failedIngredientData = ingredientPlan.find(i => i.originalIngredient === ingredientKey);
-            acc[ingredientKey] = { ...(failedIngredientData || { originalIngredient: ingredientKey }), source: 'error', error: currentResult[ingredientKey].error, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url };
+            acc[ingredientKey] = { ...(failedIngredientData || { originalIngredient: ingredientKey }), source: 'error', error: currentResult[ingredientKey].error, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, searchAttempts: [{ status: 'processing_error', error: currentResult[ingredientKey].error}] };
             return acc;
         }
         // Add successful result
@@ -717,7 +788,6 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
     log("Phase 4: Nutrition Calculation...", 'INFO', 'PHASE');
     // --- MODIFICATION (Mark 46): Initialize nutritionDataMap keyed by ingredient_id ---
     const nutritionDataMap = {}; // Key: ingredient_id, Value: { per_g: {...} }
-    let finalDailyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
     const itemsToFetchNutrition = [];
 
     // --- MODIFICATION (Mark 46): Iterate ingredientPlan to ensure we have ID ---
@@ -751,7 +821,7 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
     if (itemsToFetchNutrition.length > 0) {
         log(`Fetching/Calculating nutrition for ${itemsToFetchNutrition.length} ingredients using barcode or generic query...`, 'INFO', 'HTTP');
         const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, (item) =>
-            fetchNutritionData(item.barcode, item.query, log)
+            fetchNutritionData(item.barcode, item.query, log) // Use the updated fetchNutritionData
                 .then(nut => ({ ...item, nut }))
                 .catch(err => {
                     log(`Unhandled Nutri fetch error for "${item.ingredient_id}" (Query: ${item.query}): ${err.message}`, 'CRITICAL', 'HTTP');
@@ -763,6 +833,12 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
 
         // --- MODIFICATION (Mark 46): Populate nutritionDataMap keyed by ingredient_id ---
         nutritionResults.forEach(item => {
+             // Handle potential errors from concurrentlyMap itself
+             if (item.error && item.itemIdentifier) {
+                log(`Skipping nutrition mapping for "${item.itemIdentifier}" due to concurrentlyMap error: ${item.error}`, 'ERROR', 'NUTRITION');
+                return;
+             }
+
             const id = item.ingredient_id;
             if (item.nut?.status === 'found') {
                 // Store nutrition data per gram, keyed by ID
@@ -773,8 +849,6 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
                         f: (item.nut.fat || 0) / 100,
                         c: (item.nut.carbs || 0) / 100,
                     },
-                    // Add other useful info if available, like density (g/ml) for liquids?
-                    // density_g_per_ml: item.nut.density || null
                     source: item.nut.source || 'unknown',
                     category: ingredientPlan.find(i => i.ingredient_id === id)?.category || 'default'
                 };
@@ -799,7 +873,8 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
         log("No valid ingredients required nutrition calculation.", 'WARN', 'CALC');
     }
 
-    return { finalResults, finalDailyTotals, nutritionDataMap };
+    // --- REMOVED (Mark 51): Removed finalDailyTotals calculation here ---
+    return { finalResults, nutritionDataMap };
 };
 // --- END OF executeMarketAndNutrition HELPER ---
 
@@ -811,7 +886,6 @@ async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) {
-    // (Existing logic - unchanged)
     const GEMINI_API_URL = GEMINI_API_URL_BASE;
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
@@ -825,8 +899,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
     } catch(e){ log(`Creative AI failed: ${e.message}`,'CRITICAL','LLM'); return ""; }
 }
 
-// --- MODIFICATION (Mark 50): Updated AI Phase 1 Prompt for Tolerances & Nutrition Query ---
-// --- MODIFICATION (Mark 46 & 47): Updated AI Phase 1 for Stable IDs & Solver Mins ---
+// --- MODIFICATION (Mark 50): Updated AI Phase 1 prompt ---
 async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = GEMINI_API_URL_BASE;
@@ -837,7 +910,7 @@ async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets,
     const australianTermNote = isAustralianStore ? " Use common Australian terms." : "";
 
     // --- UPDATED SYSTEM PROMPT (Mark 50) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate shopping list ('ingredients') & meal plan ('mealPlan'). 2. INGREDIENTS: For each: a. 'originalIngredient': Full descriptive name. b. 'ingredient_id': UNIQUE slug (e.g., 'ing_chicken_breast', 'ing_rolled_oats'). Use ONLY this ID for links. c. 'tightQuery', 'normalQuery', 'wideQuery', 'nutritionQuery': As defined below. d. 'requiredWords': Array[1-3] CORE NOUNS/SYNONYMS, lowercase (e.g., ["chicken"], ["oats"], ["spinach"], ["eggs"], ["tomato", "tomatoes"], ["pasta", "spaghetti"]). e. 'negativeKeywords': Array[1-5] lowercase exclusions. f. 'category' (optional). g. 'allowedCategories' (optional). 3. QUERIES: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-3 CORE GENERIC WORDS ONLY, STORE-PREFIXED. EXCLUDE ALL modifiers: brands, sizes, forms (diced/shredded/spray), fat content, prep (microwave/canned). JUST CORE NAME (e.g., "Coles brown rice", "Coles tuna").${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. d. 'nutritionQuery': 1-2 CORE GENERIC WORDS ONLY, *NO STORE PREFIX*. For generic nutrition lookup (e.g., "chicken breast", "rolled oats"). **IMPORTANT: For sprays, include 'spray' (e.g., "canola oil spray")**. For items typically sold in liquid form, specify the liquid type if known (e.g., "tuna water", "tuna oil"). 4. MEAL PLAN: Array of days. Each day: a. 'day_id': YYYY-MM-DD or simple day number. b. 'meals': Array of meals. Each meal: i. 'meal_id': UNIQUE slug (e.g., 'd1_m1_oats'). ii. 'title': Appealing name. iii. 'type': 'B', 'L', 'D', 'S1', 'S2'. iv. 'targets': {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Calculate these by distributing daily targets based on meal type (e.g., B=20%, L=30%, D=30%, S=10% each). v. 'tol' (Tolerances): {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Set reasonable ± tolerances (e.g., kcal±50, p±10, c±15, f±10). **HINT: Use wider tolerances for snacks (S1/S2) or simple meals with < 3 ingredients (e.g., kcal±100, p±15).** vi. 'items': Array of ingredients for this meal: {'ingredient_id': ID_FROM_LIST, 'display_name': originalIngredient, 'min_g': INT, 'max_g': INT (e.g., 500)}. CRITICAL: Set a SENSIBLE CULINARY MINIMUM for 'min_g' (e.g., 50g for tomatoes in bolognese, 5g for garlic, 1g for oil spray, 100g for main protein). DO NOT default to 0 for core ingredients. Include ALL ingredients needed for the meal. 'display_name' is UI ONLY. ALL JOINS USE ingredient_id. 5. VARIETY: Max repetitions per meal title = ${maxRepetitions}. Ensure variety across days if needed. 6. CONSISTENCY: Ensure every ingredient_id used in mealPlan.items exists in the main 'ingredients' list.`;
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate shopping list ('ingredients') & meal plan ('mealPlan'). 2. INGREDIENTS: For each: a. 'originalIngredient': Full descriptive name. b. 'ingredient_id': UNIQUE slug (e.g., 'ing_chicken_breast', 'ing_rolled_oats'). Use ONLY this ID for links. c. 'tightQuery', 'normalQuery', 'wideQuery', 'nutritionQuery': As defined below. d. 'requiredWords': Array[1-3] CORE NOUNS/SYNONYMS, lowercase (e.g., ["chicken"], ["oats"], ["spinach"], ["eggs"], ["tomato", "tomatoes"], ["pasta", "spaghetti"]). e. 'negativeKeywords': Array[1-5] lowercase exclusions. f. 'category' (optional). g. 'allowedCategories' (optional). 3. QUERIES: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-3 CORE GENERIC WORDS ONLY, STORE-PREFIXED. EXCLUDE ALL modifiers: brands, sizes, forms (diced/shredded/spray), fat content, prep (microwave/canned). JUST CORE NAME (e.g., "Coles brown rice", "Coles tuna").${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. d. 'nutritionQuery': 1-2 CORE GENERIC WORDS ONLY, *NO STORE PREFIX*. For generic nutrition lookup (e.g., "chicken breast", "rolled oats", "canola oil spray" - include form like 'spray' if critical). 4. MEAL PLAN: Array of days. Each day: a. 'day_id': YYYY-MM-DD or simple day number. b. 'meals': Array of meals. Each meal: i. 'meal_id': UNIQUE slug (e.g., 'd1_m1_oats'). ii. 'title': Appealing name. iii. 'type': 'B', 'L', 'D', 'S1', 'S2'. iv. 'targets': {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Calculate these by distributing daily targets based on meal type (e.g., B=20%, L=30%, D=30%, S=10% each). v. 'tol' (Tolerances): {'kcal': INT, 'p': INT, 'c': INT, 'f': INT}. Set reasonable ± tolerances (e.g., kcal±50, p±10, c±15, f±10). **IMPORTANT: For simple snack meals (S1, S2) or meals with <= 2 ingredients, use WIDER tolerances (e.g., kcal±100, p±15, c±25, f±15) to improve solver feasibility.** vi. 'items': Array of ingredients for this meal: {'ingredient_id': ID_FROM_LIST, 'display_name': originalIngredient, 'min_g': INT, 'max_g': INT (e.g., 500)}. CRITICAL: Set a SENSIBLE CULINARY MINIMUM for 'min_g' (e.g., 50g for tomatoes in bolognese, 5g for garlic, 1g for oil spray, 100g for main protein). DO NOT default to 0 for core ingredients. Include ALL ingredients needed for the meal. 'display_name' is UI ONLY. ALL JOINS USE ingredient_id. 5. VARIETY: Max repetitions per meal title = ${maxRepetitions}. Ensure variety across days if needed. 6. CONSISTENCY: Ensure every ingredient_id used in mealPlan.items exists in the main 'ingredients' list.`;
 
     const userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Daily Target: ~${dailyNutritionalTargets.calories} kcal (P ~${dailyNutritionalTargets.protein}g, F ~${dailyNutritionalTargets.fat}g, C ~${dailyNutritionalTargets.carbs}g). Dietary: ${dietary}. Meals per day: ${eatingOccasions}. Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}. Return JSON matching schema.`;
 
@@ -848,7 +921,6 @@ async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets,
 
     log("Technical Prompt (Phase 1 - IDs & Structure)", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...', sanitizedData: getSanitizedFormData(formData) });
 
-    // --- UPDATED SCHEMA (Mark 46) ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -944,23 +1016,27 @@ async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets,
 }
 
 
-// --- AI Phase 2 (Food Writer) - Modified Input (Mark 46) ---
+// --- AI Phase 2 (Food Writer) - Modified Input & Concurrency (Mark 50) ---
 /**
  * Calls the LLM to write a human-readable meal description.
- * Accepts a list of { display_name, grams }.
+ * Accepts a single meal object containing { title, type, solution: Array<{ display_name, grams }> }.
+ * Returns the description string or a fallback string.
  */
-async function generateLLMMealDescription_Phase2(mealTitle, mealType, solvedItems, log) { // Input is now Array<{ display_name, grams }>
+async function generateLLMMealDescription_Phase2(meal, log) { // Input is now the whole meal object
+    const { title: mealTitle, type: mealType, solution: solvedItems } = meal;
     const GEMINI_API_URL = GEMINI_API_URL_BASE;
     const systemPrompt = `You are a food writer... RULES: 1. Incorporate all ingredients and their exact gram amounts (e.g., "210g", "75g"). 2. Be concise and appealing. 3. DO NOT add ingredients not listed. 4. Ignore 0g ingredients. 5. Assume grams are raw/dry unless noted.`;
 
     const ingredientList = solvedItems
-        .filter(item => item.grams > 0)
-        .map(item => `${item.grams}g ${item.display_name}`)
-        .join(', ');
+        ?.filter(item => item.grams > 0)
+        ?.map(item => `${item.grams}g ${item.display_name}`)
+        ?.join(', ') || ''; // Add safe navigation
+
+    const fallbackDescription = `A meal of ${ingredientList || mealTitle}`; // Use title if list is empty
 
     if (!ingredientList) {
-        log(`AI Phase 2: No non-zero ingredients for ${mealTitle}, returning simple title.`, 'WARN', 'LLM');
-        return mealTitle; // Return just the title if no ingredients have grams > 0
+        log(`AI Phase 2: No non-zero ingredients for ${mealTitle}, returning simple fallback.`, 'WARN', 'LLM');
+        return fallbackDescription;
     }
 
     const userQuery = `Write a description for a ${mealType} called "${mealTitle}" containing: ${ingredientList}`;
@@ -971,13 +1047,14 @@ async function generateLLMMealDescription_Phase2(mealTitle, mealType, solvedItem
         const res = await fetchWithRetry( GEMINI_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY }, body: JSON.stringify(payload) }, log );
         const result = await res.json(); const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
         if (typeof text !== 'string' || text.length === 0) {
-            log("AI Phase 2 returned non-string or empty text. Using fallback.", 'WARN', 'LLM', { result });
-            return `A meal of ${ingredientList}`; // Fallback description
+            log(`AI Phase 2 returned non-string or empty text for ${mealTitle}. Using fallback.`, 'WARN', 'LLM', { result });
+            return fallbackDescription;
         }
-        log("AI Phase 2 Raw", 'INFO', 'LLM', { raw: text }); return text.trim();
+        log(`AI Phase 2 Raw Success for ${mealTitle}`, 'INFO', 'LLM', { raw: text.substring(0, 100) + '...' });
+        return text.trim();
     } catch(e){
-        log(`AI Phase 2 (Food Writer) failed: ${e.message}. Using fallback.`, 'CRITICAL', 'LLM');
-        return `A meal of ${ingredientList}`; // Fallback description on error
+        log(`AI Phase 2 (Food Writer) failed definitively for ${mealTitle}: ${e.message}. Using fallback.`, 'CRITICAL', 'LLM');
+        return fallbackDescription; // Return fallback on definitive failure
     }
 }
 // --- END UPDATE ---
@@ -997,19 +1074,39 @@ function buildMealInputs(meal, nutritionDataMap, log) {
       log(`[Meal: ${meal.title}] Skipping "${it.display_name}" (${it.ingredient_id}) in solver: Missing nutrition data.`, 'WARN', 'SOLVER_INPUT');
       continue;
     }
+     // Add validation for min/max grams
+     const min_g = typeof it.min_g === 'number' && it.min_g >= 0 ? it.min_g : 0;
+     const max_g = typeof it.max_g === 'number' && it.max_g >= min_g ? it.max_g : 1000; // Default max 1kg
+     if (min_g !== it.min_g || max_g !== it.max_g) {
+          log(`[Meal: ${meal.title}] Corrected min/max grams for "${it.display_name}" (${it.ingredient_id}): min ${it.min_g} -> ${min_g}, max ${it.max_g} -> ${max_g}`, 'WARN', 'SOLVER_INPUT');
+     }
+
     rows.push({
       id: it.ingredient_id, // Use ID as the variable name
       display_name: it.display_name, // Keep for logging/output
-      min_g: it.min_g ?? 0,
-      max_g: it.max_g ?? 1000, // Default max if not provided
+      min_g: min_g,
+      max_g: max_g,
       kcal: nut.per_g.kcal || 0, // Default to 0 if missing
       p: nut.per_g.p || 0,
       c: nut.per_g.c || 0,
       f: nut.per_g.f || 0
     });
   }
-  // Use targets defined by AI for this meal
-  return { rows, targets: meal.targets, tolerances: meal.tol };
+   // Basic validation for targets and tolerances
+   const validatedTargets = {
+       kcal: Math.max(0, meal.targets?.kcal || 0),
+       p: Math.max(0, meal.targets?.p || 0),
+       c: Math.max(0, meal.targets?.c || 0),
+       f: Math.max(0, meal.targets?.f || 0),
+   };
+   const validatedTolerances = {
+       kcal: Math.max(10, meal.tol?.kcal || 50), // Ensure minimum tolerance
+       p: Math.max(5, meal.tol?.p || 10),
+       c: Math.max(10, meal.tol?.c || 15),
+       f: Math.max(5, meal.tol?.f || 10),
+   };
+
+  return { rows, targets: validatedTargets, tolerances: validatedTolerances };
 }
 
 
@@ -1020,22 +1117,17 @@ function buildLP(rows, targets, tolerances, log) {
         opType: "min",   // Minimize deviations (implicitly)
         constraints: {},
         variables: {},
-        // --- NEW: Add integers object for gram rounding ---
-        ints: {}
+        ints: {} // Ensure grams are integers
     };
 
     // Ingredient variables q_i (grams)
     for (const r of rows) {
         model.variables[r.id] = {
-            // Objective: tiny penalty on grams to encourage less complex solutions if multiple optimal exist
-            obj: 1e-4,
+            obj: 1e-4, // Tiny penalty on grams
+            min: r.min_g, // Use validated min
+            max: r.max_g  // Use validated max
         };
-         // --- NEW: Grams should be integers ---
-         model.ints[r.id] = 1;
-
-        // Add bounds directly to variables
-        model.variables[r.id].min = r.min_g;
-        model.variables[r.id].max = r.max_g;
+         model.ints[r.id] = 1; // Grams should be integers
     }
 
     // Constraints for each macro (within tolerance)
@@ -1043,18 +1135,17 @@ function buildLP(rows, targets, tolerances, log) {
     macros.forEach(macro => {
         const target = targets[macro];
         const tolerance = tolerances[macro];
-        const lowerBound = target - tolerance;
+        // Ensure lower bound is not negative
+        const lowerBound = Math.max(0, target - tolerance);
         const upperBound = target + tolerance;
 
-        // Define the constraint names
         const constraintLo = `${macro}_lo`;
         const constraintHi = `${macro}_hi`;
 
-        // Add constraints to the model
         model.constraints[constraintLo] = { min: lowerBound };
         model.constraints[constraintHi] = { max: upperBound };
 
-        // Add coefficients for each ingredient variable to these constraints
+        // Add coefficients
         for (const r of rows) {
             model.variables[r.id][constraintLo] = r[macro];
             model.variables[r.id][constraintHi] = r[macro];
@@ -1076,7 +1167,7 @@ function solveMealLP(meal, nutritionDataMap, log) {
     let lpResult = null;
     try {
         lpResult = solver.Solve(model);
-        log(`[Meal: ${meal.title}] LP Solver Result:`, "INFO", "LP_SOLVER", lpResult);
+        log(`[Meal: ${meal.title}] LP Solver Result:`, "DEBUG", "LP_SOLVER", lpResult); // DEBUG level for verbose result
     } catch (e) {
          log(`[Meal: ${meal.title}] LP Solver CRASHED: ${e.message}`, 'CRITICAL', 'LP_SOLVER', { model });
          return { solution: [], note: "lp_crash", feasible: false };
@@ -1102,50 +1193,40 @@ function solveMealLP(meal, nutritionDataMap, log) {
 }
 // --- END LP Solver ---
 
-// --- NEW (Mark 50): Helper to calculate totals and check tolerances ---
-const calculateTotalsAndCheckTolerance = (quantities, rows, targets, tolerances) => {
-    let kcal = 0, p = 0, c = 0, f = 0;
-    for (const r of rows) {
-        const g = quantities[r.id];
-        kcal += r.kcal * g;
-        p += r.p * g;
-        c += r.c * g;
-        f += r.f * g;
-    }
-    // Check if within tolerance
-    const withinTolerance = (
-        kcal >= targets.kcal - tolerances.kcal && kcal <= targets.kcal + tolerances.kcal &&
-        p >= targets.p - tolerances.p && p <= targets.p + tolerances.p &&
-        c >= targets.c - tolerances.c && c <= targets.c + tolerances.c &&
-        f >= targets.f - tolerances.f && f <= targets.f + tolerances.f
-    );
-    // Weighted error (prioritize calories/protein more)
-    const err = (
-        Math.abs(kcal - targets.kcal) * 1.0 +
-        Math.abs(p - targets.p) * 2.0 +
-        Math.abs(c - targets.c) * 0.7 +
-        Math.abs(f - targets.f) * 0.7
-    );
-    return { kcal, p, c, f, err, withinTolerance };
-};
-// --- END NEW ---
-
 
 // --- NEW (Mark 46): Iterative Heuristic Fallback ---
-// --- MODIFIED (Mark 50): Use shared calculation helper ---
+// --- MODIFICATION (Mark 50): Add heuristic validation check result ---
 function solveHeuristic(meal, nutritionDataMap, log) {
     const { rows, targets, tolerances } = buildMealInputs(meal, nutritionDataMap, log);
      if (rows.length === 0) {
         log(`[Meal: ${meal.title}] Heuristic Solver skipped: No ingredients with nutrition data.`, 'WARN', 'HEURISTIC_SOLVER');
-        return { solution: [], note: "no_ingredients", totals: { kcal: 0, p: 0, c: 0, f: 0 }, withinTolerance: false }; // Return initial state
+        return { solution: [], note: "no_ingredients", validationPassed: false, finalTotals: { kcal: 0, p: 0, c: 0, f: 0 } };
     }
 
     const q = Object.fromEntries(rows.map(r => [r.id, r.min_g])); // Start quantities at minimum
 
-    // --- MODIFICATION (Mark 50): Use helper function ---
-    let lastState = calculateTotalsAndCheckTolerance(q, rows, targets, tolerances);
+    const calculateTotalsAndError = (currentQuantities) => {
+        let kcal = 0, p = 0, c = 0, f = 0;
+        for (const r of rows) {
+            const g = currentQuantities[r.id];
+            kcal += r.kcal * g;
+            p += r.p * g;
+            c += r.c * g;
+            f += r.f * g;
+        }
+        // Weighted error (prioritize calories/protein more)
+        const err = (
+            Math.abs(kcal - targets.kcal) * 1.0 +
+            Math.abs(p - targets.p) * 2.0 +
+            Math.abs(c - targets.c) * 0.7 +
+            Math.abs(f - targets.f) * 0.7
+        );
+         // Return raw totals alongside the error
+        return { kcal, p, c, f, err };
+    };
 
     let step = 40; // Initial large step size
+    let lastState = calculateTotalsAndError(q);
     let iterations = 0;
     const MAX_ITERATIONS = 500; // Prevent infinite loops
 
@@ -1153,16 +1234,13 @@ function solveHeuristic(meal, nutritionDataMap, log) {
 
     while (step >= 5 && iterations < MAX_ITERATIONS) {
         let improvedThisCycle = false;
-        // Shuffle rows to avoid bias towards ingredients listed first
         const shuffledRows = [...rows].sort(() => Math.random() - 0.5);
 
-        // --- REPLACED (Mark 48): Heuristic logic to allow independent decrease checks ---
         for (const r of shuffledRows) {
             // Try increasing
             if (q[r.id] + step <= r.max_g) {
                 q[r.id] += step;
-                 // --- MODIFICATION (Mark 50): Use helper function ---
-                const newState = calculateTotalsAndCheckTolerance(q, rows, targets, tolerances);
+                const newState = calculateTotalsAndError(q);
                 if (newState.err < lastState.err) {
                     lastState = newState;
                     improvedThisCycle = true;
@@ -1175,8 +1253,7 @@ function solveHeuristic(meal, nutritionDataMap, log) {
             // Try decreasing (independently)
             if (q[r.id] - step >= r.min_g) {
                  q[r.id] -= step;
-                 // --- MODIFICATION (Mark 50): Use helper function ---
-                 const newState = calculateTotalsAndCheckTolerance(q, rows, targets, tolerances);
+                 const newState = calculateTotalsAndError(q);
                  if (newState.err < lastState.err) {
                      lastState = newState;
                      improvedThisCycle = true;
@@ -1186,10 +1263,9 @@ function solveHeuristic(meal, nutritionDataMap, log) {
                  }
              }
         }
-        // --- END REPLACEMENT (Mark 48) ---
 
         if (!improvedThisCycle) {
-            step = Math.floor(step / 2); // Reduce step size if no improvement found in a full cycle
+            step = Math.floor(step / 2); // Reduce step size
             log(`Heuristic Iter ${iterations}: No improvement found. Reducing step to ${step}g. Current Err ${lastState.err.toFixed(1)}`, 'DEBUG', 'HEURISTIC_SOLVER');
         }
         iterations++;
@@ -1208,21 +1284,27 @@ function solveHeuristic(meal, nutritionDataMap, log) {
         grams: Math.max(0, Math.round(q[r.id]))
     }));
 
-     // --- MODIFICATION (Mark 50): Return final calculated state ---
-    return { solution, note: "heuristic_fallback", totals: { kcal: lastState.kcal, p: lastState.p, c: lastState.c, f: lastState.f }, withinTolerance: lastState.withinTolerance };
+     // --- NEW (Mark 50): Perform validation check ---
+     const finalTotals = calculateTotalsAndError(q); // Use the raw totals from lastState
+     const validationPassed = (
+         Math.abs(finalTotals.kcal - targets.kcal) <= tolerances.kcal &&
+         Math.abs(finalTotals.p - targets.p) <= tolerances.p &&
+         Math.abs(finalTotals.c - targets.c) <= tolerances.c &&
+         Math.abs(finalTotals.f - targets.f) <= tolerances.f
+     );
+
+    return { solution, note: "heuristic_fallback", validationPassed, finalTotals };
 }
 // --- END Heuristic Fallback ---
 
 
-// --- Phase 5 (Solver) & Phase 6 (AI Food Writer) - UPDATED (Mark 46 & 50) ---
+// --- Phase 5 (Solver) & Phase 6 (AI Food Writer) - UPDATED (Mark 50 & 51) ---
 async function solveAndDescribePlan(structuredMealPlan, finalResults, nutritionDataMap, ingredientMapById, log) {
     const finalMealPlanWithSolution = JSON.parse(JSON.stringify(structuredMealPlan)); // Deep copy
     const finalIngredientTotals = {}; // Key: ingredient_id
-    let solvedDailyTotalsAcc = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+    let solvedDailyTotalsAcc = { calories: 0, protein: 0, fat: 0, carbs: 0 }; // Accumulator
     let daysProcessed = 0;
-    // --- MODIFICATION (Mark 50): Collect meals for concurrent description generation ---
-    const mealsForDescription = [];
-
+    const mealsForDescription = []; // Collect meals to process description generation
 
     log("Starting Phase 5: Solving Meals...", 'INFO', 'PHASE');
 
@@ -1232,102 +1314,67 @@ async function solveAndDescribePlan(structuredMealPlan, finalResults, nutritionD
 
         for (const meal of day.meals) {
             log(`Processing Meal: ${meal.title} (${meal.meal_id})`, 'DEBUG', 'SOLVER');
+            let mealCals = 0, mealProt = 0, mealFat = 0, mealCarbs = 0; // Macros for *this specific meal*
 
             let solverResult;
-            let finalSolution = [];
-            let finalNote = "unknown_failure";
-            let actualTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-            let usedFallback = false;
+            let finalSolutionItems = []; // The gram amounts used for this meal
+            let finalSolverNote = "solver_error"; // Default note
 
             try {
                 solverResult = solveMealLP(meal, nutritionDataMap, log); // Primary: LP Solver
-                if (!solverResult || !solverResult.feasible) {
-                     log(`[Meal: ${meal.title}] LP Solver failed or infeasible, attempting heuristic fallback.`, 'WARN', 'SOLVER_FALLBACK');
-                    usedFallback = true;
-                    const heuristicResult = solveHeuristic(meal, nutritionDataMap, log); // Fallback: Heuristic
-
-                    // --- NEW (Mark 50): Heuristic Output Validation ---
-                    if (!heuristicResult.withinTolerance) {
-                        log(`[Meal: ${meal.title}] Heuristic fallback FAILED to meet tolerances. Reverting to min_g values.`, 'WARN', 'HEURISTIC_VALIDATION', { heuristicTotals: heuristicResult.totals, targets: meal.targets, tolerances: meal.tol });
-                        // Revert to min_g values
-                        finalSolution = meal.items.map(item => ({
-                             ingredient_id: item.ingredient_id,
-                             display_name: item.display_name,
-                             grams: item.min_g ?? 0
-                         }));
-                        finalNote = "heuristic_tolerance_fail";
-                        // Recalculate totals based on min_g
-                         const minGTotals = calculateTotalsAndCheckTolerance(
-                             Object.fromEntries(finalSolution.map(s => [s.ingredient_id, s.grams])),
-                             buildMealInputs(meal, nutritionDataMap, log).rows, // Need rows again
-                             meal.targets,
-                             meal.tol
-                         );
-                         actualTotals = { calories: minGTotals.kcal, protein: minGTotals.p, fat: minGTotals.f, carbs: minGTotals.c };
-
-                    } else {
-                         // Heuristic succeeded and is within tolerance
-                         finalSolution = heuristicResult.solution;
-                         finalNote = heuristicResult.note;
-                         actualTotals = { calories: heuristicResult.totals.kcal, protein: heuristicResult.totals.p, fat: heuristicResult.totals.f, carbs: heuristicResult.totals.c };
-                    }
-                    // --- END NEW ---
+                if (solverResult?.feasible) {
+                    finalSolutionItems = solverResult.solution;
+                    finalSolverNote = solverResult.note;
                 } else {
-                    // LP Solver succeeded
-                    finalSolution = solverResult.solution;
-                    finalNote = solverResult.note;
-                    // Calculate totals for LP solution
-                    const lpTotals = calculateTotalsAndCheckTolerance(
-                        Object.fromEntries(finalSolution.map(s => [s.ingredient_id, s.grams])),
-                        buildMealInputs(meal, nutritionDataMap, log).rows, // Need rows again
-                        meal.targets,
-                        meal.tol
-                    );
-                    actualTotals = { calories: lpTotals.kcal, protein: lpTotals.p, fat: lpTotals.f, carbs: lpTotals.c };
+                     log(`[Meal: ${meal.title}] LP Solver failed or infeasible, attempting heuristic fallback.`, 'WARN', 'SOLVER_FALLBACK');
+                    solverResult = solveHeuristic(meal, nutritionDataMap, log); // Fallback: Heuristic
+
+                    // --- MODIFICATION (Mark 50): Use heuristic result ONLY if validation passed ---
+                    if (solverResult?.validationPassed) {
+                         finalSolutionItems = solverResult.solution;
+                         finalSolverNote = solverResult.note + "_validated"; // Mark as validated heuristic
+                         log(`[Meal: ${meal.title}] Heuristic fallback SUCCEEDED validation.`, 'INFO', 'HEURISTIC_VALIDATION', { heuristicTotals: solverResult.finalTotals });
+                    } else {
+                         // Heuristic failed validation or didn't run, revert to min_g
+                         finalSolverNote = (solverResult?.note || "heuristic_fallback") + "_tolerance_fail";
+                         log(`[Meal: ${meal.title}] Heuristic fallback FAILED to meet tolerances. Reverting to min_g values.`, 'WARN', 'HEURISTIC_VALIDATION', { heuristicTotals: solverResult?.finalTotals, targets: meal.targets, tolerances: meal.tol });
+                         // Create solution using min_g values from the original meal items
+                         const { rows } = buildMealInputs(meal, nutritionDataMap, log); // Get validated rows again
+                         finalSolutionItems = rows.map(r => ({
+                             ingredient_id: r.id,
+                             display_name: r.display_name,
+                             grams: r.min_g // Use the validated min_g
+                         }));
+                    }
                 }
             } catch (e) {
-                log(`[Meal: ${meal.title}] CRITICAL SOLVER ERROR (caught): ${e.message}. Attempting heuristic fallback.`, 'CRITICAL', 'SOLVER_FALLBACK', { stack: e.stack?.substring(0,300) });
-                usedFallback = true;
-                try {
-                     const heuristicResult = solveHeuristic(meal, nutritionDataMap, log);
-                     // --- Apply Heuristic Validation Here Too ---
-                    if (!heuristicResult.withinTolerance) {
-                         log(`[Meal: ${meal.title}] Heuristic fallback (after crash) FAILED to meet tolerances. Reverting to min_g.`, 'WARN', 'HEURISTIC_VALIDATION');
-                         finalSolution = meal.items.map(item => ({
-                             ingredient_id: item.ingredient_id,
-                             display_name: item.display_name,
-                             grams: item.min_g ?? 0
-                         }));
-                         finalNote = "heuristic_tolerance_fail_after_crash";
-                         const minGTotals = calculateTotalsAndCheckTolerance(
-                             Object.fromEntries(finalSolution.map(s => [s.ingredient_id, s.grams])),
-                             buildMealInputs(meal, nutritionDataMap, log).rows,
-                             meal.targets,
-                             meal.tol
-                         );
-                         actualTotals = { calories: minGTotals.kcal, protein: minGTotals.p, fat: minGTotals.f, carbs: minGTotals.c };
-                    } else {
-                        finalSolution = heuristicResult.solution;
-                        finalNote = heuristicResult.note + "_after_crash";
-                        actualTotals = { calories: heuristicResult.totals.kcal, protein: heuristicResult.totals.p, fat: heuristicResult.totals.f, carbs: heuristicResult.totals.c };
-                    }
-                } catch (heuristicError) {
-                     log(`[Meal: ${meal.title}] Heuristic fallback ALSO FAILED after initial crash: ${heuristicError.message}. Skipping meal solution.`, 'CRITICAL', 'SOLVER_FALLBACK');
-                     finalSolution = meal.items.map(item => ({ ingredient_id: item.ingredient_id, display_name: item.display_name, grams: 0 })); // Set grams to 0 on total failure
-                     finalNote = "heuristic_crash_after_lp_crash";
-                     actualTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-                }
+                log(`[Meal: ${meal.title}] CRITICAL SOLVER ERROR (caught): ${e.message}. Reverting to min_g values.`, 'CRITICAL', 'SOLVER_FALLBACK', { stack: e.stack?.substring(0,300) });
+                 finalSolverNote = "solver_crash_min_g_fallback";
+                 const { rows } = buildMealInputs(meal, nutritionDataMap, log); // Get validated rows
+                 finalSolutionItems = rows.map(r => ({
+                     ingredient_id: r.id,
+                     display_name: r.display_name,
+                     grams: r.min_g
+                 }));
             }
 
-            meal.solution = finalSolution; // Attach final solution: Array<{ ingredient_id, display_name, grams }>
-            meal.solver_note = finalNote; // Attach note about which solver was used or failure reason
+            meal.solution = finalSolutionItems; // Attach the final solution (LP, validated heuristic, or min_g)
+            meal.solver_note = finalSolverNote; // Attach note
 
-            // Add to grand total calculation (using finalSolution)
+            // Calculate actual macros achieved based on the FINAL solution and add to totals
             if (meal.solution && meal.solution.length > 0) {
                 meal.solution.forEach(item => {
                     const id = item.ingredient_id;
                     const grams = item.grams;
                     if (grams > 0) {
+                        const nutrition = nutritionDataMap[id]?.per_g;
+                        if (nutrition) {
+                            mealCals += nutrition.kcal * grams;
+                            mealProt += nutrition.p * grams;
+                            mealFat += nutrition.f * grams;
+                            mealCarbs += nutrition.c * grams;
+                        }
+
                         // Add to grand total (keyed by ID)
                         if (!finalIngredientTotals[id]) {
                             finalIngredientTotals[id] = { totalGrams: 0, quantityUnits: "" };
@@ -1335,24 +1382,22 @@ async function solveAndDescribePlan(structuredMealPlan, finalResults, nutritionD
                         finalIngredientTotals[id].totalGrams += grams;
                     }
                 });
-                // --- Add meal to list for description generation ---
-                mealsForDescription.push(meal);
-
+                 // Add meal to list for description generation IF it has a valid solution
+                 mealsForDescription.push(meal);
             } else {
-                 log(`[Meal: ${meal.title}] No solution found or generated by solver.`, 'WARN', 'SOLVER');
+                 log(`[Meal: ${meal.title}] No valid solution items found after solver/fallback. Macros will be zero.`, 'WARN', 'SOLVER');
             }
 
-            // Accumulate actual daily totals
-            solvedDailyTotalsAcc.calories += actualTotals.calories;
-            solvedDailyTotalsAcc.protein += actualTotals.protein;
-            solvedDailyTotalsAcc.fat += actualTotals.fat;
-            solvedDailyTotalsAcc.carbs += actualTotals.carbs;
+            // --- Accumulate totals based on the ACTUAL solution used ---
+            solvedDailyTotalsAcc.calories += mealCals;
+            solvedDailyTotalsAcc.protein += mealProt;
+            solvedDailyTotalsAcc.fat += mealFat;
+            solvedDailyTotalsAcc.carbs += mealCarbs;
 
-
-            log(`[Meal: ${meal.title}] Solution (${meal.solver_note}):`, 'DEBUG', 'SOLVER', meal.solution);
-            log(`[Meal: ${meal.title}] Solved Macros (Target vs Actual):`, 'DEBUG', 'SOLVER', {
+            log(`[Meal: ${meal.title}] Final Solution (${meal.solver_note}):`, 'DEBUG', 'SOLVER', meal.solution);
+            log(`[Meal: ${meal.title}] Final Macros (Target vs Actual):`, 'DEBUG', 'SOLVER', {
                 target: meal.targets,
-                actual: actualTotals
+                actual: { calories: mealCals, protein: mealProt, fat: mealFat, carbs: mealCarbs }
             });
         } // End meal loop
     } // End day loop
@@ -1366,59 +1411,58 @@ async function solveAndDescribePlan(structuredMealPlan, finalResults, nutritionD
          const result = finalResults[originalName]; // Look up market data by name
          const product = result?.allProducts?.find(p => p.url === result.currentSelectionURL);
          const parsedSize = product ? parseSize(product.size) : null;
-         let units = "units";
+         let units = "(Units N/A)"; // Default if calculation fails
          if (parsedSize && parsedSize.value > 0) {
              const totalGrams = finalIngredientTotals[id].totalGrams;
-             const numUnits = Math.ceil(totalGrams / parsedSize.value);
-              // Ensure numUnits is at least 1 if totalGrams > 0
-             const finalUnits = (totalGrams > 0 && numUnits < 1) ? 1 : numUnits;
-             units = `${finalUnits} x ${product.size || '?'} ${parsedSize.unit === 'g' ? 'pack(s)' : 'bottle(s)'}`;
-         } else if (product) {
+             if (totalGrams > 0) {
+                 const numUnits = Math.ceil(totalGrams / parsedSize.value);
+                 units = `${numUnits} x ${product.size || 'unit'}`;
+             } else {
+                  units = `0 x ${product.size || 'unit'}`; // Handle 0 grams case
+             }
+         } else if (product && product.size) {
              units = `(Check size: ${product.size})`;
-         } else {
-              units = `(${Math.round(finalIngredientTotals[id].totalGrams)}g total)`;
+         } else if (!product){
+              units = "(Product not found)";
          }
          finalIngredientTotals[id].quantityUnits = units; // Keep keyed by ID
     }
 
-    // --- MODIFICATION (Mark 50): Run AI Phase 2 (Food Writer) concurrently ---
+    // Run AI Phase 2 (Food Writer) concurrently
     log(`Running AI Phase 2 (Food Writer) for ${mealsForDescription.length} meals with K=${MAX_DESCRIPTION_CONCURRENCY}...`, 'INFO', 'PHASE');
-    const descriptionResults = await concurrentlyMap(
-        mealsForDescription,
-        MAX_DESCRIPTION_CONCURRENCY,
-        (meal) => generateLLMMealDescription_Phase2(meal.title, meal.type, meal.solution, log)
-            .then(desc => ({ meal_id: meal.meal_id, description: desc })) // Return description mapped to meal_id
-            .catch(err => {
-                 log(`ConcurrentlyMap caught error during description generation for ${meal.meal_id}: ${err.message}`, 'ERROR', 'LLM');
-                 return { meal_id: meal.meal_id, description: meal.title }; // Return title as fallback on caught error
-            })
+    const descriptionResults = await concurrentlyMap(mealsForDescription, MAX_DESCRIPTION_CONCURRENCY, (meal) =>
+        generateLLMMealDescription_Phase2(meal, log).then(description => ({ meal_id: meal.meal_id, description })) // Return object with ID
     );
 
-    // Map descriptions back to the final meal plan
-    const descriptionMap = descriptionResults.reduce((map, result) => {
-        if (result && !result.error && result.meal_id) {
+     // Map descriptions back to the main meal plan structure
+     const descriptionMap = descriptionResults.reduce((map, result) => {
+         // Check if the result indicates an error from concurrentlyMap
+         if (result && !result.error && result.meal_id) {
              map[result.meal_id] = result.description;
-        } else if (result && result.error) {
-             // Error handled by concurrentlyMap wrapper, use fallback from generateLLMMealDescription_Phase2
-             log(`Skipping description assignment for ${result.itemIdentifier} due to mapping error: ${result.error}`, 'WARN', 'LLM');
-        }
-        return map;
-    }, {});
+         } else if (result && result.error) {
+              log(`Skipping description mapping for meal "${result.itemIdentifier}" due to error: ${result.error}`, 'ERROR', 'LLM');
+              // Optionally find the meal in mealsForDescription and assign a default fallback if needed
+              const failedMeal = mealsForDescription.find(m => m.meal_id === result.itemIdentifier);
+              if(failedMeal) {
+                  map[result.itemIdentifier] = `A meal of ${failedMeal.solution?.filter(i => i.grams > 0).map(i => `${i.grams}g ${i.display_name}`).join(', ') || failedMeal.title}`;
+              }
+         }
+         return map;
+     }, {});
 
-    for (const day of finalMealPlanWithSolution) {
-        for (const meal of day.meals) {
-            meal.description = descriptionMap[meal.meal_id] || meal.title; // Assign description or fallback to title
-            // Optionally clean up temporary/intermediate fields if not needed by frontend
-            // delete meal.targets;
-            // delete meal.tol;
-            // delete meal.items; // Keep solution array instead
-        }
-    }
-    // --- END MODIFICATION ---
+     for (const day of finalMealPlanWithSolution) {
+         for (const meal of day.meals) {
+             meal.description = descriptionMap[meal.meal_id] || meal.title; // Use description or fallback to title
+             // Clean up temporary properties if desired
+             // delete meal.items;
+             // delete meal.targets;
+             // delete meal.tol;
+         }
+     }
 
     log("AI Phase 2 (Food Writer) complete.", 'SUCCESS', 'PHASE');
 
-    // Calculate final average daily totals
+    // Calculate final average daily totals correctly based on accumulated values
     const avgSolvedTotals = {
         calories: Math.round(solvedDailyTotalsAcc.calories / (daysProcessed || 1)),
         protein: Math.round(solvedDailyTotalsAcc.protein / (daysProcessed || 1)),
@@ -1430,7 +1474,7 @@ async function solveAndDescribePlan(structuredMealPlan, finalResults, nutritionD
     return {
         finalMealPlanWithSolution,
         finalIngredientTotals, // Keyed by ingredient_id
-        solvedDailyTotals: avgSolvedTotals
+        solvedDailyTotals: avgSolvedTotals // The correctly calculated averages
     };
 }
 // --- END UPDATE ---
@@ -1440,7 +1484,6 @@ async function solveAndDescribePlan(structuredMealPlan, finalResults, nutritionD
 
 /** Calorie Target Calculation */
 function calculateCalorieTarget(formData, log = console.log) {
-    // (Existing logic - unchanged)
     const { weight, height, age, gender, activityLevel, goal } = formData;
     const weightKg = parseFloat(weight); const heightCm = parseFloat(height); const ageYears = parseInt(age, 10);
     if (isNaN(weightKg) || isNaN(heightCm) || isNaN(ageYears) || !gender || !activityLevel || !goal) { log("Missing or invalid profile data for calorie calculation, using default 2000.", 'WARN', 'CALC', getSanitizedFormData({ weight, height, age, gender, activityLevel, goal})); return 2000; }
@@ -1454,7 +1497,6 @@ function calculateCalorieTarget(formData, log = console.log) {
 
 /** Macronutrient Distribution (Dual Validation) */
 function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
-    // (Existing logic - unchanged)
     const macroSplits = { 'cut_aggressive': { pPct: 0.35, fPct: 0.25, cPct: 0.40 }, 'cut_moderate': { pPct: 0.35, fPct: 0.25, cPct: 0.40 }, 'maintain': { pPct: 0.30, fPct: 0.30, cPct: 0.40 }, 'bulk_lean': { pPct: 0.25, fPct: 0.25, cPct: 0.50 }, 'bulk_aggressive':{ pPct: 0.20, fPct: 0.25, cPct: 0.55 } };
     const split = macroSplits[goal] || macroSplits['maintain']; if (!macroSplits[goal]) { log(`Invalid goal "${goal}" for macro split, using 'maintain' defaults.`, 'WARN', 'CALC'); }
     let proteinGrams = (calorieTarget * split.pPct) / 4; let fatGrams = (calorieTarget * split.fPct) / 9; let carbGrams = (calorieTarget * split.cPct) / 4;
