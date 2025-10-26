@@ -1,13 +1,8 @@
 /// ========= NUTRITION-SEARCH-START ========= \\\\
 // File: api/nutrition-search.js
 // Pipeline: Avocavo → OFF → USDA → Canonical (last-resort)
-// Parallel first pass, strict Avocavo parsing, USDA link on matches
-// Caching: Memory + Upstash (Vercel KV) with final-response cache
-//
-// Exports:
-//   - module.exports            (Vercel handler)
-//   - module.exports.fetchNutritionData(barcode, query, log)
-// All macros per 100 g.
+// Parallel first pass, strict parsing, USDA match link, validation
+// Caching: Memory + Upstash (Vercel KV) incl. final-response cache
 
 const fetch = require('node-fetch');
 const { createClient } = require('@vercel/kv');
@@ -20,12 +15,12 @@ const USDA_KEY    = process.env.USDA_API_KEY || '';
 const KV_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
 const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
-const CACHE_PREFIX = 'nutri:v6';              // bump to invalidate old finals
-const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days for final responses
-const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7; // 7 days for Avocavo ingredient cache
-const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 *30; // 30 days for Avocavo UPC cache
-const TTL_NAME_MS  = 1000 * 60 * 60 * 24 * 7; // 7 days for name cache (OFF/USDA)
-const TTL_BAR_MS   = 1000 * 60 * 60 * 24 *30; // 30 days for barcode cache (OFF)
+const CACHE_PREFIX = 'nutri:v6';
+const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;
+const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;
+const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 * 30;
+const TTL_NAME_MS  = 1000 * 60 * 60 * 24 * 7;
+const TTL_BAR_MS   = 1000 * 60 * 60 * 24 * 30;
 const KJ_TO_KCAL   = 4.184;
 
 // ---------- KV + Memory cache ----------
@@ -42,36 +37,31 @@ async function cacheGet(key) {
   if (!kvReady) return null;
   try { const hit = await kv.get(key); if (hit) memSet(key, hit); return hit; } catch { return null; }
 }
-async function cacheSet(key, val, ttlMs) {
+async function cacheSet(key, val, ttl) {
   memSet(key, val);
   if (!kvReady) return;
-  try { await kv.set(key, val, { px: ttlMs }); } catch {}
+  try { await kv.set(key, val, { px: ttl }); } catch {}
 }
 
 // ---------- Utilities ----------
-const normalizeKey = (s='') => s.toString().toLowerCase().trim().replace(/\s+/g, '_');
-const normFood = (q='') => q.replace(/\bbananas\b/i,'banana');
+const normalizeKey = (s = '') => s.toString().toLowerCase().trim().replace(/\s+/g, '_');
+const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
-function withTimeout(promise, ms) { return Promise.race([ promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms)) ]); }
-function softLog(name,q){ try{ console.log(`[NUTRI] ${name}: ${q}`);}catch{} }
+function withTimeout(promise, ms) { return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); }
+function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
 
-// ---------- Canonical fallbacks (per 100 g) ----------
+// ---------- Canonical (last-resort, per 100 g) ----------
 const CANON = {
   banana_fresh:               { calories: 89,  protein: 1.1,  fat: 0.3,  carbs: 22.8 },
   broccoli_fresh:             { calories: 34,  protein: 2.8,  fat: 0.4,  carbs: 7.0  },
   rolled_oats_dry:            { calories: 389, protein: 16.9, fat: 6.9,  carbs: 66.3 },
   egg_whole_raw:              { calories: 143, protein: 12.6, fat: 9.5,  carbs: 0.7  },
   soy_sauce_reduced_sodium:   { calories: 53,  protein: 8.1,  fat: 0.6,  carbs: 4.9  },
-  canola_oil_spray:           { calories: 884, protein: 0,    fat: 100, carbs: 0    },
   olive_oil:                  { calories: 884, protein: 0,    fat: 100, carbs: 0    },
-  extra_virgin_olive_oil:     { calories: 884, protein: 0,    fat: 100, carbs: 0    },
   lean_beef_mince_5_star:     { calories: 137, protein: 21,   fat: 5,   carbs: 0    },
   canned_tuna_in_water:       { calories: 110, protein: 25,   fat: 1.0, carbs: 0    },
-  tuna_in_brine_drained:      { calories: 116, protein: 26,   fat: 0.8, carbs: 0    },
-  bread_white:                { calories: 265, protein: 9,    fat: 3.2, carbs: 49   },
-  wholegrain_bread_slice:     { calories: 250, protein: 10,   fat: 3.5, carbs: 40   }
+  bread_white:                { calories: 265, protein: 9,    fat: 3.2, carbs: 49   }
 };
-
 function canonical(query) {
   if (!query) return null;
   const k = normalizeKey(query);
@@ -81,7 +71,7 @@ function canonical(query) {
 }
 
 // ---------- USDA link helpers ----------
-function extractFdcId(any){
+function extractFdcId(any) {
   const c = [
     any?.fdc_id, any?.fdcId, any?.fdc_id_str,
     any?.usda_fdc_id, any?.usda?.fdc_id,
@@ -91,65 +81,62 @@ function extractFdcId(any){
   const id = c.find(v => v != null && String(v).match(/^\d+$/));
   return id ? String(id) : null;
 }
-function usdaLinkFromId(id){ return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
+function usdaLinkFromId(id) { return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
+
+// ---------- Nutrition validation (calorie balance sanity) ----------
+function accept(out) {
+  const P = Number(out.protein), F = Number(out.fat), C = Number(out.carbs), K = Number(out.calories);
+  if (!(K > 0 && P >= 0 && F >= 0 && C >= 0)) return false;
+  const est = 4 * P + 4 * C + 9 * F;
+  return Math.abs(K - est) / Math.max(1, K) <= 0.12;
+}
 
 // ---------- Avocavo strict extractor ----------
-function pick(obj, keys){ for (const k of keys){ const v = obj && obj[k]; if (v != null) return Number(v); } return null; }
-
+function pick(obj, keys) { for (const k of keys) { const v = obj && obj[k]; if (v != null) return Number(v); } return null; }
 function extractAvocavoNutrition(n, raw) {
   if (!n) return null;
   const src = n.per_100g || n;
-
-  const kcal = pick(src, ['calories_total','energy_kcal','calories']);
-  const prot = pick(src, ['protein_total','proteins','protein']);
-  const fat  = pick(src, ['total_fat_total','fat','total_fat']);
-  const carb = pick(src, ['carbohydrates_total','carbohydrates','carbs']);
-
-  // Reject incomplete or all-zero
-  if ([kcal, prot, fat, carb].some(v => v == null)) return null;
-  if (kcal === 0 && prot === 0 && fat === 0 && carb === 0) return null;
-
+  const calories = pick(src, ['calories_total', 'energy_kcal', 'calories']);
+  const protein  = pick(src, ['protein_total', 'proteins', 'protein']);
+  const fat      = pick(src, ['total_fat_total', 'fat', 'total_fat']);
+  const carbs    = pick(src, ['carbohydrates_total', 'carbohydrates', 'carbs']);
+  if ([calories, protein, fat, carbs].some(v => v == null)) return null;
+  if (calories === 0 && protein === 0 && fat === 0 && carbs === 0) return null;
   const fdcId = extractFdcId(src) || extractFdcId(n) || extractFdcId(raw);
-  return {
-    status: 'found', source: 'avocavo', servingUnit: '100g',
-    calories: kcal, protein: prot, fat, carbs: carb,
-    fdcId, usda_link: usdaLinkFromId(fdcId)
-  };
+  const out = { status: 'found', source: 'avocavo', servingUnit: '100g', calories, protein, fat, carbs, fdcId, usda_link: usdaLinkFromId(fdcId) };
+  return accept(out) ? out : null;
 }
 
 // ---------- Avocavo calls ----------
-async function avocavoIngredient(query) {
+async function avocavoIngredient(q) {
   if (!AVOCAVO_KEY) return null;
-  const key = `${CACHE_PREFIX}:avq:${normalizeKey(query)}`;
+  const key = `${CACHE_PREFIX}:avq:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
-
   try {
     const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/ingredient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
-      body: JSON.stringify({ ingredient: query })
+      body: JSON.stringify({ ingredient: q })
     }), 10000);
-    const j = await res.json().catch(()=>null);
+    const j = await res.json().catch(() => null);
     const n = j?.nutrition || j?.result?.nutrition || j?.results?.[0]?.nutrition || null;
     const out = extractAvocavoNutrition(n, j);
     if (!out) return null;
     await cacheSet(key, out, TTL_AVO_Q_MS);
     return out;
-  } catch { softLog('avocavo:ing timeout', query); return null; }
+  } catch { softLog('avocavo:ingredient timeout', q); return null; }
 }
-
 async function avocavoUPC(barcode) {
   if (!AVOCAVO_KEY) return null;
   const key = `${CACHE_PREFIX}:avupc:${normalizeKey(barcode)}`;
   const c = await cacheGet(key); if (c) return c;
-
   try {
     const res = await withTimeout(fetch(`${AVOCAVO_URL}/upc/ingredient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
       body: JSON.stringify({ upc: String(barcode) })
     }), 10000);
-    const j = await res.json().catch(()=>null);
+    const j = await res.json().catch(() => null);
     const n = j?.product?.nutrition || j?.nutrition || null;
     const out = extractAvocavoNutrition(n, j);
     if (!out) return null;
@@ -157,8 +144,6 @@ async function avocavoUPC(barcode) {
     return out;
   } catch { softLog('avocavo:upc timeout', barcode); return null; }
 }
-
-// Soft wrapper that never throws and has its own timeout
 async function tryAvocavo(arg, isUPC) {
   try { return await withTimeout(isUPC ? avocavoUPC(arg) : avocavoIngredient(arg), 3500); }
   catch { return null; }
@@ -183,14 +168,11 @@ async function offByBarcode(barcode) {
       fat:      toNumber(nutr['fat_100g']),
       carbs:    toNumber(nutr['carbohydrates_100g'])
     };
-    if ([out.calories, out.protein, out.fat, out.carbs].every(v => v != null)) {
-      await cacheSet(key, out, TTL_BAR_MS);
-      return out;
-    }
-    return null;
+    if (!accept(out)) return null;
+    await cacheSet(key, out, TTL_BAR_MS);
+    return out;
   } catch { softLog('off:barcode timeout', barcode); return null; }
 }
-
 async function offByQuery(q) {
   const key = `${CACHE_PREFIX}:off:query:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
@@ -210,10 +192,9 @@ async function offByQuery(q) {
         fat:      toNumber(nutr['fat_100g']),
         carbs:    toNumber(nutr['carbohydrates_100g'])
       };
-      if ([out.calories, out.protein, out.fat, out.carbs].every(v => v != null)) {
-        await cacheSet(key, out, TTL_NAME_MS);
-        return out;
-      }
+      if (!accept(out)) continue;
+      await cacheSet(key, out, TTL_NAME_MS);
+      return out;
     }
     return null;
   } catch { softLog('off:query timeout', q); return null; }
@@ -223,25 +204,17 @@ async function offByQuery(q) {
 function pickBestFdc(list, query) {
   if (!Array.isArray(list) || list.length === 0) return null;
   const q = (query || '').toLowerCase();
-  const NEG = [/rolls?/i, /bread/i, /muesli/i, /bran/i, /white\s*only/i];
+  // lightweight scoring
   const score = (h) => {
     const d = (h.description || '').toLowerCase();
-    const c = (h.foodCategory || '').toLowerCase();
     let s = 0;
-    if (d.includes('rolled oats')) s += 6;
-    if (d.includes('oats')) s += 2;
-    if (d.includes('egg, whole') || d.includes('whole, raw')) s += 6;
-    if (d.includes('egg white')) s -= 6;
-    if (d.includes('soy sauce') && d.includes('low sodium')) s += 6;
-    if (NEG.some(r => r.test(d))) s -= 8;
-    if (c.includes('grain') || c.includes('cereal')) s += 1;
-    if (c.includes('eggs')) s += 1;
-    if (d.includes(q)) s += 1;
+    if (q && d.includes(q)) s += 3;
+    if (d.includes('low sodium') || d.includes('reduced sodium')) s += 1;
+    if (d.includes('egg white')) s -= 2;
     return s;
   };
-  return [...list].sort((a,b)=>score(b)-score(a))[0];
+  return [...list].sort((a, b) => score(b) - score(a))[0];
 }
-
 async function usdaByQuery(q) {
   if (!USDA_KEY) return null;
   const key = `${CACHE_PREFIX}:usda:${normalizeKey(q)}`;
@@ -268,30 +241,30 @@ async function usdaByQuery(q) {
       }
       return null;
     };
-    const kcal = findAmt([1008, 208]);
-    const prot = findAmt([1003, 203]);
-    const fat  = findAmt([1004, 204]);
-    const carb = findAmt([1005, 205]);
-    if ([kcal, prot, fat, carb].some(v => v == null)) return null;
+    const calories = findAmt([1008, 208]);
+    const protein  = findAmt([1003, 203]);
+    const fat      = findAmt([1004, 204]);
+    const carbs    = findAmt([1005, 205]);
+    if ([calories, protein, fat, carbs].some(v => v == null)) return null;
 
     const out = {
-      status:'found', source:'usda', servingUnit:'100g',
-      calories:kcal, protein:prot, fat:fat, carbs:carb,
+      status: 'found', source: 'usda', servingUnit: '100g',
+      calories, protein, fat, carbs,
       fdcId: String(id), usda_link: usdaLinkFromId(String(id))
     };
+    if (!accept(out)) return null;
     await cacheSet(key, out, TTL_NAME_MS);
     return out;
   } catch { softLog('usda:query timeout', q); return null; }
 }
 
-// ---------- Resolver with parallel first pass ----------
+// ---------- Resolver ----------
 async function fetchNutritionData(barcode, query, log = console.log) {
   query = query ? normFood(query) : query;
   const finalKey = `${CACHE_PREFIX}:final:${normalizeKey(barcode || query || '')}`;
-  const cachedFinal = await cacheGet(finalKey);
-  if (cachedFinal) return cachedFinal;
+  const cached = await cacheGet(finalKey);
+  if (cached) return cached;
 
-  // Parallel race: Avocavo (UPC/Query), OFF query, USDA query
   const tasks = [];
   if (barcode) tasks.push(tryAvocavo(barcode, true));
   if (query)   tasks.push(tryAvocavo(query, false), offByQuery(query), usdaByQuery(query));
@@ -302,13 +275,10 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     catch { out = null; }
   }
 
-  // If race fails, fallback sequentially and include OFF barcode
   if (!out && barcode) out = await offByBarcode(barcode);
   if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
-
-  // Canonical last
   if (!out)            out = canonical(query);
-  if (!out)            out = { status:'not_found', source:'error', reason:'no_source_succeeded', usda_link: null };
+  if (!out)            out = { status: 'not_found', source: 'error', reason: 'no_source_succeeded', usda_link: null };
 
   await cacheSet(finalKey, out, TTL_FINAL_MS);
   return out;
