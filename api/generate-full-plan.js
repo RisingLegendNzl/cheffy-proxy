@@ -1,4 +1,5 @@
-// --- ORCHESTRATOR API for Cheffy V4 ---
+// --- ORCHESTrator API for Cheffy V4 ---
+// Mark 53: Fixed AI Phase 1 schema for day_id (removed array type). Added retry for AI Phase 1 validation failure.
 // Mark 52: Implement fixes based on ChatGPT analysis & logs
 // - Set MAX_DESCRIPTION_CONCURRENCY = 1 (Serialize Food Writer calls).
 // - Added calculateMacrosFromSolution helper.
@@ -185,7 +186,12 @@ async function fetchWithRetry(url, options, log) {
                 // Non-retryable client error (4xx other than 429)
                 const errorBody = await response.text();
                 log(`Attempt ${attempt}: Received non-retryable client error ${response.status} from API.`, 'CRITICAL', 'HTTP', { body: errorBody });
-                throw new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`);
+                 // --- MODIFICATION (Mark 53): Include response body in error for 400 ---
+                 const clientError = new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`);
+                 clientError.statusCode = response.status;
+                 clientError.errorBody = errorBody; // Attach body for inspection
+                 throw clientError;
+                 // --- END MODIFICATION ---
             }
         } catch (error) {
              // Handle specific 429 error re-thrown above
@@ -194,11 +200,11 @@ async function fetchWithRetry(url, options, log) {
                  // Proceed to delay and retry logic below
              }
              // Handle generic network errors or errors from response.text()
-             else if (!error.message?.startsWith('API call failed with client error')) {
+             else if (error.statusCode !== 400 && !error.message?.startsWith('API call failed with client error')) { // Don't retry non-429 client errors
                 log(`Attempt ${attempt}: Fetch failed for API with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
                 console.error(`Fetch Error Details (Attempt ${attempt}):`, error);
             }
-            // Non-retryable client error, re-throw immediately
+            // Non-retryable client error (like 400), re-throw immediately
             else {
                  throw error;
             }
@@ -561,27 +567,43 @@ module.exports = async function handler(request, response) {
         let blueprintRetries = 0;
         const MAX_BLUEPRINT_RETRIES = 2; // Allow 1 retry
 
+        // --- MODIFICATION (Mark 53): Added Retry Loop for AI Phase 1 Validation ---
         while (blueprintRetries <= MAX_BLUEPRINT_RETRIES) {
             try {
-                llmResult = await generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets, creativeIdeas, log); // Pass targets object
+                llmResult = await generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets, creativeIdeas, log); // Call API
 
-                // --- Validation Check ---
+                // --- Validation Check (Moved inside try block) ---
+                // Check if result exists, has arrays, arrays are not empty, and don't contain placeholders
                 if (llmResult &&
-                    Array.isArray(llmResult.ingredients) && llmResult.ingredients.length > 0 && !(llmResult.ingredients[0] + '').startsWith('@@') && // Check for placeholder
-                    Array.isArray(llmResult.mealPlan) && llmResult.mealPlan.length > 0 && !(llmResult.mealPlan[0] + '').startsWith('@@') && // Check for placeholder
-                    llmResult.mealPlan[0].meals && llmResult.mealPlan[0].meals.length > 0)
+                    Array.isArray(llmResult.ingredients) && llmResult.ingredients.length > 0 && !(String(llmResult.ingredients[0]).startsWith('@@')) &&
+                    Array.isArray(llmResult.mealPlan) && llmResult.mealPlan.length > 0 && !(String(llmResult.mealPlan[0]).startsWith('@@')) &&
+                    llmResult.mealPlan[0].meals && Array.isArray(llmResult.mealPlan[0].meals) && llmResult.mealPlan[0].meals.length > 0)
                 {
                     log(`AI Phase 1 validation passed (Attempt ${blueprintRetries + 1}).`, 'INFO', 'LLM_VALIDATION');
-                    break; // Exit loop on success
+                    break; // Exit loop on successful validation
                 } else {
-                    throw new Error("AI Phase 1 returned invalid structure or placeholder data.");
+                    // Log specific validation failure reason
+                    let validationError = "AI Phase 1 returned invalid structure.";
+                    if (!llmResult || !Array.isArray(llmResult.ingredients) || !Array.isArray(llmResult.mealPlan)) validationError = "Missing ingredients or mealPlan array.";
+                    else if (llmResult.ingredients.length === 0 || llmResult.mealPlan.length === 0) validationError = "Ingredients or mealPlan array is empty.";
+                    else if (String(llmResult.ingredients[0]).startsWith('@@') || String(llmResult.mealPlan[0]).startsWith('@@')) validationError = "Response contained placeholder data ('@@...@@').";
+                    else if (!llmResult.mealPlan[0].meals || !Array.isArray(llmResult.mealPlan[0].meals) || llmResult.mealPlan[0].meals.length === 0) validationError = "MealPlan day 1 is missing valid 'meals' array.";
+                    log(validationError, 'WARN', 'LLM_VALIDATION', { llmResultSnippet: JSON.stringify(llmResult)?.substring(0, 500) });
+                    throw new Error(validationError); // Throw validation error to trigger retry
                 }
             } catch (error) {
                 log(`AI Phase 1 FAILED (Attempt ${blueprintRetries + 1}/${MAX_BLUEPRINT_RETRIES + 1}): ${error.message}`, 'WARN', 'LLM', { errorData: error, llmResult });
-                blueprintRetries++;
+                blueprintRetries++; // Increment retry counter
                 if (blueprintRetries > MAX_BLUEPRINT_RETRIES) {
+                    // If retries exceeded, throw final error
                     log("AI Phase 1 failed definitively after retries.", 'CRITICAL', 'LLM');
-                    throw new Error(`Blueprint fail: AI Phase 1 failed after ${MAX_BLUEPRINT_RETRIES + 1} attempts. Last error: ${error.message}`);
+                    // --- MODIFICATION (Mark 53): Include Gemini 400 body in final error if available ---
+                    let finalErrorMessage = `Blueprint fail: AI Phase 1 failed after ${MAX_BLUEPRINT_RETRIES + 1} attempts. Last error: ${error.message}`;
+                    if (error.statusCode === 400 && error.errorBody) {
+                        finalErrorMessage += ` | API Error Body: ${error.errorBody.substring(0, 500)}`; // Add snippet of 400 error body
+                    }
+                    throw new Error(finalErrorMessage);
+                    // --- END MODIFICATION ---
                 }
                 log(`Retrying AI Phase 1 after a short delay...`, 'INFO', 'LLM_RETRY');
                 await delay(2000); // Wait 2 seconds before retrying
@@ -680,7 +702,7 @@ module.exports = async function handler(request, response) {
 
 /**
  * Helper to run Market & Nutrition phases (Phases 3 & 4).
- * @param {Array} ingredientPlan - The FULL ingredient list from the LLM, including ingredient_id.
+ * @param {Array} ingredientPlan - The FULL ingredient list from the LLM.
  * @returns {Object} - { finalResults, nutritionDataMap }
  */
 async function executeMarketAndNutrition(ingredientPlan, numDays, store, log) {
@@ -990,7 +1012,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
     }
 }
 
-// --- Updated AI Phase 1 prompt (Mark 50) ---
+// --- Updated AI Phase 1 prompt (Mark 50) & Schema (Mark 53) ---
 async function generateLLMPlanAndMeals_Phase1(formData, dailyNutritionalTargets, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = GEMINI_API_URL_BASE;
@@ -1020,7 +1042,7 @@ RULES:
     * "category" (Optional): Broad grocery category (e.g., "Poultry", "Pantry", "Produce", "Frozen").
     * "allowedCategories" (Optional): Array of lowercase store categories if known (e.g., ["meat & seafood", "poultry"]).
 3.  **Meal Plan Array:** Array of day objects. Each day object:
-    * "day_id": Simple day number (e.g., 1, 2, 3).
+    * "day_id": Simple day identifier as a STRING (e.g., "1", "2", "3").
     * "meals": Array of meal objects for the day. Each meal object:
         * "meal_id": UNIQUE slug (e.g., "d1_m1_oats", "d1_m2_chicken_rice").
         * "title": Appealing, descriptive meal name.
@@ -1083,7 +1105,9 @@ Return ONLY the valid JSON object matching the schema provided in the system ins
                     "mealPlan": {
                         type: "ARRAY", items: {
                             type: "OBJECT", properties: {
-                                "day_id": { type: ["STRING", "NUMBER"] }, // Allow string or number
+                                // --- MODIFICATION (Mark 53): Changed type to STRING ---
+                                "day_id": { type: "STRING" },
+                                // --- END MODIFICATION ---
                                 "meals": {
                                     type: "ARRAY", items: {
                                         type: "OBJECT", properties: {
@@ -1132,8 +1156,8 @@ Return ONLY the valid JSON object matching the schema provided in the system ins
                 throw new Error("LLM response missing required top-level arrays ('ingredients', 'mealPlan').");
             }
              // Add a check for placeholders specifically
-             if ( (parsed.ingredients[0] && (parsed.ingredients[0]+'').startsWith('@@')) ||
-                  (parsed.mealPlan[0] && (parsed.mealPlan[0]+'').startsWith('@@')) ) {
+             if ( (parsed.ingredients.length > 0 && String(parsed.ingredients[0]).startsWith('@@')) || // Check first element if exists
+                  (parsed.mealPlan.length > 0 && String(parsed.mealPlan[0]).startsWith('@@')) ) { // Check first element if exists
                   throw new Error("LLM response contained placeholder data ('@@...@@').");
              }
             return parsed; // Return successfully parsed and validated data
