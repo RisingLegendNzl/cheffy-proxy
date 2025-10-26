@@ -1,7 +1,6 @@
 // api/product-validator.js
 // Purpose: deterministic product filtering to stop mismatches (e.g., carrots for berries, bottle oil for spray)
-// Usage: const { validateProduct } = require('./product-validator');
-//        const verdict = validateProduct(product, spec)
+// Usage: const { validateProduct, selectBest } = require('./product-validator');
 
 const WORD = /[a-z0-9]+/gi;
 
@@ -11,15 +10,15 @@ function norm(s) {
 function tokens(s) {
   return norm(s).match(WORD) || [];
 }
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 function hasWholeWord(haystack, needle) {
   if (!needle) return false;
   const h = ` ${norm(haystack)} `;
   const n = norm(needle).replace(/\s+/g, ' ');
   const re = new RegExp(`\\b${escapeRegExp(n)}\\b`, 'i');
   return re.test(h);
-}
-function escapeRegExp(str) {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function fieldBag(p) {
@@ -30,10 +29,18 @@ function fieldBag(p) {
   return norm(fields);
 }
 
+function toBase(value, unit) {
+  if (!Number.isFinite(value)) return null;
+  switch (unit) {
+    case 'kg': return Math.round(value * 1000);   // g
+    case 'g':  return Math.round(value);
+    case 'l':  return Math.round(value * 1000);   // ml
+    case 'ml': return Math.round(value);
+    default:   return null;
+  }
+}
+
 function numericSize(p) {
-  // Try to derive a size number in grams/ml if possible
-  // Accept fields: p.size, p.net, p.net_weight, p.quantity, p.unit, p.pack
-  // Examples: "500 g", "1kg", "400ml", "6 x 125g"
   const s = [p.size, p.net, p.net_weight, p.quantity, p.package].filter(Boolean).join(' ').toLowerCase();
   if (!s) return null;
 
@@ -50,17 +57,6 @@ function numericSize(p) {
   if (m) return toBase(Number(m[1]), m[2]);
 
   return null;
-}
-
-function toBase(value, unit) {
-  if (!Number.isFinite(value)) return null;
-  switch (unit) {
-    case 'kg': return Math.round(value * 1000);   // g
-    case 'g':  return Math.round(value);
-    case 'l':  return Math.round(value * 1000);   // ml
-    case 'ml': return Math.round(value);
-    default:   return null;
-  }
 }
 
 function containsAny(text, list = []) {
@@ -109,60 +105,42 @@ function fail(reason, extra) {
 /**
  * Validate a single product.
  * @param {Object} product - raw product object from retailer search
- *   expected fields: title, name, brand, category, price, url, size, description, package
  * @param {Object} spec - validation rules
- *   {
- *     requiredWords: [],        // ALL must be present as whole words
- *     negativeWords: [],        // NONE may be present
- *     mustIncludeTokens: [],    // alias for required gate
- *     mustExcludeTokens: [],    // alias for negative gate
- *     minPrice: null, maxPrice: null,
- *     minSize: null, maxSize: null, // in grams or ml base; validator auto parses
- *     allowedCategories: [], disallowedCategories: [],
- *     preferBrands: [], avoidBrands: [],
- *     country: 'AU' | 'US' | ... (optional, unused here but reserved)
- *   }
- * @returns {{ok:boolean,score?:number,reasons?:string[]}}
- */
+ * @returns {{ok:boolean,score?:number,reasons?:string[]}} */
 function validateProduct(product = {}, spec = {}) {
   const title = fieldBag(product);
   if (!title) return fail('empty');
 
-  // 1) Hard word gates
+  // Hard word gates
   if (!passesRequiredWords(title, spec.requiredWords || [])) return fail('requiredWords');
   if (!passesMustInclude(title, spec.mustIncludeTokens || [])) return fail('mustInclude');
   if (!passesMustExclude(title, spec.mustExcludeTokens || [])) return fail('mustExclude');
   if (containsAny(title, spec.negativeWords || [])) return fail('negativeWords');
 
-  // 2) Category allow/deny
+  // Category allow/deny
   const cat = norm(product.category || product.subcategory || '');
   if ((spec.allowedCategories || []).length && !containsAny(cat, spec.allowedCategories)) return fail('categoryNotAllowed');
   if ((spec.disallowedCategories || []).length && containsAny(cat, spec.disallowedCategories)) return fail('categoryDenied');
 
-  // 3) Size gates
+  // Size gates
   const sz = numericSize(product);
   if (Number.isFinite(spec.minSize) && Number.isFinite(sz) && sz < spec.minSize) return fail('sizeTooSmall', { sz });
   if (Number.isFinite(spec.maxSize) && Number.isFinite(sz) && sz > spec.maxSize) return fail('sizeTooLarge', { sz });
 
-  // 4) Price gates
+  // Price gates
   const price = Number(product.price);
   if (Number.isFinite(spec.minPrice) && Number.isFinite(price) && price < spec.minPrice) return fail('priceTooLow');
   if (Number.isFinite(spec.maxPrice) && Number.isFinite(price) && price > spec.maxPrice) return fail('priceTooHigh');
 
-  // 5) Brand score and final score
+  // Brand and relevance
   const bScore = brandScore(product.brand, spec.preferBrands || [], spec.avoidBrands || []);
-  // Title token relevance score: count of required words present (already ensured all present)
   const reqCount = (spec.requiredWords || []).length;
-  const baseRelevance = reqCount ? reqCount : 1;
-  const score = baseRelevance + bScore;
+  const score = (reqCount ? reqCount : 1) + bScore;
 
   return { ok: true, score };
 }
 
-/**
- * Rank a list of products with the same spec.
- * Filters out all failing products and sorts by score desc then price asc.
- */
+/** Rank a list of products with the same spec. */
 function selectBest(products = [], spec = {}) {
   const results = [];
   for (const p of products) {
@@ -170,8 +148,7 @@ function selectBest(products = [], spec = {}) {
     if (v.ok) results.push({ product: p, score: v.score });
   }
   results.sort((a, b) => {
-    const sa = a.score, sb = b.score;
-    if (sb !== sa) return sb - sa;
+    if (b.score !== a.score) return b.score - a.score;
     const pa = Number(a.product.price), pb = Number(b.product.price);
     if (Number.isFinite(pa) && Number.isFinite(pb)) return pa - pb;
     return 0;
