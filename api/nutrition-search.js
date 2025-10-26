@@ -1,219 +1,166 @@
 const fetch = require('node-fetch');
-// --- REMOVED (Mark 51): Import axios (no longer needed) ---
-// --- MODIFICATION: Import createClient instead of the default kv instance ---
+// --- REMOVED (Mark 51): Import axios ---
 const { createClient } = require('@vercel/kv');
 
-// --- MODIFICATION: Create a client instance using your Upstash variables ---
+// --- Create KV client ---
 const kv = createClient({
-    url: process.env.UPstash_REDIS_REST_URL, // Corrected env variable name if needed
+    url: process.env.UPSTASH_REDIS_REST_URL,
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
-// --- END MODIFICATION ---
 
 // --- CACHE CONFIGURATION ---
 const TTL_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 30; // 30 days (OFF Barcode)
-const SWR_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 10; // Stale While Revalidate after 10 days
+const SWR_NUTRI_BARCODE_MS = 1000 * 60 * 60 * 24 * 10;
 const TTL_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 7;    // 7 days (OFF Name, USDA Name)
-const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;     // Stale While Revalidate after 2 days
+const SWR_NUTRI_NAME_MS = 1000 * 60 * 60 * 24 * 2;
 const CACHE_PREFIX_NUTRI = 'nutri';
 
-// --- REMOVED (Mark 51): DIETAGRAM API CONFIGURATION ---
-
-// --- NEW (Mark 51): USDA API CONFIGURATION ---
+// --- USDA API CONFIGURATION ---
 const USDA_API_KEY = process.env.USDA_API_KEY;
 const USDA_SEARCH_URL = 'https://api.nal.usda.gov/fdc/v1/foods/search';
 const USDA_DETAILS_URL = 'https://api.nal.usda.gov/fdc/v1/food/'; // Append {fdcId}?api_key=...
 
-// --- TOKEN BUCKET CONFIGURATION (Now for USDA) ---
-const BUCKET_CAPACITY = 10; // Keep capacity reasonable
-const BUCKET_REFILL_RATE = 1; // USDA default limit is lower (1 req/sec), adjust if needed based on plan
-const BUCKET_RETRY_DELAY_MS = 1100; // Delay slightly longer than 1 sec after a 429
+// --- TOKEN BUCKET CONFIGURATION (USDA) ---
+const BUCKET_CAPACITY = 10;
+const BUCKET_REFILL_RATE = 1; // 1 req/sec base limit
+const BUCKET_RETRY_DELAY_MS = 1100;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-// --- END NEW ---
 
 // --- CONSTANT FOR UNIT CORRECTION ---
 const KJ_TO_KCAL_FACTOR = 4.184;
 
-// Keep track of ongoing background refreshes within this invocation
+// Track ongoing refreshes
 const inflightRefreshes = new Set();
 
-/**
- * Normalizes strings for consistent cache keys.
- * @param {string} str - Input string.
- * @returns {string} Normalized string (lowercase, trimmed).
- */
+// Normalize cache keys
 const normalizeKey = (str) => (str || '').toString().toLowerCase().trim().replace(/\s+/g, '_');
 
-// --- HELPER TO CHECK KV STATUS ---
-// --- MODIFICATION: Check for your Upstash variables instead of Vercel's KV variables ---
+// Check if KV is configured
 const isKvConfigured = () => {
-    // Check for both URL and TOKEN
     return process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
 };
-// --- END MODIFICATION ---
 
-// --- REMOVED (Mark 51): Dietagram Normalizer ---
 
-// --- NEW (Mark 51): USDA Normalizer ---
+// --- NEW (Mark 53): Fixed USDA Normalizer ---
 /**
- * Normalizes a response from the USDA FoodData Central API (details endpoint)
- * into our standard nutrition object.
- * @param {object} usdaDetailsResponse - The raw response from USDA details API.
- * @param {string} query - The original query, for logging.
- * @param {function} log - The logger function.
- * @returns {object} Our standard nutrition object, or null if data is invalid.
+ * Normalizes USDA FoodData Central API details response.
  */
 function normalizeUsdaResponse(usdaDetailsResponse, query, log) {
     if (!usdaDetailsResponse || !Array.isArray(usdaDetailsResponse.foodNutrients)) {
-        log(`USDA: No valid foodNutrients array found for query: ${query} (FDC ID: ${usdaDetailsResponse?.fdcId})`, 'WARN', 'USDA_PARSE');
+        log(`USDA: No valid foodNutrients array for query: ${query} (FDC ID: ${usdaDetailsResponse?.fdcId})`, 'WARN', 'USDA_PARSE');
         return null;
     }
 
     const nutrients = usdaDetailsResponse.foodNutrients;
-    const findNutrient = (ids, targetUnit = 'G', allowNameFallback = true) => {
-        for (const id of ids) {
-            const nutrient = nutrients.find(n => n.nutrient?.id === id);
-            if (nutrient && nutrient.amount !== undefined && nutrient.amount !== null) {
-                const unit = (nutrient.unitName || '').toUpperCase();
-                let amount = parseFloat(nutrient.amount);
-                if (isNaN(amount)) continue;
+    const foodDescription = usdaDetailsResponse.description || 'Unknown Food';
+    const fdcId = usdaDetailsResponse.fdcId || 'N/A';
+    log(`USDA: Normalizing response for "${foodDescription}" (FDC ID: ${fdcId})`, 'DEBUG', 'USDA_PARSE');
 
-                if (unit === targetUnit.toUpperCase()) {
-                    return amount;
-                } else if (targetUnit.toUpperCase() === 'G' && unit === 'MG') {
-                    return amount / 1000; // Convert mg to g
-                } else if (targetUnit.toUpperCase() === 'KCAL' && unit === 'KJ') {
-                     // Check if kcal is already present before converting KJ
-                     const kcalNutrient = nutrients.find(n => n.nutrient?.id === 208 || n.nutrient?.id === 1008);
-                     if (kcalNutrient && kcalNutrient.amount !== undefined && !isNaN(parseFloat(kcalNutrient.amount)) && parseFloat(kcalNutrient.amount) > 0) {
-                         log(`USDA: Found direct kcal value for ID ${id}, skipping KJ conversion.`, 'DEBUG', 'USDA_PARSE');
-                         continue; // Skip KJ if kcal exists and is valid
-                     }
-                     log(`USDA: Converting KJ to Kcal for ID ${id} (${amount} ${unit})`, 'DEBUG', 'USDA_PARSE');
-                     return amount / KJ_TO_KCAL_FACTOR; // Convert kJ to kcal
+    // Robust helper to find nutrient value, handles units and conversions
+    const findNutrientValue = (nutrientIds, targetUnit) => {
+        let foundValue = null;
+        let foundUnit = '';
+
+        for (const nutrientId of nutrientIds) {
+            const nutrient = nutrients.find(n => n.nutrient?.id === nutrientId && n.amount !== undefined && n.amount !== null);
+            if (nutrient) {
+                const value = parseFloat(nutrient.amount);
+                const unit = (nutrient.unitName || '').toUpperCase();
+                log(`USDA: Found nutrient ID ${nutrientId}, Value: ${value}, Unit: ${unit}`, 'DEBUG', 'USDA_PARSE_DETAIL');
+
+                if (!isNaN(value)) {
+                    if (unit === targetUnit.toUpperCase()) {
+                        foundValue = value;
+                        foundUnit = unit;
+                        log(`USDA: Matched ID ${nutrientId} with exact unit ${unit}.`, 'DEBUG', 'USDA_PARSE_DETAIL');
+                        break; // Found best match for this ID set
+                    }
+                    // Handle potential conversions (store potential value, continue search for exact match)
+                    else if (targetUnit.toUpperCase() === 'G' && unit === 'MG') {
+                        if (foundValue === null) { // Only use conversion if no exact match found yet
+                             foundValue = value / 1000;
+                             foundUnit = 'MG converted to G';
+                             log(`USDA: Potential conversion for ID ${nutrientId}: ${value} MG -> ${foundValue} G.`, 'DEBUG', 'USDA_PARSE_DETAIL');
+                        }
+                    }
+                    else if (targetUnit.toUpperCase() === 'KCAL' && unit === 'KJ') {
+                         if (foundValue === null) { // Only use conversion if no exact match found yet
+                            foundValue = value / KJ_TO_KCAL_FACTOR;
+                            foundUnit = 'KJ converted to KCAL';
+                            log(`USDA: Potential conversion for ID ${nutrientId}: ${value} KJ -> ${foundValue.toFixed(0)} KCAL.`, 'DEBUG', 'USDA_PARSE_DETAIL');
+                         }
+                    } else {
+                         log(`USDA: Found ID ${nutrientId} but unit "${unit}" doesn't match target "${targetUnit}" and no conversion defined.`, 'DEBUG', 'USDA_PARSE_DETAIL');
+                    }
+                } else {
+                    log(`USDA: Found nutrient ID ${nutrientId}, but amount "${nutrient.amount}" is not a valid number.`, 'WARN', 'USDA_PARSE_DETAIL');
                 }
-                log(`USDA: Nutrient ID ${id} found but unit mismatch (${unit} vs ${targetUnit})`, 'DEBUG', 'USDA_PARSE');
+            } else {
+                 log(`USDA: Nutrient ID ${nutrientId} not found or amount missing.`, 'DEBUG', 'USDA_PARSE_DETAIL');
             }
         }
-         // Fallback to searching by name
-         if (allowNameFallback) {
-             const nameMap = {
-                 1008: /energy/i, // kcal (Prefer ID 1008 if name searching)
-                 1003: /protein/i,
-                 1004: /fat|lipid/i,
-                 1005: /carbohydrate/i, // by difference usually
-                 1258: /fatty acids, total saturated/i, // Prefer ID 1258
-                 2000: /sugars, total/i, // Prefer ID 2000
-                 1079: /fiber, total dietary/i, // Prefer ID 1079
-                 1093: /sodium/i, // Prefer ID 1093
-             };
-              // Add older IDs as backup if preferred IDs aren't found by name
-              const backupNameMap = {
-                  208: /energy/i, // kcal
-                  203: /protein/i,
-                  204: /fat|lipid/i,
-                  205: /carbohydrate/i,
-                  606: /fatty acids, total saturated/i,
-                  269: /sugars/i, // Less specific
-                  291: /fiber/i, // Less specific
-                  307: /sodium/i, // Less specific
-              };
 
-             for (const id in nameMap) { // Check preferred names first
-                 const nameRegex = nameMap[id];
-                 const nutrient = nutrients.find(n => n.nutrient?.name && nameRegex.test(n.nutrient.name));
-                  if (nutrient && nutrient.amount !== undefined && nutrient.amount !== null) {
-                       const unit = (nutrient.unitName || '').toUpperCase();
-                       let amount = parseFloat(nutrient.amount);
-                       if (isNaN(amount)) continue;
-                       const targetUnitId = Object.keys(nameMap).find(key => nameMap[key] === nameRegex); // Get target unit based on ID
-                       const targetUnit = (targetUnitId === '1008' || targetUnitId === '208') ? 'KCAL' : 'G';
-
-                       if (unit === targetUnit) return amount;
-                       else if (targetUnit === 'G' && unit === 'MG') return amount / 1000;
-                        else if (targetUnit === 'KCAL' && unit === 'KJ') {
-                             const kcalNutrientByName = nutrients.find(n => n.nutrient?.name && /energy/i.test(n.nutrient.name) && (n.unitName || '').toUpperCase() === 'KCAL');
-                             if (kcalNutrientByName && !isNaN(parseFloat(kcalNutrientByName.amount)) && parseFloat(kcalNutrientByName.amount) > 0) {
-                                 log(`USDA: Found direct kcal value by name, skipping KJ conversion.`, 'DEBUG', 'USDA_PARSE');
-                                 continue;
-                             }
-                              log(`USDA: Converting KJ to Kcal for Name ${nameRegex} (${amount} ${unit})`, 'DEBUG', 'USDA_PARSE');
-                             return amount / KJ_TO_KCAL_FACTOR;
-                        }
-                        log(`USDA: Nutrient Name ${nameRegex} found but unit mismatch (${unit} vs ${targetUnit})`, 'DEBUG', 'USDA_PARSE');
-                  }
-             }
-              // Check backup names if preferred names didn't yield results
-               for (const id in backupNameMap) {
-                   if (nameMap[id]) continue; // Skip if already checked via preferred ID/name
-                   const nameRegex = backupNameMap[id];
-                   const nutrient = nutrients.find(n => n.nutrient?.name && nameRegex.test(n.nutrient.name));
-                   // Add same logic as above... (This part could be refactored into a helper)
-                    if (nutrient && nutrient.amount !== undefined && nutrient.amount !== null) {
-                         const unit = (nutrient.unitName || '').toUpperCase();
-                         let amount = parseFloat(nutrient.amount);
-                         if (isNaN(amount)) continue;
-                         const targetUnit = (id === '208') ? 'KCAL' : 'G';
-                         if (unit === targetUnit) return amount;
-                          else if (targetUnit === 'G' && unit === 'MG') return amount / 1000;
-                          else if (targetUnit === 'KCAL' && unit === 'KJ') {
-                              // Check again for direct kcal value before converting
-                               const kcalNutrientByName = nutrients.find(n => n.nutrient?.name && /energy/i.test(n.nutrient.name) && (n.unitName || '').toUpperCase() === 'KCAL');
-                               if (kcalNutrientByName && !isNaN(parseFloat(kcalNutrientByName.amount)) && parseFloat(kcalNutrientByName.amount) > 0) continue;
-                               log(`USDA: Converting KJ to Kcal for Backup Name ${nameRegex} (${amount} ${unit})`, 'DEBUG', 'USDA_PARSE');
-                              return amount / KJ_TO_KCAL_FACTOR;
-                          }
-                          log(`USDA: Backup Nutrient Name ${nameRegex} found but unit mismatch (${unit} vs ${targetUnit})`, 'DEBUG', 'USDA_PARSE');
-                    }
-               }
-         }
-
-        return 0; // Default to 0 if not found or invalid
+        if (foundValue !== null) {
+            log(`USDA: Final value for target ${targetUnit} (IDs: ${nutrientIds.join(',')}) = ${foundValue} (${foundUnit})`, 'INFO', 'USDA_PARSE_RESULT');
+            return foundValue;
+        } else {
+            log(`USDA: Could not find valid value for target ${targetUnit} (IDs: ${nutrientIds.join(',')})`, 'WARN', 'USDA_PARSE_RESULT');
+            return 0; // Default to 0 if not found
+        }
     };
 
-    // Preferred USDA Nutrient IDs:
-    const kcalIds = [1008, 208]; // Energy (kcal) - Prefer 1008
-    const proteinIds = [1003, 203]; // Protein - Prefer 1003
-    const fatIds = [1004, 204]; // Total lipid (fat) - Prefer 1004
-    const carbIds = [1005, 205]; // Carbohydrate, by difference - Prefer 1005
-    const satFatIds = [1258, 606]; // Fatty acids, total saturated - Prefer 1258
-    const sugarsIds = [2000, 269]; // Sugars, total including NLEA - Prefer 2000
-    const fiberIds = [1079, 291]; // Fiber, total dietary - Prefer 1079
-    const sodiumIds = [1093, 307]; // Sodium, Na - Prefer 1093
+    // Preferred USDA Nutrient IDs: (Primary, Secondary/Older)
+    const kcalIds = [1008, 208];       // Energy (kcal)
+    const proteinIds = [1003, 203];    // Protein
+    const fatIds = [1004, 204];        // Total lipid (fat)
+    const carbIds = [1005, 205];       // Carbohydrate, by difference
+    const satFatIds = [1258, 606];     // Fatty acids, total saturated
+    const sugarsIds = [2000, 269];     // Sugars, total including NLEA
+    const fiberIds = [1079, 291];      // Fiber, total dietary
+    const sodiumIds = [1093, 307];     // Sodium, Na
 
-    const calories = findNutrient(kcalIds, 'KCAL');
-    const protein = findNutrient(proteinIds, 'G');
-    const fat = findNutrient(fatIds, 'G');
-    const carbs = findNutrient(carbIds, 'G');
+    // Get values using the helper
+    const calories = findNutrientValue(kcalIds, 'KCAL');
+    const protein = findNutrientValue(proteinIds, 'G');
+    const fat = findNutrientValue(fatIds, 'G');
+    const carbs = findNutrientValue(carbIds, 'G');
 
-    // Only consider it found if we have core macros with values > 0
-    if (calories <= 0 || protein <= 0 || fat < 0 || carbs < 0) { // Allow 0 fat/carbs, but not protein/calories
-        log(`USDA: Core macros missing or zero/negative for query: ${query} (FDC ID: ${usdaDetailsResponse.fdcId})`, 'INFO', 'USDA_PARSE', { calories, protein, fat, carbs });
-        return null;
+    // --- Strict Check: Essential macros must be valid ---
+    if (calories <= 0 || protein <= 0 || fat < 0 || carbs < 0) {
+        log(`USDA: Core macros missing or invalid after parsing for "${foodDescription}" (FDC ID: ${fdcId})`, 'WARN', 'USDA_PARSE_FAIL', { calories, protein, fat, carbs });
+        return null; // Return null if essential data is bad
     }
 
-    log(`USDA: Successfully parsed data for query: ${query} (FDC ID: ${usdaDetailsResponse.fdcId}, Name: "${usdaDetailsResponse.description}")`, 'SUCCESS', 'USDA_PARSE');
+    log(`USDA: Successfully parsed data for "${foodDescription}" (FDC ID: ${fdcId})`, 'SUCCESS', 'USDA_PARSE');
+
+    // Extract other nutrients
+    const saturatedFat = findNutrientValue(satFatIds, 'G');
+    const sugars = findNutrientValue(sugarsIds, 'G');
+    const fiber = findNutrientValue(fiberIds, 'G');
+    const sodium = findNutrientValue(sodiumIds, 'G'); // Target unit G (findNutrient handles MG->G)
+
+    // Attempt to construct ingredients list
+    const ingredientsText = usdaDetailsResponse.inputFoods?.map(f => f.foodDescription).join(', ') || usdaDetailsResponse.ingredients || foodDescription || null;
+
 
     return {
         status: 'found',
-        source: 'usda', // Add source tracking
-        servingUnit: '100g', // USDA data is typically per 100g
+        source: 'usda',
+        servingUnit: '100g', // USDA is per 100g
         calories: calories,
         protein: protein,
         fat: fat,
-        saturatedFat: findNutrient(satFatIds, 'G'),
+        saturatedFat: saturatedFat,
         carbs: carbs,
-        sugars: findNutrient(sugarsIds, 'G'),
-        fiber: findNutrient(fiberIds, 'G'),
-        sodium: findNutrient(sodiumIds, 'G'), // Target unit G (will convert from MG if needed)
-        ingredientsText: usdaDetailsResponse.inputFoods?.map(f => f.foodDescription).join(', ') || usdaDetailsResponse.description || null // Try to get input foods for ingredients
+        sugars: sugars,
+        fiber: fiber,
+        sodium: sodium,
+        ingredientsText: ingredientsText
     };
 }
 // --- END NEW ---
 
-// --- REMOVED (Mark 51): Internal Dietagram API fetcher ---
 
-// --- NEW (Mark 51): Internal USDA API fetcher ---
 /**
  * Internal logic for fetching from USDA API (Search then Details).
  */
@@ -225,8 +172,8 @@ async function _fetchUsdaFromApi(query, log = console.log) {
 
     // --- Step 1: Search ---
     const searchStartTime = Date.now();
-    // Prioritize non-branded types, increase page size slightly
-    const searchUrl = `${USDA_SEARCH_URL}?api_key=${USDA_API_KEY}&query=${encodeURIComponent(query)}&pageSize=10&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS),Branded`; // Include Branded as last resort
+    // Prioritize non-branded types, broader search
+    const searchUrl = `${USDA_SEARCH_URL}?api_key=${USDA_API_KEY}&query=${encodeURIComponent(query)}&pageSize=10&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS),Branded`;
 
     log(`Attempting USDA search for: ${query}`, 'DEBUG', 'USDA_REQUEST', { url: searchUrl.split('?')[0] + '?query=...' });
 
@@ -235,43 +182,39 @@ async function _fetchUsdaFromApi(query, log = console.log) {
         const searchResponse = await fetch(searchUrl);
         const searchLatencyMs = Date.now() - searchStartTime;
         if (!searchResponse.ok) {
-            // Handle 429 specifically if fetch throws it based on status
             if (searchResponse.status === 429) {
                  log(`USDA search returned 429 for "${query}".`, 'WARN', 'USDA_FAILURE', { status: 429, latency_ms: searchLatencyMs });
                  const rateLimitError = new Error(`USDA API rate limit hit (search)`);
                  rateLimitError.statusCode = 429;
-                 throw rateLimitError; // Throw to be caught by fetchUsdaSafe
+                 throw rateLimitError;
             }
             const errorBody = await searchResponse.text();
-            log(`USDA search failed for "${query}" with status ${searchResponse.status}`, 'WARN', 'USDA_FAILURE', { status: searchResponse.status, latency_ms: searchLatencyMs, body: errorBody });
+            log(`USDA search failed for "${query}" status ${searchResponse.status}`, 'WARN', 'USDA_FAILURE', { status: searchResponse.status, latency_ms: searchLatencyMs, body: errorBody });
             return { error: { message: `USDA search failed. Status: ${searchResponse.status}`, status: searchResponse.status, details: errorBody }, source: 'usda_search' };
         }
         searchResponseData = await searchResponse.json();
-        log(`USDA search successful for "${query}". Found ${searchResponseData?.totalHits} potential matches.`, 'DEBUG', 'USDA_RESPONSE', { latency_ms: searchLatencyMs });
+        log(`USDA search OK for "${query}". Found ${searchResponseData?.totalHits} matches.`, 'DEBUG', 'USDA_RESPONSE', { latency_ms: searchLatencyMs });
 
     } catch (error) {
         const searchLatencyMs = Date.now() - searchStartTime;
-         if (error.statusCode === 429) throw error; // Re-throw 429 for rate limiter
+         if (error.statusCode === 429) throw error; // Re-throw 429
         log(`USDA search network error for "${query}": ${error.message}`, 'ERROR', 'USDA_FAILURE', { latency_ms: searchLatencyMs });
         return { error: { message: `USDA search network error: ${error.message}`, status: 504 }, source: 'usda_search' };
     }
 
     // --- Step 2: Find Best FDC ID ---
     if (!searchResponseData || !Array.isArray(searchResponseData.foods) || searchResponseData.foods.length === 0) {
-        log(`USDA search for "${query}" returned no food results.`, 'INFO', 'USDA_RESPONSE');
-        return { error: { message: 'No results found in USDA search', status: 404 }, source: 'usda_search' }; // Use 404 for no results
+        log(`USDA search for "${query}" returned no results.`, 'INFO', 'USDA_RESPONSE');
+        return { error: { message: 'No results found in USDA search', status: 404 }, source: 'usda_search' };
     }
 
-    // Prioritize Foundation, SR Legacy, FNDDS. Find the first one.
     let bestFdcId = null;
     let foundFoodDescription = '';
     const preferredTypes = ['Foundation', 'SR Legacy', 'Survey (FNDDS)'];
     for (const type of preferredTypes) {
-        // Find best match within preferred types (simple exact match first, then contains)
          const exactMatch = searchResponseData.foods.find(food => food.dataType === type && food.description.toLowerCase() === query.toLowerCase());
          const containsMatch = searchResponseData.foods.find(food => food.dataType === type && food.description.toLowerCase().includes(query.toLowerCase()));
          const foundFood = exactMatch || containsMatch;
-
         if (foundFood) {
             bestFdcId = foundFood.fdcId;
             foundFoodDescription = foundFood.description;
@@ -279,8 +222,6 @@ async function _fetchUsdaFromApi(query, log = console.log) {
             break;
         }
     }
-
-    // Fallback to the very first result (could be Branded) if no preferred type found
     if (!bestFdcId) {
         bestFdcId = searchResponseData.foods[0].fdcId;
         foundFoodDescription = searchResponseData.foods[0].description;
@@ -301,39 +242,35 @@ async function _fetchUsdaFromApi(query, log = console.log) {
                  log(`USDA details returned 429 for FDC ID ${bestFdcId}.`, 'WARN', 'USDA_FAILURE', { status: 429, latency_ms: detailsLatencyMs });
                  const rateLimitError = new Error(`USDA API rate limit hit (details)`);
                  rateLimitError.statusCode = 429;
-                 throw rateLimitError; // Throw to be caught by fetchUsdaSafe
+                 throw rateLimitError;
               }
              const errorBody = await detailsResponse.text();
-             log(`USDA details fetch failed for FDC ID ${bestFdcId} with status ${detailsResponse.status}`, 'WARN', 'USDA_FAILURE', { status: detailsResponse.status, latency_ms: detailsLatencyMs, body: errorBody });
+             log(`USDA details fetch failed for FDC ID ${bestFdcId} status ${detailsResponse.status}`, 'WARN', 'USDA_FAILURE', { status: detailsResponse.status, latency_ms: detailsLatencyMs, body: errorBody });
              return { error: { message: `USDA details fetch failed. Status: ${detailsResponse.status}`, status: detailsResponse.status, details: errorBody }, source: 'usda_details' };
          }
         const detailsData = await detailsResponse.json();
         log(`USDA details fetch successful for FDC ID ${bestFdcId}`, 'SUCCESS', 'USDA_RESPONSE', { latency_ms: detailsLatencyMs });
-        return detailsData; // Return the raw details data
+        return detailsData; // Return raw details
 
     } catch (error) {
         const detailsLatencyMs = Date.now() - detailsStartTime;
-         if (error.statusCode === 429) throw error; // Re-throw 429 for rate limiter
+         if (error.statusCode === 429) throw error; // Re-throw 429
         log(`USDA details network error for FDC ID ${bestFdcId}: ${error.message}`, 'ERROR', 'USDA_FAILURE', { latency_ms: detailsLatencyMs });
         return { error: { message: `USDA details network error: ${error.message}`, status: 504 }, source: 'usda_details' };
     }
 }
-// --- END NEW ---
 
-// --- REMOVED (Mark 51): Rate-limited wrapper for Dietagram ---
 
-// --- NEW (Mark 51): Rate-limited wrapper for USDA ---
 /**
  * Wrapper for USDA API calls using a STATELESS token bucket (Vercel KV).
  */
 async function fetchUsdaSafe(query, log = console.log) {
-    const bucketKey = `bucket:usda`; // Dedicated bucket for the USDA API
+    const bucketKey = `bucket:usda`;
     const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
     let waitMs = 0;
     const waitStart = Date.now();
 
-    // Loop until we successfully acquire a token (Same logic as Dietagram/Price search)
-    while (true) {
+    while (true) { // Loop for acquiring token
         const now = Date.now();
         let bucketState = null;
 
@@ -342,29 +279,29 @@ async function fetchUsdaSafe(query, log = console.log) {
                 bucketState = await kv.get(bucketKey);
             } catch (kvError) {
                 log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message });
-                break;
+                break; // Bypass loop on KV error
             }
         }
 
-        if (!bucketState) {
+        if (!bucketState) { // Initialize bucket
             log(`Initializing KV bucket: ${bucketKey}`, 'DEBUG', 'BUCKET_INIT');
             if (isKvConfigured()) {
                 try {
-                    // Use a reasonable TTL (e.g., 1 day)
-                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: 86400 });
+                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: 86400 }); // 1 day TTL
                 } catch (kvError) {
                     log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
                 }
             }
-            break;
+            break; // Token acquired
         }
 
+        // Refill logic
         const elapsedMs = now - bucketState.lastRefill;
         const tokensToAdd = elapsedMs * refillRatePerMs;
         let currentTokens = Math.min(BUCKET_CAPACITY, bucketState.tokens + tokensToAdd);
         const newLastRefill = now;
 
-        if (currentTokens >= 1) {
+        if (currentTokens >= 1) { // Take token
             currentTokens -= 1;
             if (isKvConfigured()) {
                 try {
@@ -373,12 +310,13 @@ async function fetchUsdaSafe(query, log = console.log) {
                     log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
                 }
             }
-            break;
-        } else {
+            break; // Token acquired
+        } else { // Wait
             const tokensNeeded = 1 - currentTokens;
             const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs));
             log(`Rate limiter active (USDA). Waiting ${waitTime}ms...`, 'INFO', 'BUCKET_WAIT');
             await delay(waitTime);
+            // Continue loop to re-check after delay
         }
     } // end while(true)
 
@@ -386,18 +324,15 @@ async function fetchUsdaSafe(query, log = console.log) {
     log(`Acquired token for USDA (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
 
     try {
-        // --- Call the internal function that performs BOTH search and details fetch ---
-        const data = await _fetchUsdaFromApi(query, log);
+        const data = await _fetchUsdaFromApi(query, log); // Call internal function
         return { data, waitMs };
     } catch (error) {
-        // Handle 429 specifically (thrown by _fetchUsdaFromApi)
-        if (error.statusCode === 429) {
+        if (error.statusCode === 429) { // Handle 429 retry
             log(`USDA returned 429. Retrying once after ${BUCKET_RETRY_DELAY_MS}ms...`, 'WARN', 'BUCKET_RETRY', { query });
             await delay(BUCKET_RETRY_DELAY_MS);
              try {
-                  // Retry the whole process (search + details)
                  const retryData = await _fetchUsdaFromApi(query, log);
-                 return { data: retryData, waitMs }; // waitMs still reflects initial wait
+                 return { data: retryData, waitMs };
              } catch (retryError) {
                   log(`Retry after 429 failed (USDA): ${retryError.message}`, 'ERROR', 'BUCKET_RETRY_FAIL', { query });
                   const status = retryError.status || retryError.statusCode || 500;
@@ -405,28 +340,26 @@ async function fetchUsdaSafe(query, log = console.log) {
                   return { data: errorData, waitMs };
              }
         }
-        // General errors during the fetch process
+        // Other errors
         log(`Unhandled error during fetchUsdaSafe: ${error.message}`, 'CRITICAL', 'BUCKET_ERROR', { query });
          const errorData = { error: { message: `Unexpected error during safe USDA fetch: ${error.message}`, status: error.status || 500 }, source: 'usda_safe' };
          return { data: errorData, waitMs };
     }
 }
-// --- END NEW ---
 
 
 /**
  * Internal logic for fetching nutrition data from Open Food Facts API (and USDA fallback).
- * Accepts a log function for consistency.
  */
-// --- MODIFICATION (Mark 51 & 52): Replace Dietagram with USDA fallback & refine OFF failure check ---
 async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
     let openFoodFactsURL = '';
     const identifier = barcode || query;
     const identifierType = barcode ? 'barcode' : 'query';
-    let offSucceeded = false; // Flag to track if OFF returned potentially usable data
+    let offSucceeded = false;
+    let offNutritionResult = null; // Store OFF result temporarily
 
     if (!identifier) {
-        log('Missing barcode or query parameter for nutrition search.', 'WARN', 'INPUT');
+        log('Missing barcode or query for nutrition search.', 'WARN', 'INPUT');
         return { status: 'not_found', error: 'Missing barcode or query parameter' };
     }
 
@@ -439,7 +372,6 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
 
     log(`Requesting nutrition (OFF) for ${identifierType}: ${identifier}`, 'DEBUG', 'OFF_REQUEST');
     const startTime = Date.now();
-    let nutritionResult = null;
 
     try {
         const apiResponse = await fetch(openFoodFactsURL, {
@@ -453,131 +385,111 @@ async function _fetchNutritionDataFromApi(barcode, query, log = console.log) {
             const product = barcode ? data.product : (data.products && data.products[0]);
 
             if (product && product.nutriments) {
-                offSucceeded = true; // Mark that we got data from OFF
+                offSucceeded = true;
                 const nutriments = product.nutriments;
-
-                // Helper to parse nutrient, returns null if invalid/missing
                 const parseNutrient = (value) => {
                     if (value === undefined || value === null) return null;
                     const num = parseFloat(value);
                     return isNaN(num) ? null : num;
                 };
-
                 let calories = parseNutrient(nutriments['energy-kcal_100g']);
-
-                // Check for kJ fallback only if kcal is null or zero
                 if (calories === null || calories <= 0) {
                     const kj = parseNutrient(nutriments['energy-kj_100g']);
                     if (kj !== null && kj > 0) {
                         calories = kj / KJ_TO_KCAL_FACTOR;
-                        log(`Used kJ fallback for ${identifierType}: ${identifier}. ${kj}kJ -> ${calories.toFixed(0)}kcal`, 'INFO', 'CALORIE_CONVERT');
-                    } else {
-                         calories = null; // Ensure calories is null if kJ also fails
-                    }
+                        log(`OFF: Used kJ fallback for ${identifier}: ${kj}kJ -> ${calories.toFixed(0)}kcal`, 'INFO', 'CALORIE_CONVERT');
+                    } else { calories = null; }
                 }
-
                 const protein = parseNutrient(nutriments.proteins_100g);
                 const fat = parseNutrient(nutriments.fat_100g);
                 const carbs = parseNutrient(nutriments.carbohydrates_100g);
 
-                // --- Refined Check (Mark 52): Check if ALL essential macros are valid numbers > 0 (except fat/carbs can be 0) ---
-                if (calories !== null && calories > 0 &&
-                    protein !== null && protein > 0 && // Protein must be > 0
-                    fat !== null && fat >= 0 &&       // Fat can be 0
-                    carbs !== null && carbs >= 0) {   // Carbs can be 0
+                // --- Stricter Check ---
+                if (calories !== null && calories > 0 && protein !== null && protein >= 0 && // Allow 0 protein for things like oil
+                    fat !== null && fat >= 0 && carbs !== null && carbs >= 0) {
 
-                    log(`Successfully fetched nutrition (OFF) for ${identifierType}: ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
-                    nutritionResult = {
-                        status: 'found',
-                        source: 'openfoodfacts',
-                        servingUnit: product.nutrition_data_per || '100g',
-                        calories: calories,
-                        protein: protein,
-                        fat: fat,
-                        saturatedFat: parseNutrient(nutriments['saturated-fat_100g']) || 0, // Default 0 if missing
-                        carbs: carbs,
-                        sugars: parseNutrient(nutriments.sugars_100g) || 0,
+                    log(`OFF: Successfully fetched complete data for ${identifier}`, 'SUCCESS', 'OFF_RESPONSE', { latency_ms: latencyMs });
+                    // Store complete result and return immediately
+                    offNutritionResult = {
+                        status: 'found', source: 'openfoodfacts', servingUnit: product.nutrition_data_per || '100g',
+                        calories: calories, protein: protein, fat: fat,
+                        saturatedFat: parseNutrient(nutriments['saturated-fat_100g']) || 0,
+                        carbs: carbs, sugars: parseNutrient(nutriments.sugars_100g) || 0,
                         fiber: parseNutrient(nutriments.fiber_100g) || 0,
                         sodium: parseNutrient(nutriments.sodium_100g) || 0,
                         ingredientsText: product.ingredients_text || null
                     };
-                    return nutritionResult; // Found complete data, return immediately
+                    return offNutritionResult;
                 } else {
-                     log(`Nutrition data incomplete or invalid (OFF) for ${identifierType}: ${identifier}`, 'INFO', 'OFF_INCOMPLETE', { latency_ms: latencyMs, data: { calories, protein, fat, carbs } });
-                     // Do not return yet, proceed to USDA fallback
+                     log(`OFF: Data incomplete/invalid for ${identifier}`, 'INFO', 'OFF_INCOMPLETE', { latency_ms: latencyMs, data: { calories, protein, fat, carbs } });
+                     // Proceed to USDA fallback
                 }
-            } else { // Product or nutriments missing
-                 log(`Nutrition data structure missing (OFF) for ${identifierType}: ${identifier}`, 'INFO', 'OFF_MISSING', { latency_ms: latencyMs, productFound: !!product });
+            } else {
+                 log(`OFF: Product/nutriments structure missing for ${identifier}`, 'INFO', 'OFF_MISSING', { latency_ms: latencyMs, productFound: !!product });
                  // Proceed to USDA fallback
             }
-        } else { // API response not OK
-             log(`Open Food Facts API returned: ${apiResponse.status} for ${identifierType}: ${identifier}`, 'WARN', 'OFF_RESPONSE', { status: apiResponse.status, latency_ms: latencyMs });
+        } else {
+             log(`OFF API returned: ${apiResponse.status} for ${identifier}`, 'WARN', 'OFF_RESPONSE', { status: apiResponse.status, latency_ms: latencyMs });
              // Proceed to USDA fallback
         }
-    } catch (error) { // Network or parsing error
+    } catch (error) {
         const latencyMs = Date.now() - startTime;
-        log(`Nutrition Fetch Error (OFF) for ${identifierType} "${identifier}": ${error.message}`, 'ERROR', 'OFF_FAILURE', { latency_ms: latencyMs });
+        log(`OFF Fetch Error for "${identifier}": ${error.message}`, 'ERROR', 'OFF_FAILURE', { latency_ms: latencyMs });
         // Proceed to USDA fallback
     }
 
-    // --- STAGE 2: Attempt USDA Fallback (only for queries) ---
-    // --- Trigger ONLY if OFF failed (offSucceeded is false) OR if OFF succeeded but data was incomplete (nutritionResult is still null) ---
-    if (query && (!offSucceeded || nutritionResult === null)) {
-        log(`OFF failed or incomplete for query "${query}". Attempting rate-limited USDA fallback...`, 'INFO', 'USDA_ATTEMPT');
+    // --- STAGE 2: Attempt USDA Fallback (only if query exists and OFF didn't return a complete result) ---
+    if (query && offNutritionResult === null) {
+        log(`OFF failed/incomplete for query "${query}". Attempting USDA fallback...`, 'INFO', 'USDA_ATTEMPT');
 
         const { data: usdaData } = await fetchUsdaSafe(query, log); // Use rate-limited wrapper
 
         if (usdaData && !usdaData.error) {
-            // Pass the raw details data to the normalizer
-            const normalizedData = normalizeUsdaResponse(usdaData, query, log);
+            const normalizedData = normalizeUsdaResponse(usdaData, query, log); // Use updated normalizer
             if (normalizedData) {
                 return normalizedData; // Success with USDA!
             } else {
                 log(`USDA fallback failed to parse valid data for: ${query}`, 'WARN', 'USDA_PARSE_FAIL');
-                // Proceed to definitive failure
             }
         } else {
              log(`USDA fallback fetch failed for: ${query}`, 'ERROR', 'USDA_FETCH_FAIL', { error: usdaData?.error });
-             // Proceed to definitive failure
         }
-    } else if (barcode && !query && (!offSucceeded || nutritionResult === null)) {
-        log(`OFF failed or incomplete for barcode "${barcode}". No query provided, cannot use USDA fallback.`, 'WARN', 'NUTRITION_NO_QUERY');
-    } else if (offSucceeded && nutritionResult !== null) {
-        // This case should not be reached due to the early return above, but included for logic completeness.
-        log(`Internal Logic Error: Reached USDA fallback stage even though OFF succeeded.`, 'ERROR', 'SYSTEM_LOGIC');
+    } else if (barcode && !query && offNutritionResult === null) {
+        log(`OFF failed/incomplete for barcode "${barcode}". No query for USDA fallback.`, 'WARN', 'NUTRITION_NO_QUERY');
     }
 
     // --- STAGE 3: Definitive Failure ---
     log(`All nutrition sources failed for ${identifierType}: ${identifier}`, 'WARN', 'NUTRITION_FAIL_ALL');
     return { status: 'not_found' };
 }
-// --- END MODIFICATION ---
+
 
 /**
  * Initiates a background refresh for a nutrition cache key.
  */
 async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType) {
     if (inflightRefreshes.has(cacheKey)) {
-        log(`Nutrition background refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP', { key_type: keyType });
+        log(`Nutri refresh already in progress for ${cacheKey}, skipping.`, 'DEBUG', 'SWR_SKIP', { key_type: keyType });
         return;
     }
     inflightRefreshes.add(cacheKey);
-    log(`Starting nutrition background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType });
+    log(`Starting nutri background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType });
 
-    // Fire and forget
     (async () => {
         try {
-            // Calls the updated _fetchNutritionDataFromApi with the new fallback logic
-            const freshData = await _fetchNutritionDataFromApi(barcode, query, log);
-            // Cache both 'found' and 'not_found' results
+            const freshData = await _fetchNutritionDataFromApi(barcode, query, log); // Calls updated internal logic
             if (freshData && (freshData.status === 'found' || freshData.status === 'not_found')) {
-                await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
-                log(`Nutrition background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status, key_type: keyType });
+                 if(isKvConfigured()){
+                     await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: ttlMs });
+                     log(`Nutri background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { status: freshData.status, key_type: keyType });
+                 } else {
+                      log(`Nutri background refresh fetched data but KV not configured, skipping set for ${cacheKey}`, 'WARN', 'SWR_REFRESH_SKIP_KV');
+                 }
             } else {
-                 log(`Nutrition background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { key_type: keyType });
+                 log(`Nutri background refresh failed to fetch valid data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { key_type: keyType });
             }
         } catch (error) {
-            log(`Nutrition background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType });
+            log(`Nutri background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType });
         } finally {
             inflightRefreshes.delete(cacheKey);
         }
@@ -590,13 +502,10 @@ async function refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType
 async function fetchNutritionData(barcode, query, log = console.log) {
     const startTime = Date.now();
 
-    // --- DEGRADATION CHECK ---
     if (!isKvConfigured()) {
-        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
-        // --- Calls the updated function with new fallback ---
-        return await _fetchNutritionDataFromApi(barcode, query, log);
+        log('CRITICAL: UPSTASH_REDIS vars missing. Bypassing cache.', 'CRITICAL', 'CONFIG_ERROR');
+        return await _fetchNutritionDataFromApi(barcode, query, log); // Call updated internal logic
     }
-    // --- END DEGRADATION CHECK ---
 
     let cacheKey = '';
     let ttlMs = 0;
@@ -605,18 +514,17 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     const identifier = barcode || query;
 
     if (!identifier) {
-        log('Missing barcode or query parameter for nutrition search.', 'WARN', 'INPUT');
+        log('Missing barcode or query for nutrition search.', 'WARN', 'INPUT');
         return { status: 'not_found', error: 'Missing barcode or query parameter' };
     }
 
-    // Determine key, TTL, and SWR TTL based on identifier type
     if (barcode) {
         const barcodeNorm = normalizeKey(barcode);
         cacheKey = `${CACHE_PREFIX_NUTRI}:barcode:${barcodeNorm}`;
         ttlMs = TTL_NUTRI_BARCODE_MS;
         swrMs = SWR_NUTRI_BARCODE_MS;
         keyType = 'nutri_barcode';
-    } else { // Use query
+    } else {
         const queryNorm = normalizeKey(query);
         cacheKey = `${CACHE_PREFIX_NUTRI}:name:${queryNorm}`;
         ttlMs = TTL_NUTRI_NAME_MS;
@@ -634,30 +542,26 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
     if (cachedItem && typeof cachedItem === 'object' && cachedItem.data && cachedItem.ts) {
         const ageMs = Date.now() - cachedItem.ts;
-
         if (ageMs < swrMs) {
             const latencyMs = Date.now() - startTime;
             log(`Cache Hit (Fresh) for ${cacheKey}`, 'INFO', 'CACHE_HIT', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
             return cachedItem.data;
         } else if (ageMs < ttlMs) {
             const latencyMs = Date.now() - startTime;
-            log(`Cache Hit (Stale) for ${cacheKey}, serving stale and refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
-            // --- Trigger background refresh ---
+            log(`Cache Hit (Stale) for ${cacheKey}, serving stale & refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
             refreshInBackground(cacheKey, barcode, query, ttlMs, log, keyType);
-            return cachedItem.data; // Return stale data
+            return cachedItem.data;
         }
     }
 
     // 2. Cache Miss or Expired: Fetch Fresh Data
     log(`Cache Miss or Expired for ${cacheKey}`, 'INFO', 'CACHE_MISS', { key_type: keyType });
-    // --- Calls the updated function with new fallback ---
-    const fetchedData = await _fetchNutritionDataFromApi(barcode, query, log);
+    const fetchedData = await _fetchNutritionDataFromApi(barcode, query, log); // Call updated internal logic
     const fetchLatencyMs = Date.now() - startTime;
 
-    // 3. Cache Result (Cache 'found' and 'not_found')
+    // 3. Cache Result
     if (fetchedData && (fetchedData.status === 'found' || fetchedData.status === 'not_found')) {
         try {
-            // --- Store object with data and timestamp ---
             await kv.set(cacheKey, { data: fetchedData, ts: Date.now() }, { px: ttlMs });
             log(`Cache SET success for ${cacheKey}`, 'DEBUG', 'CACHE_WRITE', { key_type: keyType, status: fetchedData.status, ttl_ms: ttlMs });
         } catch (error) {
@@ -666,45 +570,34 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     }
 
     log(`Fetch completed for ${cacheKey}`, 'INFO', 'FETCH_COMPLETE', { key_type: keyType, status: fetchedData.status, latency_ms: fetchLatencyMs, source: fetchedData.source });
-    return fetchedData; // Return the fresh data object
+    return fetchedData;
 }
 
 
-// --- Vercel Handler (Now uses the updated fetchNutritionData) ---
+// --- Vercel Handler ---
 module.exports = async (request, response) => {
-    // Standard headers and OPTIONS handling
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    if (request.method === 'OPTIONS') {
-        return response.status(200).end();
-    }
+    if (request.method === 'OPTIONS') { return response.status(200).end(); }
 
     try {
         const { barcode, query } = request.query;
+        const log = (message, level = 'INFO', tag = 'HANDLER') => { console.log(`[${level}] [${tag}] ${message}`); };
+        const nutritionData = await fetchNutritionData(barcode, query, log); // Use public cached function
 
-        // --- Use the public CACHED function (which now includes USDA fallback) ---
-        // Add basic logging for the handler scope
-        const log = (message, level = 'INFO', tag = 'HANDLER') => {
-             console.log(`[${level}] [${tag}] ${message}`);
-        };
-        const nutritionData = await fetchNutritionData(barcode, query, log);
-        // --- END MODIFICATION ---
-
-        // Return based on status
         if (nutritionData.status === 'found') {
              return response.status(200).json(nutritionData);
         } else {
-             // Return 404 for not_found, include error if present
              return response.status(404).json({ status: 'not_found', message: nutritionData.error || 'Nutrition data not found.' });
         }
-    } catch (error) { // Catch errors during handler execution
+    } catch (error) {
         console.error("Handler error:", error);
-        return response.status(500).json({ status: 'error', message: 'Internal server error in nutrition search handler.', details: error.message });
+        return response.status(500).json({ status: 'error', message: 'Internal server error.', details: error.message });
     }
 };
 
-// Export the main function for the orchestrator
+// Export main function for orchestrator
 module.exports.fetchNutritionData = fetchNutritionData;
 
 
