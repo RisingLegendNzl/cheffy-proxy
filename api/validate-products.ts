@@ -123,6 +123,7 @@ export type ValidatorItem = {
 export type ValidatorResult = { verdict: 'pass'|'fail'|'unsure'; confidence: number; reason: string; };
 
 export async function geminiValidateBatch(items: ValidatorItem[], model: string = 'gemini-1.5-flash') : Promise<ValidatorResult[]> {
+  const _gemStart = Date.now();
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   const sys = `You are a strict product-matching judge. Decide if each store product matches the requested ingredient.
@@ -151,6 +152,8 @@ Reject items from unrelated categories. Return compact JSON array with same orde
     if (!m) throw new Error('Gemini returned non-JSON: ' + text);
     parsed = JSON.parse(m[0]);
   }
+  const _gemLatency = Date.now() - _gemStart;
+  console.log('[VALIDATOR][Gemini]', { items: items.length, model, latency_ms: _gemLatency });
   return parsed.map((x: any) => ({
     verdict: x.verdict ?? 'unsure',
     confidence: typeof x.confidence === 'number' ? x.confidence : 0.5,
@@ -278,6 +281,7 @@ export async function validateCandidates(spec: IngredientSpec, candidates: Candi
       const cacheKey = `VAL2:${hashKey({spec,cand})}`;
       if (out.confidence >= 0.8 && verdict !== 'unsure') setCache(cacheKey, out, TTL_MS);
       outputs[idx] = out;
+      try { console.log('[VALIDATOR][Item]', { ingredient: spec.name, product: cand.title, verdict: out.verdict, conf: out.confidence, rule_conf: out.signals.rule_conf, ai_conf: out.signals.ai_conf }); } catch {}
     }
   }
 
@@ -293,11 +297,19 @@ function humanIngredient(spec: IngredientSpec): string {
 
 // //////////// next api route start \\\\\\\\\\\\\\\
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const _batchStart = Date.now();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   try {
     const { spec, candidates, model } = req.body as { spec: IngredientSpec, candidates: CandidateProduct[], model?: string };
     if (!spec || !candidates || !Array.isArray(candidates)) return res.status(400).json({ error: 'Invalid payload' });
     const results = await validateCandidates(spec, candidates, model);
+    try {
+      const avg_conf = results.length ? results.reduce((a,b)=>a+b.confidence,0)/results.length : 0;
+      const passes = results.filter(r=>r.verdict==='pass').length;
+      const fails = results.filter(r=>r.verdict==='fail').length;
+      const time_ms = Date.now() - _batchStart;
+      console.log('[VALIDATOR] batch', { count: candidates.length, model, avg_conf, passes, fails, time_ms });
+    } catch {}
     res.status(200).json({ results });
   } catch (e: any) {
     res.status(500).json({ error: e.message ?? 'Internal error' });
