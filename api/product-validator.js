@@ -1,26 +1,33 @@
 /// ========= PRODUCT-VALIDATOR-START ========= \\\\
-// File: api/product-validator.js
+// File: api/product-validator.js  (Upstash-backed KV)
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
-const { kv } = require('@vercel/kv');
+const { createClient } = require('@vercel/kv');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 
-// --- utils ---
+// ---- KV client (Upstash vars) ----
+const kv = createClient({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+
+// ---- utils ----
 const sha1 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex');
-const tokenize = (s = '') => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+const tokenize = (s='') => s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
 const j = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-// --- policy ---
+// ---- policy ----
 const RISKY_TOKENS_BY_ID = {
   ing_eggs: ['mayo','mayonnaise','aioli','custard','powder','substitute','vegan','plant','noodle'],
   ing_olive_oil_spray: ['canola','sunflower','vegetable','eucalyptus'],
   ing_canola_oil_spray: ['olive','sunflower','vegetable','eucalyptus'],
 };
 
-// --- router: decide if LLM is needed ---
+// ---- router ----
 function shouldLLMValidate(product, ingredientData) {
   const title = (product.product_name || '').toLowerCase();
   const cat = (product.product_category || '').toLowerCase();
@@ -40,7 +47,7 @@ function shouldLLMValidate(product, ingredientData) {
   return hasRisk || ambiguous;
 }
 
-// --- LLM validator ---
+// ---- LLM validator ----
 async function validateWithGeminiFlash(product, ingredientData, log = console.log) {
   if (!GEMINI_API_KEY) {
     log('Validator: GEMINI_API_KEY missing. Bypass.', 'WARN', 'VALIDATOR');
@@ -58,11 +65,13 @@ async function validateWithGeminiFlash(product, ingredientData, log = console.lo
   )}`;
 
   // cache read
-  try {
-    const cached = await kv.get(cacheKey);
-    if (cached) return cached;
-  } catch (e) {
-    log(`Validator KV get fail: ${e.message}`, 'WARN', 'VALIDATOR_KV');
+  if (kvReady) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) return cached;
+    } catch (e) {
+      log(`Validator KV get fail: ${e.message}`, 'WARN', 'VALIDATOR_KV');
+    }
   }
 
   const sys = `You validate supermarket products for a target ingredient. Output strict JSON only.
@@ -107,10 +116,9 @@ Rules:
   }
 
   // cache write
-  try {
-    await kv.set(cacheKey, result, { ex: 60 * 60 * 24 * 7 }); // 7 days
-  } catch (e) {
-    log(`Validator KV set fail: ${e.message}`, 'WARN', 'VALIDATOR_KV');
+  if (kvReady) {
+    try { await kv.set(cacheKey, result, { ex: 60 * 60 * 24 * 7 }); }
+    catch (e) { log(`Validator KV set fail: ${e.message}`, 'WARN', 'VALIDATOR_KV'); }
   }
 
   return result;
