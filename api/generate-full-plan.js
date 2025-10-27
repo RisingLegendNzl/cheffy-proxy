@@ -31,8 +31,8 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// --- FIX: Using v1beta endpoint for 1.5-flash ---
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
+// --- FIX: Using v1beta endpoint and correct model name ---
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 const MAX_RETRIES = 2; // Retries for Gemini calls (Reduced from 3)
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
@@ -1195,8 +1195,8 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) {
-    // --- FIX: Use v1beta endpoint for 1.5-flash ---
-    const CREATIVE_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent'; // FIX: Use v1beta endpoint
+    // --- FIX: Use v1beta endpoint and correct model name ---
+    const CREATIVE_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent'; // FIX: Use v1beta endpoint and correct model
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -1454,4 +1454,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
