@@ -31,7 +31,8 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
+// --- FIX: Changed v1beta to v1 ---
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent';
 const MAX_RETRIES = 2; // Retries for Gemini calls (Reduced from 3)
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
