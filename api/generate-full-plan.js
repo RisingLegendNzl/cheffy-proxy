@@ -1,23 +1,25 @@
-// --- ORCHESTRATOR API for Cheffy V7 ---
+// --- ORCHESTRATOR API for Cheffy V8 ---
 
-// Mark 51 (CRITICAL PARSER FIX - AGAIN):
-// 1. REPLACED `text.includes(coreName)` logic in `parseIngredientsFromDescription`.
-// 2. NEW LOGIC:
-//    - Splits both description text fragment and ingredient key into significant words.
-//    - Checks if ALL significant words from the ingredient key are PRESENT in the description fragment words.
-//    - Still sorts by original key length to prioritize specificity (e.g., "Chicken Breast Fillet" before "Chicken").
-//    - This fuzzy word matching should finally handle variations like "dry white rice" vs "Long Grain White Rice".
+// Mark 52 (CRITICAL PARSER FIX - V8 Logic):
+// 1. REVERSED the matching condition in `parseIngredientsFromDescription`.
+// 2. CORRECT LOGIC: Check if ALL significant words from the `description fragment`
+//    (e.g., ["chicken", "breast"]) are PRESENT IN the significant words of the
+//    `ingredient key` (e.g., ["chicken", "breast", "fillet"]).
+// 3. Kept sorting by original key length descending to prioritize specific matches first.
+// 4. This ensures fragments match even if they omit less critical words from the key.
+//    THIS SHOULD FINALLY FIX THE CALORIE BUG.
 //
-// Mark 50 (Incorrect Parser Fix):
-// 1. Reverted Mark 49's incorrect logic. Attempted fix using core names (still too strict).
+// Mark 51 (Incorrect Parser Fix V7):
+// 1. Replaced `text.includes(coreName)`. Implemented flawed `every()` check.
+//
+// Mark 50 (Incorrect Parser Fix V6):
+// 1. Reverted Mark 49. Attempted fix using core names (still too strict).
 //
 // Mark 49 (Partial Fixes):
-// 1. Attempted parser fix (incorrectly).
-// 2. Added size check bypass for produce/fruit (Correct).
+// 1. Attempted parser fix (incorrectly). Added size check bypass for produce/fruit.
 //
 // Mark 48 (Architectural Fix):
-// 1. Moved all math out of LLM and into Orchestrator Phase 5.
-// 2. Simplified LLM prompt, removed retries.
+// 1. Moved all math out of LLM. Simplified LLM prompt.
 
 // ... (rest of changelog)
 
@@ -45,7 +47,7 @@ const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
 // --- NEW (Mark 51): Stop words for parser ---
-const PARSER_STOP_WORDS = new Set(['a', 'an', 'and', 'the', 'with', 'in', 'on', 'of', 'for', 'to', 'g', 'ml', 'approx', 'drained', 'raw', 'cooked', 'dry', 'fresh', 'sliced', 'diced', 'shredded', 'budget', 'lean', 'medium', 'large', 'small', 'post-cooking', 'or', 'minimal', 'water', 'oil', 'cans', 'can', 'standard', 'weight', 'approx', 'approximately']);
+const PARSER_STOP_WORDS = new Set(['a', 'an', 'and', 'the', 'with', 'in', 'on', 'of', 'for', 'to', 'g', 'ml', 'approx', 'drained', 'raw', 'cooked', 'dry', 'fresh', 'sliced', 'diced', 'shredded', 'budget', 'lean', 'medium', 'large', 'small', 'post-cooking', 'or', 'minimal', 'water', 'oil', 'cans', 'can', 'standard', 'weight', 'approx', 'approximately', 'style']); // Added 'style'
 
 /// ===== CONFIG-END ===== ////
 
@@ -323,16 +325,18 @@ function isCreativePrompt(cuisinePrompt) {
 // --- NEW HELPER (Mark 51): Get significant words from a string ---
 function getSignificantWords(text) {
     if (!text) return [];
+    // Split, filter stop words, remove plurals, handle hyphens
     return text.toLowerCase()
                .replace(/\(.*?\)/g, '') // Remove (xyz)
-               .replace(/[\d\W_]+/g, ' ') // Replace non-alphanumeric with space
-               .split(' ')
-               .filter(word => word.length > 2 && !PARSER_STOP_WORDS.has(word)) // Keep words > 2 chars, not stop words
-               .map(word => word.replace(/s$/, '')); // Remove trailing 's'
+               .replace(/[\d.,!?:]+/g, ' ') // Remove digits and common punctuation, replace with space
+               .replace(/-/g, ' ') // Replace hyphens with space
+               .split(/\s+/) // Split on whitespace
+               .map(word => word.replace(/s$/, '')) // Remove trailing 's' (simple plural)
+               .filter(word => word.length > 2 && !PARSER_STOP_WORDS.has(word)); // Keep words > 2 chars, not stop words
 }
 
 
-// --- REVISED HELPER (Mark 51): Parses ingredients using fuzzy word matching ---
+// --- REVISED HELPER (Mark 52): Parses ingredients using V8 fuzzy word matching ---
 /**
  * @typedef {Object} IngredientObject
  * @property {string} originalIngredient - The key (e.g., "Chicken Breast Fillet (1kg)")
@@ -361,7 +365,7 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
         try {
             const amount = parseFloat(match[1]);
             const unit = match[2].toLowerCase();
-            const textFragment = match[3].toLowerCase().trim(); // Text from description, e.g., "dry white rice"
+            const textFragment = match[3].toLowerCase().trim(); // Text from description, e.g., "cooked chicken breast"
 
             if (isNaN(amount) || amount <= 0) continue;
 
@@ -371,17 +375,17 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
                  log(`[MEAL_PARSE] No significant words found in fragment: "${textFragment}"`, 'DEBUG', 'CALC');
                  continue; // Cannot match if fragment has no words
             }
-            const fragmentWordSet = new Set(fragmentWords); // Use a Set for faster lookups
 
             let bestMatch = null;
             // Iterate through sorted plan (most specific keys first)
             for (const ing of sortedIngredientPlan) {
-                // Check if ALL significant words from the ingredient key are present in the fragment words
-                if (ing.significantWords && ing.significantWords.length > 0 &&
-                    ing.significantWords.every(keyWord => fragmentWordSet.has(keyWord)))
-                {
-                    bestMatch = ing;
-                    break; // Found the best (most specific) match
+                // V8 Logic: Check if ALL fragment words are present IN the key words
+                if (ing.significantWords && ing.significantWords.length > 0) {
+                    const keyWordSet = new Set(ing.significantWords); // Use Set for efficient check
+                    if (fragmentWords.every(fragWord => keyWordSet.has(fragWord))) {
+                        bestMatch = ing;
+                        break; // Found the best (most specific key length) match satisfying the condition
+                    }
                 }
             }
 
@@ -390,9 +394,9 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
                     key: bestMatch.originalIngredient,
                     grams: amount
                 });
-                log(`[MEAL_PARSE] Matched "${match[0]}" (Frag words: [${fragmentWords.join(', ')}]) to [${bestMatch.originalIngredient}] using key words [${bestMatch.significantWords.join(', ')}] (${amount}${unit})`, 'DEBUG', 'CALC');
+                log(`[MEAL_PARSE] V8 MATCHED "${match[0]}" (FragW: [${fragmentWords.join(', ')}]) to [${bestMatch.originalIngredient}] (KeyW: [${bestMatch.significantWords.join(', ')}]) (${amount}${unit})`, 'DEBUG', 'CALC');
             } else {
-                 log(`[MEAL_PARSE] No match found for "${match[0]}" (Frag words: [${fragmentWords.join(', ')}])`, 'DEBUG', 'CALC');
+                 log(`[MEAL_PARSE] V8 NO MATCH for "${match[0]}" (FragW: [${fragmentWords.join(', ')}])`, 'DEBUG', 'CALC');
             }
         } catch (e) {
              log(`[MEAL_PARSE] Error parsing regex match: ${e.message}`, 'WARN', 'CALC', { match });
@@ -400,7 +404,7 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
     }
     return matches;
 }
-// --- END REVISED HELPER (Mark 51) ---
+// --- END REVISED HELPER (Mark 52) ---
 
 
 /// ===== HELPERS-END ===== ////
@@ -424,10 +428,14 @@ module.exports = async function handler(request, response) {
                 )) : null
             };
             logs.push(logEntry);
-            console.log(`[${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
-            if (data && (level === 'ERROR' || level === 'CRITICAL' || level === 'WARN')) {
-                 console.warn("Log Data:", data);
-            }
+            // Simple console logging for Vercel
+             const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
+             console.log(`${time} [${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
+             // Only log data object for non-DEBUG levels to reduce noise, or if it's an error
+             if (data && (level !== 'DEBUG' || level === 'ERROR' || level === 'CRITICAL' || level === 'WARN')) {
+                 try { console.log("  Data:", JSON.stringify(data, null, 2)); } catch { console.log("  Data: [Serialization Error]"); }
+             }
+
             return logEntry;
         } catch (error) {
             const fallbackEntry = {
@@ -536,9 +544,10 @@ module.exports = async function handler(request, response) {
         }
 
         log(`Blueprint success: ${ingredientPlan.length} valid ingredients.`, 'SUCCESS', 'PHASE');
-        ingredientPlan.forEach((ing, index) => {
-            log(`AI Ingredient ${index + 1}: ${ing.originalIngredient}`, 'DEBUG', 'DATA', ing);
-        });
+        // --- Reduced logging noise ---
+        // ingredientPlan.forEach((ing, index) => {
+        //     log(`AI Ingredient ${index + 1}: ${ing.originalIngredient}`, 'DEBUG', 'DATA', ing);
+        // });
 
         // --- Phase 3: Market Run (Parallel & Optimized) ---
         log("Phase 3: Parallel Market Run...", 'INFO', 'PHASE');
@@ -571,7 +580,12 @@ module.exports = async function handler(request, response) {
 
 
                 for (const [index, { type, query }] of queriesToTry.entries()) {
-                    if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
+                    if (!query || query.toLowerCase() === 'null') { // Added null check
+                         result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0});
+                         log(`[${ingredientKey}] Skipping "${type}" query because it was null/empty.`, 'DEBUG', 'HTTP');
+                         continue;
+                    }
+
 
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
                     pagesTouched = 1;
@@ -590,7 +604,8 @@ module.exports = async function handler(request, response) {
 
                     const rawProducts = priceData.results || [];
                     currentAttemptLog.rawCount = rawProducts.length;
-                    log(`[${ingredientKey}] Raw results (${type}, ${rawProducts.length}):`, 'DEBUG', 'DATA', rawProducts.map(p => p.product_name));
+                    // --- Reduced logging noise ---
+                    // log(`[${ingredientKey}] Raw results (${type}, ${rawProducts.length}):`, 'DEBUG', 'DATA', rawProducts.map(p => p.product_name));
 
                     const validProductsOnPage = [];
                     for (const rawProduct of rawProducts) {
@@ -871,19 +886,21 @@ module.exports = async function handler(request, response) {
                             mealSubtotals.fat += f;
                             mealSubtotals.carbs += c;
                         } else {
-                            // --- NEW (Mark 49): Add canonical fallback for items that failed market run (like Banana)
+                            // --- NEW (Mark 49): Add canonical fallback for items that failed market run ---
                             const ingredientData = ingredientPlan.find(ing => ing.originalIngredient === key);
                             // Only use fallback if market run failed AND nutrition wasn't found (or map lookup failed)
                             if (ingredientData && (finalResults[key]?.source === 'failed' || finalResults[key]?.source === 'error') && (!nutritionData || nutritionData.status !== 'found')) {
                                 log(`[${meal.name}] Using CANONICAL fallback attempt for [${key}] (${grams}g). Market run failed/error.`, 'WARN', 'CALC', { key });
-                                // This is a rough fallback - TODO: Integrate nutrition-search.js canonical logic
-                                const canonicalNutrition = { // Hardcoded examples, replace with actual call
-                                    "Banana": { calories: 89, protein: 1.1, fat: 0.3, carbs: 22.8 },
-                                    "Eggs (700g dozen)": { calories: 143, protein: 12.6, fat: 9.5, carbs: 0.7 }, // Example for eggs
-                                    // Add more common fallbacks if needed
-                                }[key]; // Lookup by key
+                                // Integrate nutrition-search.js canonical logic (if available, else rough fallback)
+                                // const canonicalNutrition = await fetchNutritionData(null, key, log); // Or a simpler lookup
+                                 const canonicalNutrition = { // Hardcoded examples, replace with actual call
+                                     "Banana": { status: 'found', source: 'canonical', calories: 89, protein: 1.1, fat: 0.3, carbs: 22.8 },
+                                     "Eggs": { status: 'found', source: 'canonical', calories: 143, protein: 12.6, fat: 9.5, carbs: 0.7 },
+                                     "Wholemeal Wraps": { status: 'found', source: 'canonical', calories: 300, protein: 9, fat: 5, carbs: 55 }, // Example
+                                     // Add more common fallbacks if needed
+                                 }[key]; // Lookup by key
 
-                                if (canonicalNutrition) {
+                                if (canonicalNutrition && canonicalNutrition.status === 'found') {
                                     const p = (canonicalNutrition.protein / 100) * grams;
                                     const f = (canonicalNutrition.fat / 100) * grams;
                                     const c = (canonicalNutrition.carbs / 100) * grams;
@@ -892,7 +909,7 @@ module.exports = async function handler(request, response) {
                                     mealSubtotals.protein += p;
                                     mealSubtotals.fat += f;
                                     mealSubtotals.carbs += c;
-                                    log(`[${meal.name}] Applied CANONICAL for [${key}]`, 'DEBUG', 'CALC', { kcal, p, f, c });
+                                    log(`[${meal.name}] Applied CANONICAL (${canonicalNutrition.source}) for [${key}]`, 'DEBUG', 'CALC', { kcal, p, f, c });
                                 } else {
                                     log(`[${meal.name}] No CANONICAL fallback found for failed ingredient [${key}]. Skipping.`, 'WARN', 'CALC');
                                 }
