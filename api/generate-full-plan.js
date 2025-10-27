@@ -189,11 +189,14 @@ function calculateRequiredWordScore(productNameLower, requiredWords) {
     requiredWords.forEach(kw => {
         const singular = kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         // Simple plural check: add 's' or 'es'
-        const plural_s = singular.endsWith('s') ? singular + 'es' : singular + 's';
-        const plural_es = singular.endsWith('s') ? singular + 'es' : singular; // handles cases like 'gas' -> 'gases' already covered by plural_s
+        const plural_s = singular.endsWith('s') || singular.endsWith('x') || singular.endsWith('z') || singular.endsWith('ch') || singular.endsWith('sh')
+                         ? singular + 'es'
+                         : singular + 's';
+        // Handle irregular plurals if needed later, but this covers many common cases like tomato/tomatoes, box/boxes
+        // Note: This won't handle 'leaf' -> 'leaves' etc. perfectly yet.
 
         // Regex to check for singular or simple plural forms as whole words
-        const regex = new RegExp(`\\b(${singular}|${plural_s}|${plural_es})\\b`);
+        const regex = new RegExp(`\\b(${singular}|${plural_s})\\b`, 'i'); // Added 'i' flag for case-insensitivity
         if (regex.test(productNameLower)) {
             wordsFound++;
         }
@@ -456,9 +459,9 @@ module.exports = async function handler(request, response) {
         }
 
         // Sanitize the plan
-        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && ing.requiredWords && ing.negativeKeywords && ing.totalGramsRequired >= 0);
+        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && Array.isArray(ing.requiredWords) && Array.isArray(ing.negativeKeywords) && ing.totalGramsRequired >= 0); // Check requiredWords/negativeKeywords are arrays
         if (ingredientPlan.length !== rawIngredientPlan.length) {
-            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries.`, 'WARN', 'DATA');
+            log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries (check types/missing fields).`, 'WARN', 'DATA');
         }
         if (ingredientPlan.length === 0) {
             log("Blueprint fail: All ingredients failed sanitization.", 'CRITICAL', 'LLM');
@@ -475,7 +478,19 @@ module.exports = async function handler(request, response) {
 
         const processSingleIngredientOptimized = async (ingredient) => {
             try {
+                // Input validation for the ingredient object itself
+                if (!ingredient || typeof ingredient !== 'object' || !ingredient.originalIngredient) {
+                    log(`Skipping invalid ingredient data in Market Run`, 'ERROR', 'MARKET_RUN', { ingredient });
+                    return { ['unknown_invalid_ingredient']: { source: 'error', error: 'Invalid ingredient data provided' } };
+                }
+
                 const ingredientKey = ingredient.originalIngredient;
+                // Ensure critical fields exist before proceeding
+                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords)) {
+                    log(`[${ingredientKey}] Skipping due to missing critical fields (normalQuery, requiredWords, negativeKeywords)`, 'ERROR', 'MARKET_RUN', { ingredient });
+                    return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields from AI', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
+                 }
+
                 const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
                 let foundProduct = null;
                 let bestScoreSoFar = -1;
@@ -514,6 +529,11 @@ module.exports = async function handler(request, response) {
                     const validProductsOnPage = [];
                     let pageBestScore = -1;
                     for (const rawProduct of rawProducts) {
+                         // Ensure rawProduct is valid before passing to checklist
+                         if (!rawProduct || !rawProduct.product_name) {
+                             log(`[${ingredientKey}] Skipping invalid raw product data`, 'WARN', 'DATA', { rawProduct });
+                             continue;
+                         }
                         const productWithCategory = { ...rawProduct, product_category: rawProduct.product_category };
                         const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log);
 
@@ -533,8 +553,16 @@ module.exports = async function handler(request, response) {
                         const currentUrls = new Set(result.allProducts.map(p => p.url));
                         filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); currentUrls.add(vp.product.url); } });
 
-                        foundProduct = result.allProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, result.allProducts[0]);
-                        result.currentSelectionURL = foundProduct.url;
+                        // Ensure allProducts is not empty before reducing
+                        if (result.allProducts.length > 0) {
+                            foundProduct = result.allProducts.reduce((best, current) => current.unit_price_per_100 < best.unit_price_per_100 ? current : best, result.allProducts[0]);
+                            result.currentSelectionURL = foundProduct.url;
+                        } else {
+                             log(`[${ingredientKey}] No products available after filtering/price guard (${type}).`, 'WARN', 'DATA');
+                             currentAttemptLog.status = 'no_match_post_filter';
+                             continue; // Try next query type
+                        }
+
                         result.source = 'discovery';
                         currentAttemptLog.status = 'success';
                         bestScoreSoFar = Math.max(bestScoreSoFar, pageBestScore);
@@ -581,7 +609,9 @@ module.exports = async function handler(request, response) {
 
             } catch(e) {
                 log(`CRITICAL Error processing single ingredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
-                return { [ingredient?.originalIngredient || 'unknown_error_item']: { source: 'error', error: e.message } };
+                 // Return error structure even if ingredientKey is unknown
+                 const errorKey = ingredient?.originalIngredient || `unknown_error_${Date.now()}`;
+                 return { [errorKey]: { source: 'error', error: e.message, originalIngredient: errorKey, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
             }
         }; // End processSingleIngredient
 
@@ -600,13 +630,26 @@ module.exports = async function handler(request, response) {
                  return acc;
              }
              const ingredientKey = Object.keys(currentResult)[0];
-             if(ingredientKey && currentResult[ingredientKey]?.source === 'error') {
-                 log(`Processing Error for "${ingredientKey}": ${currentResult[ingredientKey].error}`, 'CRITICAL', 'MARKET_RUN');
-                  const failedIngredientData = ingredientPlan.find(i => i.originalIngredient === ingredientKey);
-                 acc[ingredientKey] = { ...(failedIngredientData || { originalIngredient: ingredientKey }), source: 'error', error: currentResult[ingredientKey].error, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url };
+             // Handle cases where the key might indicate an error (e.g., 'unknown_error_...')
+             if (!ingredientKey || ingredientKey.startsWith('unknown_')) {
+                 log(`Received result with invalid key from concurrentlyMap`, 'ERROR', 'SYSTEM', { currentResult });
                  return acc;
              }
-             return { ...acc, ...currentResult };
+             if(currentResult[ingredientKey]?.source === 'error') {
+                 log(`Processing Error for "${ingredientKey}": ${currentResult[ingredientKey].error}`, 'CRITICAL', 'MARKET_RUN');
+                  const failedIngredientData = ingredientPlan.find(i => i.originalIngredient === ingredientKey);
+                 // Ensure failedIngredientData is an object before spreading
+                 const baseData = typeof failedIngredientData === 'object' && failedIngredientData !== null ? failedIngredientData : { originalIngredient: ingredientKey };
+                 acc[ingredientKey] = { ...baseData, source: 'error', error: currentResult[ingredientKey].error, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url };
+                 return acc;
+             }
+             // Ensure the result being added is a valid object
+             if (typeof currentResult[ingredientKey] === 'object' && currentResult[ingredientKey] !== null) {
+                acc[ingredientKey] = currentResult[ingredientKey];
+             } else {
+                  log(`Received invalid result structure for key "${ingredientKey}"`, 'ERROR', 'SYSTEM', { result: currentResult[ingredientKey] });
+             }
+             return acc;
         }, {});
 
         log("Market Run complete.", 'SUCCESS', 'PHASE');
@@ -619,7 +662,12 @@ module.exports = async function handler(request, response) {
 
         for (const key in finalResults) {
             const result = finalResults[key];
-            if (result && result.source === 'discovery') {
+            // Basic check if result is a valid object
+             if (!result || typeof result !== 'object') {
+                 log(`Skipping invalid result object for key "${key}" during nutrition phase`, 'WARN', 'CALC');
+                 continue;
+             }
+            if (result.source === 'discovery') {
                 const selected = result.allProducts?.find(p => p.url === result.currentSelectionURL);
                 if (selected) {
                     itemsToFetchNutrition.push({
@@ -628,10 +676,20 @@ module.exports = async function handler(request, response) {
                         aiEstCaloriesPer100g: result.aiEstCaloriesPer100g, aiEstProteinPer100g: result.aiEstProteinPer100g,
                         aiEstFatPer100g: result.aiEstFatPer100g, aiEstCarbsPer100g: result.aiEstCarbsPer100g
                     });
+                } else {
+                     log(`[${key}] Result source is 'discovery' but no selected product found. Using AI fallback.`, 'WARN', 'CALC');
+                     // Add to queue with AI fallback if grams and estimate exist
+                     if (result.totalGramsRequired > 0 && typeof result.aiEstCaloriesPer100g === 'number') {
+                         itemsToFetchNutrition.push({
+                             ingredientKey: key, barcode: null, query: null, grams: result.totalGramsRequired,
+                             aiEstCaloriesPer100g: result.aiEstCaloriesPer100g, aiEstProteinPer100g: result.aiEstProteinPer100g,
+                             aiEstFatPer100g: result.aiEstFatPer100g, aiEstCarbsPer100g: result.aiEstCarbsPer100g
+                         });
+                     }
                 }
-            } else if (result && (result.source === 'failed' || result.source === 'error')) {
+            } else if (result.source === 'failed' || result.source === 'error') {
                  if (result.totalGramsRequired > 0 && typeof result.aiEstCaloriesPer100g === 'number') {
-                     log(`[${key}] Market Run failed, adding to nutrition queue with AI fallback.`, 'WARN', 'MARKET_RUN');
+                     log(`[${key}] Market Run failed or error, adding to nutrition queue with AI fallback.`, 'WARN', 'MARKET_RUN');
                      itemsToFetchNutrition.push({
                          ingredientKey: key, barcode: null, query: null, grams: result.totalGramsRequired,
                          aiEstCaloriesPer100g: result.aiEstCaloriesPer100g, aiEstProteinPer100g: result.aiEstProteinPer100g,
@@ -653,7 +711,7 @@ module.exports = async function handler(request, response) {
                         log(`Unhandled Nutri fetch error ${item.ingredientKey}: ${err.message}`, 'CRITICAL', 'HTTP');
                         return { ...item, nut: { status: 'not_found', error: 'Unhandled fetch error' } };
                     })
-                : Promise.resolve({ ...item, nut: { status: 'not_found' } })
+                : Promise.resolve({ ...item, nut: { status: 'not_found' } }) // Handle items pushed with only AI fallback data
             );
 
             log("Nutrition fetch/calc complete.", 'SUCCESS', 'HTTP');
@@ -661,49 +719,54 @@ module.exports = async function handler(request, response) {
             let weeklyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
 
             nutritionResults.forEach(item => {
-                if (!item.grams || item.grams <= 0) return;
-                const nut = item.nut;
-
-                // --- MODIFICATION: Attach nutrition data to the final result object ---
-                const result = finalResults[item.ingredientKey];
-                if (result && result.allProducts) {
-                    const selectedProduct = result.allProducts.find(p =>
-                        (item.barcode && p.barcode === item.barcode) ||
-                        (item.query && p.name === item.query)
-                    );
-                    if (selectedProduct) {
-                        selectedProduct.nutrition = nut; // Attach the full nutrition object
-                    } else if (result.currentSelectionURL) {
-                         // Fallback: attach to current selection if match failed (e.g. market fail)
-                         const current = result.allProducts.find(p => p.url === result.currentSelectionURL);
-                         if (current) current.nutrition = nut;
-                    }
+                 // Check if item and item.nut are valid before proceeding
+                if (!item || !item.ingredientKey || !item.nut) {
+                    log('Skipping invalid item in nutritionResults loop.', 'ERROR', 'CALC', { item });
+                    return;
                 }
-                // --- END MODIFICATION ---
+                if (!item.grams || item.grams <= 0) return; // Skip if no grams required
+
+                const nut = item.nut;
+                const result = finalResults[item.ingredientKey]; // Get corresponding market run result
+
+                // Attach nutrition data (handle case where result might be missing)
+                 if (result && result.allProducts) {
+                     let productToAttach = result.allProducts.find(p => p.url === result.currentSelectionURL);
+                     if (productToAttach) {
+                         productToAttach.nutrition = nut;
+                     } else {
+                         log(`[${item.ingredientKey}] Could not find selected product by URL to attach nutrition.`, 'WARN', 'CALC');
+                     }
+                 } else if (result && result.source !== 'discovery') {
+                     // If market run failed/errored, create a placeholder nutrition field
+                     result.nutrition = nut;
+                 } else {
+                      log(`[${item.ingredientKey}] Could not find market result to attach nutrition data.`, 'WARN', 'CALC');
+                 }
 
                 let proteinG = 0;
                 let fatG = 0;
                 let carbsG = 0;
 
-                if (nut?.status === 'found') {
-                    proteinG = ((nut.protein || 0) / 100) * item.grams;
-                    fatG = ((nut.fat || 0) / 100) * item.grams;
-                    carbsG = ((nut.carbs || 0) / 100) * item.grams;
+                if (nut?.status === 'found' && nut.protein != null && nut.fat != null && nut.carbs != null) {
+                    proteinG = (nut.protein / 100) * item.grams;
+                    fatG = (nut.fat / 100) * item.grams;
+                    carbsG = (nut.carbs / 100) * item.grams;
                 } else if (
-                    // Check for AI fallbacks for macros
+                    // Check for AI fallbacks for macros (ensure they are numbers)
                     typeof item.aiEstProteinPer100g === 'number' &&
                     typeof item.aiEstFatPer100g === 'number' &&
                     typeof item.aiEstCarbsPer100g === 'number'
                 ) {
                     log(`Using AI nutrition fallback for ${item.ingredientKey}.`, 'WARN', 'CALC', {
                         item: item.ingredientKey, grams: item.grams,
-                        source: nut?.status ? `OFF status: ${nut.status}` : 'Market Run Fail'
+                        source: nut?.status ? `Nutri API status: ${nut.status}` : 'Market Run Fail/Error/No Selection'
                     });
                     proteinG = (item.aiEstProteinPer100g / 100) * item.grams;
                     fatG = (item.aiEstFatPer100g / 100) * item.grams;
                     carbsG = (item.aiEstCarbsPer100g / 100) * item.grams;
                 } else {
-                    log(`Skipping nutrition for ${item.ingredientKey}: Data not found and no AI fallback.`, 'INFO', 'CALC');
+                    log(`Skipping nutrition for ${item.ingredientKey}: Data not found and no valid AI fallback.`, 'INFO', 'CALC');
                 }
                 
                 weeklyTotals.protein += proteinG;
@@ -794,10 +857,10 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const cuisineInstruction = creativeIdeas ? `Use creative ideas: ${creativeIdeas}` : (cuisine&&cuisine.trim()?`Focus: ${cuisine}.`:'Neutral.');
 
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
-    const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'allspice' not 'pimento')." : "";
+    const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'capsicum' not 'bell pepper')." : ""; // Updated example
 
     // --- *** MODIFICATION (Mark 43): Updated rules for requiredWords, meal portions, and accuracy *** ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase. NO adjectives, forms, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']). 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 1 cup rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers). 16. CRITICAL ADHERENCE RULE: Meal portions (from 'description') MUST sum precisely to 'totalGramsRequired' for each item in 'ingredients'. The sum of ALL meal subtotals ('subtotal_kcal', etc.) MUST match the provided daily targets (kcal, P, F, C grams) with high precision (within 5%). HIT THESE TARGETS. If your calculations miss the targets by >5%, you MUST correct the meal quantities/subtotals and recalculate until the final sum is compliant. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets. 18. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 19. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 18). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Should be a common package size. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers, integers). YOU MUST DO THIS MATH ACCURATELY. 16. CRITICAL ADHERENCE RULE: Meal portions (from 'description') MUST sum precisely to 'totalGramsRequired' for each item in 'ingredients'. The sum of ALL meal subtotals ('subtotal_kcal', etc.) MUST match the provided daily targets (kcal, P, F, C grams) with high precision (within +/- 5%). HIT THESE TARGETS. Double-check your final sums. If your calculations miss the targets by >5%, you MUST correct the meal quantities/subtotals and recalculate until the final sum is compliant. Show your work via the subtotals. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets. 18. MEAL VARIETY: This is critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 19. COST vs. VARIETY: User costPriority='${costPriority}'. Balance this with Rule 18. Prioritize variety if needed, even if slightly more expensive.`;
     // --- *** END MODIFICATION *** ---
 
 
@@ -861,7 +924,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                                         properties: {
                                             "type": { "type": "STRING" }, // e.g., B, L, D, S1
                                             "name": { "type": "STRING" }, // e.g., Chicken Stir-fry
-                                            "description": { "type": "STRING" }, // e.g., 150g chicken breast, 1 cup rice...
+                                            "description": { "type": "STRING" }, // e.g., 150g chicken breast, 80g dry rice...
                                             "subtotal_kcal": { "type": "NUMBER" },
                                             "subtotal_protein": { "type": "NUMBER" },
                                             "subtotal_fat": { "type": "NUMBER" },
@@ -920,14 +983,22 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                  throw new Error("LLM response is missing a valid 'mealPlan'.");
              }
              for(const dayPlan of parsed.mealPlan) {
+                if (!dayPlan || typeof dayPlan !== 'object') {
+                    log(`Validation Error: Invalid dayPlan object found in mealPlan.`, 'CRITICAL', 'LLM', { dayPlan });
+                    throw new Error(`LLM response contains invalid dayPlan object.`);
+                }
                  if (!dayPlan.meals || !Array.isArray(dayPlan.meals) || dayPlan.meals.length === 0) {
-                     log(`Validation Error: Day ${dayPlan.day} is missing 'meals' array or it's empty.`, 'CRITICAL', 'LLM', dayPlan);
-                     throw new Error(`LLM response has invalid meals for day ${dayPlan.day}.`);
+                     log(`Validation Error: Day ${dayPlan.day || 'undefined'} is missing 'meals' array or it's empty.`, 'CRITICAL', 'LLM', dayPlan);
+                     throw new Error(`LLM response has invalid meals for day ${dayPlan.day || 'undefined'}.`);
                  }
                  for(const meal of dayPlan.meals) {
+                     if (!meal || typeof meal !== 'object') {
+                        log(`Validation Error: Invalid meal object found in day ${dayPlan.day || 'undefined'}.`, 'CRITICAL', 'LLM', { meal });
+                        throw new Error(`LLM response contains invalid meal object for day ${dayPlan.day || 'undefined'}.`);
+                     }
                      if (typeof meal.subtotal_kcal !== 'number' || typeof meal.subtotal_protein !== 'number' || typeof meal.subtotal_fat !== 'number' || typeof meal.subtotal_carbs !== 'number') {
-                          log(`Validation Error: Meal "${meal.name}" on day ${dayPlan.day} is missing required numerical subtotals.`, 'CRITICAL', 'LLM', meal);
-                          throw new Error(`LLM response has missing subtotals for meal "${meal.name}" on day ${dayPlan.day}.`);
+                          log(`Validation Error: Meal "${meal.name || 'unnamed'}" on day ${dayPlan.day || 'undefined'} is missing required numerical subtotals.`, 'CRITICAL', 'LLM', meal);
+                          throw new Error(`LLM response has missing subtotals for meal "${meal.name || 'unnamed'}" on day ${dayPlan.day || 'undefined'}.`);
                      }
                  }
              }
@@ -1109,4 +1180,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
