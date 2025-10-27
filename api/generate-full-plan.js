@@ -1,5 +1,6 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
+// Mark 45: Fixed ReferenceError for fatGrams/proteinGrams/carbGrams in prompt generation.
 // Mark 44: Implemented ChatGPT suggestions - Macro Sum Assertion + Retry, Mandatory Categories, Improved Negative Keywords, Category-Aware Size Validation.
 // Mark 43: Merged stricter AI prompt rules, added meal subtotals schema, fixed validator plural matching.
 // Mark 42: REPLACED macro calculation with industry-standard, dual-validation system.
@@ -27,12 +28,9 @@ const MAX_LLM_PLAN_RETRIES = 1; // Max retries specifically for macro sum mismat
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
 const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'];
-// --- MODIFICATION (Mark 44): Size tolerance removed, replaced by sizeOk function logic ---
-// const SIZE_TOLERANCE = 0.6; // No longer used directly
 const REQUIRED_WORD_SCORE_THRESHOLD = 0.60;
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
-// --- MODIFICATION (Mark 44): Define pantry categories for size validation ---
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
 
 /// ===== CONFIG-END ===== ////
@@ -157,35 +155,16 @@ function parseSize(sizeString) {
     return null;
 }
 
-// --- MODIFICATION (Mark 44): Use ChatGPT suggested plural regex ---
-// function calculateRequiredWordScore(productNameLower, requiredWords) {
-//     if (!requiredWords || requiredWords.length === 0) return 1.0;
-//     let wordsFound = 0;
-//     requiredWords.forEach(kw => {
-//         const singular = kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-//         const plural_s = singular.endsWith('s') || singular.endsWith('x') || singular.endsWith('z') || singular.endsWith('ch') || singular.endsWith('sh')
-//                          ? singular + 'es'
-//                          : singular + 's';
-//         const regex = new RegExp(`\\b(${singular}|${plural_s})\\b`, 'i');
-//         if (regex.test(productNameLower)) {
-//             wordsFound++;
-//         }
-//     });
-//     return wordsFound / requiredWords.length;
-// }
-
-// Using ChatGPT suggested function directly
 function passRequiredWords(title = '', required = []) {
-  if (!required || required.length === 0) return true; // Pass if no required words
+  if (!required || required.length === 0) return true;
   const t = title.toLowerCase();
   return required.every(w => {
-    if (!w) return true; // Ignore empty required words
-    const base = w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Escape regex chars
-    const rx = new RegExp(`\\b${base}(?:e?s)?\\b`, 'i'); // tolerant plural/singular, case-insensitive
+    if (!w) return true;
+    const base = w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp(`\\b${base}(?:e?s)?\\b`, 'i');
     return rx.test(t);
   });
 }
-// --- END MODIFICATION ---
 
 const mean = (arr) => arr.length > 0 ? arr.reduce((acc, val) => acc + val, 0) / arr.length : 0;
 const stdev = (arr) => {
@@ -215,52 +194,40 @@ function applyPriceOutlierGuard(products, log, ingredientKey) {
     });
 }
 
-// --- MODIFICATION (Mark 44): Add passCategory helper ---
 function passCategory(product = {}, allowed = []) {
-  // Allow if no categories specified, or product has no category
   if (!allowed || allowed.length === 0 || !product.product_category) return true;
   const pc = product.product_category.toLowerCase();
-  // Check if the product category string *contains* any of the allowed category terms
   return allowed.some(a => pc.includes(a.toLowerCase()));
 }
-// --- END MODIFICATION ---
 
-// --- MODIFICATION (Mark 44): Add sizeOk helper ---
 function sizeOk(productSizeParsed, targetSize, allowedCategories = [], log, ingredientKey, checkLogPrefix) {
-    // If no size info available for product or target, consider it okay.
     if (!productSizeParsed || !targetSize || !targetSize.value || !targetSize.unit) return true;
 
-    // Check unit consistency
     if (productSizeParsed.unit !== targetSize.unit) {
         log(`${checkLogPrefix}: WARN (Size Unit Mismatch ${productSizeParsed.unit} vs ${targetSize.unit})`, 'DEBUG', 'CHECKLIST');
-        return false; // Strict unit match required for now
+        return false;
     }
 
     const prodValue = productSizeParsed.value;
     const targetValue = targetSize.value;
 
-    // Determine category type
     const isPantry = PANTRY_CATEGORIES.some(c => allowedCategories?.some(ac => ac.toLowerCase() === c));
-    const maxMultiplier = isPantry ? 3.0 : 2.0; // Pantry items can be up to 3x target size
-    const minMultiplier = 0.5; // All items must be at least half the target size
+    const maxMultiplier = isPantry ? 3.0 : 2.0;
+    const minMultiplier = 0.5;
 
     const lowerBound = targetValue * minMultiplier;
     const upperBound = targetValue * maxMultiplier;
 
     if (prodValue >= lowerBound && prodValue <= upperBound) {
-        return true; // Size is within the acceptable range
+        return true;
     } else {
         log(`${checkLogPrefix}: FAIL (Size ${prodValue}${productSizeParsed.unit} outside ${lowerBound.toFixed(0)}-${upperBound.toFixed(0)}${targetSize.unit} for ${isPantry ? 'pantry' : 'perishable'})`, 'DEBUG', 'CHECKLIST');
         // TODO: Implement cost-aware override later if needed (check unitPrice < expectedUnitPrice)
         return false;
     }
 }
-// --- END MODIFICATION ---
 
 
-/**
- * Smarter Checklist function - Includes Category Guard and updated Size Check
- */
 function runSmarterChecklist(product, ingredientData, log) {
     const productNameLower = product.product_name?.toLowerCase() || '';
     if (!productNameLower) {
@@ -269,16 +236,14 @@ function runSmarterChecklist(product, ingredientData, log) {
 
     const { originalIngredient, requiredWords = [], negativeKeywords = [], targetSize, allowedCategories = [] } = ingredientData;
     const checkLogPrefix = `Checklist [${originalIngredient}] for "${product.product_name}"`;
-    let score = 1.0; // Start score at 1, fail checks return 0 or lower score if needed later
+    let score = 1.0;
 
-    // --- 1. Banned Words ---
     const bannedWordFound = BANNED_KEYWORDS.find(kw => productNameLower.includes(kw));
     if (bannedWordFound) {
         log(`${checkLogPrefix}: FAIL (Global Banned: '${bannedWordFound}')`, 'DEBUG', 'CHECKLIST');
         return { pass: false, score: 0 };
     }
 
-    // --- 2. Negative Keywords ---
     if (negativeKeywords && negativeKeywords.length > 0) {
         const negativeWordFound = negativeKeywords.find(kw => productNameLower.includes(kw.toLowerCase()));
         if (negativeWordFound) {
@@ -287,29 +252,23 @@ function runSmarterChecklist(product, ingredientData, log) {
         }
     }
 
-    // --- 3. Required Words (using ChatGPT version) ---
     if (!passRequiredWords(productNameLower, requiredWords || [])) {
         log(`${checkLogPrefix}: FAIL (Required words missing: [${(requiredWords || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
-        return { pass: false, score: 0 }; // Treat required words as hard fail for now
+        return { pass: false, score: 0 };
     }
 
-    // --- 4. Category Allowlist (using passCategory helper) ---
     if (!passCategory(product, allowedCategories)) {
          log(`${checkLogPrefix}: FAIL (Category Mismatch: Product category "${product.product_category}" not in allowlist [${(allowedCategories || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
-         return { pass: false, score: 0 }; // Hard fail on category mismatch
+         return { pass: false, score: 0 };
     }
 
-    // --- 5. Size Check (using sizeOk helper) ---
     const productSizeParsed = parseSize(product.product_size);
-    // Pass allowedCategories directly to sizeOk
     if (!sizeOk(productSizeParsed, targetSize, allowedCategories, log, originalIngredient, checkLogPrefix)) {
-        // Log message is handled within sizeOk
-        return { pass: false, score: 0 }; // Hard fail on size mismatch for now
+        return { pass: false, score: 0 };
     }
 
-    // If all checks pass
     log(`${checkLogPrefix}: PASS`, 'DEBUG', 'CHECKLIST');
-    return { pass: true, score: score }; // Return score 1 if pass
+    return { pass: true, score: score };
 }
 
 
@@ -340,7 +299,7 @@ module.exports = async function handler(request, response) {
                 tag: tag.toUpperCase(),
                 message,
                 data: data ? JSON.parse(JSON.stringify(data, (key, value) =>
-                    typeof value === 'object' && value !== null ? value : String(value) // Convert non-plain objects to string
+                    typeof value === 'object' && value !== null ? value : String(value)
                 )) : null
             };
             logs.push(logEntry);
@@ -414,7 +373,9 @@ module.exports = async function handler(request, response) {
         const calorieTarget = calculateCalorieTarget(formData, log);
         log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
         const macroTargets = calculateMacroTargets(calorieTarget, goal, weightKg, log);
-        const { proteinGrams, fatGrams, carbGrams } = macroTargets;
+        // --- *** MODIFICATION (Mark 45): Use macroTargets object directly *** ---
+        // const { proteinGrams, fatGrams, carbGrams } = macroTargets;
+        // --- *** END MODIFICATION *** ---
 
         let llmResult;
         let planAttempt = 0;
@@ -424,40 +385,45 @@ module.exports = async function handler(request, response) {
              planAttempt++;
              log(`Attempt ${planAttempt} to generate technically valid plan from LLM.`, 'INFO', 'LLM_CALL');
              try {
-                 llmResult = await generateLLMPlanAndMeals(formData, calorieTarget, proteinGrams, fatGrams, carbGrams, creativeIdeas, log, planAttempt > 1); // Pass retry flag
+                 // --- *** MODIFICATION (Mark 45): Pass macroTargets object members directly *** ---
+                 llmResult = await generateLLMPlanAndMeals(
+                     formData,
+                     calorieTarget,
+                     macroTargets.proteinGrams, // Pass calculated value
+                     macroTargets.fatGrams,     // Pass calculated value
+                     macroTargets.carbGrams,    // Pass calculated value
+                     creativeIdeas,
+                     log,
+                     planAttempt > 1
+                 );
+                 // --- *** END MODIFICATION *** ---
 
-                 // --- MODIFICATION (Mark 44): Add macro sum validation ---
-                 assertDailyMacroSums(llmResult?.mealPlan || [], { kcal: calorieTarget, protein_g: proteinGrams, fat_g: fatGrams, carbs_g: carbGrams }, log);
-                 macroCheckPassed = true; // If assert doesn't throw, we passed
+                 assertDailyMacroSums(llmResult?.mealPlan || [], { kcal: calorieTarget, protein_g: macroTargets.proteinGrams, fat_g: macroTargets.fatGrams, carbs_g: macroTargets.carbGrams }, log);
+                 macroCheckPassed = true;
                  log("Macro sum validation passed.", 'SUCCESS', 'LLM_VALIDATION');
-                 // --- END MODIFICATION ---
 
              } catch (llmError) {
                  log(`Error during generateLLMPlanAndMeals call or validation (Attempt ${planAttempt}): ${llmError.message}`, 'WARN', 'LLM_CALL', { name: llmError.name });
 
-                 // Check if it's the specific macro mismatch error
                  if (llmError.message === "PLANNER_SUM_MISMATCH") {
                       if (planAttempt <= MAX_LLM_PLAN_RETRIES) {
                          log(`Retrying LLM call due to macro mismatch (Attempt ${planAttempt}).`, 'WARN', 'LLM_RETRY');
-                         await delay(1000); // Small delay before retry
-                         continue; // Continue to next attempt in the while loop
+                         await delay(1000);
+                         continue;
                      } else {
                          log(`Macro mismatch persisted after ${MAX_LLM_PLAN_RETRIES + 1} attempts. Proceeding with inaccurate plan.`, 'CRITICAL', 'LLM_VALIDATION');
-                         // Allow loop to exit, macroCheckPassed remains false (or true if last attempt somehow passed)
-                         // llmResult might contain the inaccurate plan from the last attempt
-                          if (!llmResult) { // Ensure llmResult exists even if retry failed catastrophically
+                          if (!llmResult) {
                                throw new Error("LLM failed to produce any plan after retries.");
                           }
-                          macroCheckPassed = true; // Force exit loop and use potentially bad plan
+                          macroCheckPassed = true;
                      }
                  } else {
-                     // If it's a different error, re-throw immediately
                      throw llmError;
                  }
              }
         } // End while loop
 
-        const { ingredients, mealPlan = [] } = llmResult || {}; // Use final llmResult
+        const { ingredients, mealPlan = [] } = llmResult || {};
         const rawIngredientPlan = Array.isArray(ingredients) ? ingredients : [];
 
 
@@ -466,7 +432,7 @@ module.exports = async function handler(request, response) {
             throw new Error("Blueprint fail: AI did not return any ingredients.");
         }
 
-        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && Array.isArray(ing.requiredWords) && Array.isArray(ing.negativeKeywords) && Array.isArray(ing.allowedCategories) && ing.totalGramsRequired >= 0); // Added allowedCategories check
+        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && Array.isArray(ing.requiredWords) && Array.isArray(ing.negativeKeywords) && Array.isArray(ing.allowedCategories) && ing.totalGramsRequired >= 0);
         if (ingredientPlan.length !== rawIngredientPlan.length) {
             log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries (check types/missing fields like allowedCategories).`, 'WARN', 'DATA');
         }
@@ -490,7 +456,7 @@ module.exports = async function handler(request, response) {
                     return { ['unknown_invalid_ingredient']: { source: 'error', error: 'Invalid ingredient data provided' } };
                 }
                 const ingredientKey = ingredient.originalIngredient;
-                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories)) { // Added allowedCategories check
+                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories)) {
                     log(`[${ingredientKey}] Skipping due to missing critical fields (normalQuery, requiredWords, negativeKeywords, allowedCategories)`, 'ERROR', 'MARKET_RUN', { ingredient });
                     return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields from AI', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
                  }
@@ -530,26 +496,23 @@ module.exports = async function handler(request, response) {
                     log(`[${ingredientKey}] Raw results (${type}, ${rawProducts.length}):`, 'DEBUG', 'DATA', rawProducts.map(p => p.product_name));
 
                     const validProductsOnPage = [];
-                    // let pageBestScore = -1; // Removed, score is now boolean pass/fail
                     for (const rawProduct of rawProducts) {
                          if (!rawProduct || !rawProduct.product_name) {
                              log(`[${ingredientKey}] Skipping invalid raw product data`, 'WARN', 'DATA', { rawProduct });
                              continue;
                          }
                         const productWithCategory = { ...rawProduct, product_category: rawProduct.product_category };
-                        // Pass ingredientData (contains allowedCategories) to checklist
                         const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log);
 
                         if (checklistResult.pass) {
-                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: 1 }); // Score is just 1 for pass now
-                             // pageBestScore = 1; // Mark that we found at least one pass
+                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: 1 });
                         }
                     }
 
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
 
                     currentAttemptLog.foundCount = filteredProducts.length;
-                    currentAttemptLog.bestScore = filteredProducts.length > 0 ? 1 : 0; // Simplified score
+                    currentAttemptLog.bestScore = filteredProducts.length > 0 ? 1 : 0;
 
                     if (filteredProducts.length > 0) {
                         log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
@@ -557,7 +520,6 @@ module.exports = async function handler(request, response) {
                         filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); currentUrls.add(vp.product.url); } });
 
                         if (result.allProducts.length > 0) {
-                            // Select best based on unit price
                             foundProduct = result.allProducts.reduce((best, current) =>
                                 (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best,
                              result.allProducts[0]);
@@ -570,7 +532,7 @@ module.exports = async function handler(request, response) {
 
                         result.source = 'discovery';
                         currentAttemptLog.status = 'success';
-                        bestScoreSoFar = 1; // Mark as success
+                        bestScoreSoFar = 1;
 
                         acceptedQueryIdx = index;
                         acceptedQueryType = type;
@@ -591,8 +553,7 @@ module.exports = async function handler(request, response) {
                              mode, bucket_wait_ms
                          });
 
-                        // Keep SKIP_HEURISTIC_SCORE_THRESHOLD logic if needed, comparing bestScoreSoFar (now 1 or -1)
-                        if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) { // This threshold might need adjustment if score isn't granular
+                        if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                             log(`[${ingredientKey}] Skip heuristic hit (Tight query successful).`, 'INFO', 'MARKET_RUN');
                             break;
                         }
@@ -727,11 +688,10 @@ module.exports = async function handler(request, response) {
                          productToAttach.nutrition = nut;
                      } else {
                          log(`[${item.ingredientKey}] Could not find selected product by URL to attach nutrition.`, 'WARN', 'CALC');
-                         // Attempt to attach to first product if selection URL was invalid/missing
                          if (result.allProducts.length > 0) result.allProducts[0].nutrition = nut;
                      }
                  } else if (result && result.source !== 'discovery') {
-                     result.nutrition = nut; // Attach to the placeholder result
+                     result.nutrition = nut;
                  } else {
                       log(`[${item.ingredientKey}] Could not find market result to attach nutrition data.`, 'WARN', 'CALC');
                  }
@@ -827,31 +787,29 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
     }
 }
 
-// --- MODIFICATION (Mark 44): Add helper for macro validation ---
 const within5 = (v, t) => {
-    if (t === 0 && v === 0) return true; // Avoid division by zero if target and value are both 0
-    if (t === 0) return false; // If target is 0 but value isn't, it's definitely outside 5%
-    return Math.abs(v - t) / Math.max(1, Math.abs(t)) <= 0.05; // Use absolute target for denominator
+    if (t === 0 && v === 0) return true;
+    if (t === 0) return false;
+    return Math.abs(v - t) / Math.max(1, Math.abs(t)) <= 0.05;
 };
 
 function assertDailyMacroSums(mealPlanDays = [], targets = {}, log) {
     if (!mealPlanDays || mealPlanDays.length === 0) {
         log("Macro Sum Check: No meal plan days provided.", 'WARN', 'LLM_VALIDATION');
-        return; // Nothing to check
+        return;
     }
     const { kcal, protein_g, fat_g, carbs_g } = targets;
     if (kcal == null || protein_g == null || fat_g == null || carbs_g == null) {
         log("Macro Sum Check: Missing target values.", 'ERROR', 'LLM_VALIDATION', { targets });
-        throw new Error("PLANNER_SUM_MISMATCH"); // Treat missing targets as mismatch
+        throw new Error("PLANNER_SUM_MISMATCH");
     }
 
     for (const dayData of mealPlanDays) {
         if (!dayData || !Array.isArray(dayData.meals)) {
              log(`Macro Sum Check: Invalid day data or missing meals for day ${dayData?.day || 'unknown'}.`, 'WARN', 'LLM_VALIDATION');
-             continue; // Skip invalid day structure
+             continue;
         }
         const sums = dayData.meals.reduce((acc, meal) => {
-            // Ensure meal and subtotals exist and are numbers before adding
             if (meal && typeof meal === 'object') {
                  acc.kcal += (typeof meal.subtotal_kcal === 'number' ? meal.subtotal_kcal : 0);
                  acc.p += (typeof meal.subtotal_protein === 'number' ? meal.subtotal_protein : 0);
@@ -868,16 +826,16 @@ function assertDailyMacroSums(mealPlanDays = [], targets = {}, log) {
 
         if (!ok) {
             log(`Macro Sum Check FAILED for Day ${dayData.day}: Targets(K:${kcal},P:${protein_g},F:${fat_g},C:${carbs_g}) vs Sums(K:${sums.kcal.toFixed(0)},P:${sums.p.toFixed(0)},F:${sums.f.toFixed(0)},C:${sums.c.toFixed(0)})`, 'ERROR', 'LLM_VALIDATION');
-            throw new Error("PLANNER_SUM_MISMATCH"); // Trigger re-prompt
+            throw new Error("PLANNER_SUM_MISMATCH");
         } else {
              log(`Macro Sum Check PASSED for Day ${dayData.day}: Targets(K:${kcal},P:${protein_g},F:${fat_g},C:${carbs_g}) vs Sums(K:${sums.kcal.toFixed(0)},P:${sums.p.toFixed(0)},F:${sums.f.toFixed(0)},C:${sums.c.toFixed(0)})`, 'INFO', 'LLM_VALIDATION');
         }
     }
 }
-// --- END MODIFICATION ---
 
 
-async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log, isRetry = false) { // Added isRetry flag
+// --- *** MODIFICATION (Mark 45): Correct parameter names used in function signature *** ---
+async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log, isRetry = false) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const GEMINI_API_URL = GEMINI_API_URL_BASE;
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
@@ -887,19 +845,16 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'capsicum' not 'bell pepper')." : "";
 
-    // --- *** MODIFICATION (Mark 44): Updated prompt rules based on ChatGPT *** ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers, integers). YOU MUST DO THIS MATH ACCURATELY. 16. Macro equality constraint: For each day, the SUM of all meal.subtotal_kcal MUST be within ±5% of the daily_kcal_target (${calorieTarget}). The same applies to protein (target ${proteinTargetGrams}g), fat (target ${fatGrams}g), and carbs (target ${carbGrams}g). If any sum is outside ±5%, you MUST ADJUST meal portions (grams in description) and recompute all affected meal subtotals BEFORE returning the final JSON. Double-check your final sums. Return the validated JSON. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 18. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 19. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 18. Prioritize variety if needed. Output ONLY the valid JSON object described by the schema, nothing else.`;
+    // --- *** MODIFICATION (Mark 45): Corrected template literals to use parameter names *** ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers, integers). YOU MUST DO THIS MATH ACCURATELY. 16. Macro equality constraint: For each day, the SUM of all meal.subtotal_kcal MUST be within ±5% of the daily_kcal_target (${calorieTarget}). The same applies to protein (target ${proteinTargetGrams}g), fat (target ${fatTargetGrams}g), and carbs (target ${carbTargetGrams}g). If any sum is outside ±5%, you MUST ADJUST meal portions (grams in description) and recompute all affected meal subtotals BEFORE returning the final JSON. Double-check your final sums. Return the validated JSON. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 18. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 19. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 18. Prioritize variety if needed. Output ONLY the valid JSON object described by the schema, nothing else.`;
+
+    let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
     // --- *** END MODIFICATION *** ---
 
-    // Base user query
-    let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatGrams}g, Carbs ~${carbGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
-
-    // --- MODIFICATION (Mark 44): Add retry instruction if needed ---
     if (isRetry) {
         userQuery = `PREVIOUS ATTEMPT FAILED MACRO CHECK (Rule 16). Adjust meal portion sizes (grams) significantly and recalculate meal subtotals precisely to ensure the SUM of subtotals for each day matches the daily targets (within +/- 5%).\nORIGINAL REQUEST:\n${userQuery}`;
         log("Adding retry instruction to LLM prompt.", 'WARN', 'LLM_RETRY');
     }
-    // --- END MODIFICATION ---
 
     if (userQuery.trim().length < 50) {
         log("Critical Input Failure: User query is too short/empty.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery, sanitizedData: getSanitizedFormData(formData) });
@@ -908,13 +863,12 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
 
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...', sanitizedData: getSanitizedFormData(formData) });
 
-    // --- Schema Updated (Mark 43) - Remains Valid ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: {
             responseMimeType: "application/json",
-            responseSchema: { /* Schema from Mark 43 remains unchanged */
+            responseSchema: { /* Schema remains unchanged */
                 type: "OBJECT",
                 properties: {
                     "ingredients": {
@@ -932,13 +886,13 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                                 "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
                                 "totalGramsRequired": { "type": "NUMBER" },
                                 "quantityUnits": { "type": "STRING" },
-                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }}, // Now mandatory via prompt
+                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }},
                                 "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstCarbsPer100g": { "type": "NUMBER", nullable: true }
                             },
-                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "allowedCategories", "totalGramsRequired", "quantityUnits"] // Added allowedCategories
+                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "allowedCategories", "totalGramsRequired", "quantityUnits"]
                         }
                     },
                     "mealPlan": {
@@ -991,20 +945,19 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
             const parsed = JSON.parse(jsonText);
             log("Parsed Technical", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
 
-            // Basic validation (already updated in Mark 43)
             if (!parsed || typeof parsed !== 'object') {
                  log("Validation Error: Root response is not an object.", 'CRITICAL', 'LLM', parsed);
                  throw new Error("LLM response was not a valid object.");
             }
              if (parsed.ingredients && !Array.isArray(parsed.ingredients)) {
                  log("Validation Error: 'ingredients' exists but is not an array.", 'CRITICAL', 'LLM', parsed);
-                 throw new Error("LLM response 'ingredients' is not an array."); // More specific error
+                 throw new Error("LLM response 'ingredients' is not an array.");
              }
              if (!parsed.mealPlan || !Array.isArray(parsed.mealPlan) || parsed.mealPlan.length === 0) {
                  log("Validation Error: 'mealPlan' is missing, not an array, or empty.", 'CRITICAL', 'LLM', parsed);
                  throw new Error("LLM response is missing a valid 'mealPlan'.");
              }
-             for(const dayPlan of parsed.mealPlan) { /* ... subtotal validation from Mark 43 ... */
+             for(const dayPlan of parsed.mealPlan) {
                 if (!dayPlan || typeof dayPlan !== 'object') throw new Error(`LLM response contains invalid dayPlan object.`);
                 if (!dayPlan.meals || !Array.isArray(dayPlan.meals) || dayPlan.meals.length === 0) throw new Error(`LLM response has invalid meals for day ${dayPlan.day || 'undefined'}.`);
                 for(const meal of dayPlan.meals) {
@@ -1014,7 +967,6 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                      }
                  }
             }
-            // --- MODIFICATION (Mark 44): Validate required 'allowedCategories' in ingredients ---
             if (parsed.ingredients) {
                  for(const ing of parsed.ingredients) {
                      if (!ing || !Array.isArray(ing.allowedCategories) || ing.allowedCategories.length === 0) {
@@ -1023,14 +975,11 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                      }
                  }
             }
-            // --- END MODIFICATION ---
 
             return parsed;
         } catch (e) {
             log(`Failed to parse or validate Technical AI JSON: ${e.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 1000) });
-            // Re-throw schema/parse errors specifically
             if (e.message.includes("LLM response") || e.message.includes("Failed to parse LLM JSON")) throw e;
-            // Otherwise wrap as a generic parse failure
             throw new Error(`Failed to parse LLM JSON: ${e.message}`);
         }
     } catch (error) {
@@ -1073,7 +1022,7 @@ function calculateCalorieTarget(formData, log = console.log) {
          log(`Invalid goal "${goal}", using default 'maintain' (0 adjustment).`, 'WARN', 'CALC');
          adjustmentFactor = 0;
     }
-    const adjustment = tdee * adjustmentFactor; // Calculate adjustment based on TDEE
+    const adjustment = tdee * adjustmentFactor;
     
     log(`Calorie Calc: BMR=${bmr.toFixed(0)}, TDEE=${tdee.toFixed(0)}, Goal=${goal}, Adjustment=${adjustment.toFixed(0)}`, 'INFO', 'CALC');
     
@@ -1112,7 +1061,7 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 
     const FAT_MAX_PERCENT = 0.35;
     if (fatPercent > FAT_MAX_PERCENT) {
-        log(`ADJUSTMENT: Initial fat ${fatPercent.toFixed(1)*100}% > ${FAT_MAX_PERCENT*100}%. Capping fat and recalculating carbs.`, 'WARN', 'CALC'); // Log percentage
+        log(`ADJUSTMENT: Initial fat ${fatPercent.toFixed(1)*100}% > ${FAT_MAX_PERCENT*100}%. Capping fat and recalculating carbs.`, 'WARN', 'CALC');
         fatGrams = (calorieTarget * FAT_MAX_PERCENT) / 9;
         carbsNeedRecalc = true;
     }
@@ -1120,7 +1069,7 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
     if (carbsNeedRecalc) {
         const proteinCalories = proteinGrams * 4;
         const fatCalories = fatGrams * 9;
-        const carbCalories = Math.max(0, calorieTarget - proteinCalories - fatCalories); // Ensure non-negative
+        const carbCalories = Math.max(0, calorieTarget - proteinCalories - fatCalories);
         carbGrams = carbCalories / 4;
         log(`RECALC: New Carb Target: ${carbGrams.toFixed(0)}g`, 'INFO', 'CALC');
     }
