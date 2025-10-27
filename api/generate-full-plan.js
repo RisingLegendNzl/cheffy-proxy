@@ -1249,8 +1249,8 @@ JSON Structure:
 
     let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
-    // --- Combine system prompt and user query for v1 API ---
-    const combinedPrompt = `${systemPrompt}\n\nUSER REQUEST:\n${userQuery}`;
+    // --- DO NOT Combine system prompt and user query ---
+    // const combinedPrompt = `${systemPrompt}\n\nUSER REQUEST:\n${userQuery}`; // OLD
 
     if (userQuery.trim().length < 50) { // Check original user query length
         log("Critical Input Failure: User query is too short/empty.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery, sanitizedData: getSanitizedFormData(formData) });
@@ -1258,13 +1258,18 @@ JSON Structure:
         throw new Error("Plan generation failed: Cannot generate plan due to missing user input.");
     }
 
-    log("Technical Prompt (Combined)", 'INFO', 'LLM_PROMPT', { promptStart: combinedPrompt.substring(0, 500) + '...', sanitizedData: getSanitizedFormData(formData) });
+    log("Technical Prompt (Separated)", 'INFO', 'LLM_PROMPT', { 
+        systemPromptStart: systemPrompt.substring(0, 200) + '...', 
+        userQuery: userQuery,
+        sanitizedData: getSanitizedFormData(formData) 
+    });
 
-    // --- FIX: Simplified payload for v1 API ---
+    // --- FIX: Use systemInstruction payload for v1beta API ---
     const payload = {
-        contents: [{ parts: [{ text: combinedPrompt }] }],
-        // Removed systemInstruction
-        // Removed generationConfig
+        contents: [{ parts: [{ text: userQuery }] }], // Send only the user query here
+        systemInstruction: {
+            parts: [{ text: systemPrompt }] // Send the system prompt here
+        }
     };
     // --- End FIX ---
 
