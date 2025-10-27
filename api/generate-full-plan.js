@@ -113,12 +113,32 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 }
 
 
+// --- START: MODIFIED fetchWithRetry ---
 async function fetchWithRetry(url, options, log) {
+    // Add a generous timeout for the large Gemini payload
+    const REQUEST_TIMEOUT_MS = 90000; // 90 seconds
+
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        
+        // --- START FIX: Add AbortController for timeout ---
+        const controller = new AbortController();
+        const timeout = setTimeout(() => {
+            controller.abort();
+        }, REQUEST_TIMEOUT_MS);
+        // --- END FIX ---
+
         try {
-            log(`Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, options);
+            log(`Attempt ${attempt}: Fetching from ${url} (Timeout: ${REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
+            
+            const response = await fetch(url, { 
+                ...options,
+                signal: controller.signal // Pass the abort signal
+            });
+            
+            clearTimeout(timeout); // Clear the timeout if fetch completes
+
             if (response.ok) return response;
+            
             if (response.status === 429 || response.status >= 500) {
                 log(`Attempt ${attempt}: Received retryable error ${response.status} from API. Retrying...`, 'WARN', 'HTTP');
             } else {
@@ -127,13 +147,20 @@ async function fetchWithRetry(url, options, log) {
                 throw new Error(`API call failed with client error ${response.status}. Body: ${errorBody}`);
             }
         } catch (error) {
-             if (!error.message?.startsWith('API call failed with client error')) {
+             clearTimeout(timeout); // Always clear timeout on error
+             
+             // --- START FIX: Handle AbortError specifically ---
+             if (error.name === 'AbortError') {
+                 log(`Attempt ${attempt}: Fetch timed out after ${REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
+             } else if (!error.message?.startsWith('API call failed with client error')) {
+                 // --- END FIX ---
                 log(`Attempt ${attempt}: Fetch failed for API with error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
                 console.error(`Fetch Error Details (Attempt ${attempt}):`, error);
             } else {
                  throw error; // Rethrow client errors immediately
             }
         }
+        
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 2000;
             await delay(delayTime);
@@ -142,6 +169,7 @@ async function fetchWithRetry(url, options, log) {
     log(`API call failed definitively after ${MAX_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
     throw new Error(`API call to ${url} failed after ${MAX_RETRIES} attempts.`);
 }
+// --- END: MODIFIED fetchWithRetry ---
 
 
 const calculateUnitPrice = (price, size) => {
@@ -1462,5 +1490,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
 
