@@ -1,5 +1,6 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
+// Mark 47: Fixed telemetry variable names (camelCase) to resolve ReferenceError crash.
 // Mark 46: Rewrote Prompt Rule 16 for explicit final sum verification. Added defensive check for accepted_query_idx ReferenceError.
 // Mark 45: Fixed ReferenceError for fatGrams/proteinGrams/carbGrams in prompt generation.
 // Mark 44: Implemented ChatGPT suggestions - Macro Sum Assertion + Retry, Mandatory Categories, Improved Negative Keywords, Category-Aware Size Validation.
@@ -248,7 +249,7 @@ function runSmarterChecklist(product, ingredientData, log) {
 
 
     const checkLogPrefix = `Checklist [${originalIngredient}] for "${product.product_name}"`;
-    let score = 1.0;
+    let score = 1.0; // Use score for skip heuristic if needed later
 
     const bannedWordFound = BANNED_KEYWORDS.find(kw => productNameLower.includes(kw));
     if (bannedWordFound) {
@@ -283,7 +284,7 @@ function runSmarterChecklist(product, ingredientData, log) {
     }
 
     log(`${checkLogPrefix}: PASS`, 'DEBUG', 'CHECKLIST');
-    return { pass: true, score: score };
+    return { pass: true, score: score }; // Return score
 }
 
 
@@ -393,10 +394,12 @@ module.exports = async function handler(request, response) {
         let planAttempt = 0;
         let macroCheckPassed = false;
         
+        // Loop for retrying LLM call if macro check fails
         while (planAttempt <= MAX_LLM_PLAN_RETRIES && !macroCheckPassed) {
              planAttempt++;
              log(`Attempt ${planAttempt} to generate technically valid plan from LLM.`, 'INFO', 'LLM_CALL');
              try {
+                 // Generate the plan (potentially a retry)
                  llmResult = await generateLLMPlanAndMeals(
                      formData,
                      calorieTarget,
@@ -405,27 +408,33 @@ module.exports = async function handler(request, response) {
                      macroTargets.carbGrams,
                      creativeIdeas,
                      log,
-                     planAttempt > 1
+                     planAttempt > 1 // Pass true if it's a retry attempt
                  );
 
+                 // Validate the generated plan's macro sums
                  assertDailyMacroSums(llmResult?.mealPlan || [], { kcal: calorieTarget, protein_g: macroTargets.proteinGrams, fat_g: macroTargets.fatGrams, carbs_g: macroTargets.carbGrams }, log);
-                 macroCheckPassed = true;
+                 macroCheckPassed = true; // If assert doesn't throw, it passed
                  log("Macro sum validation passed.", 'SUCCESS', 'LLM_VALIDATION');
 
              } catch (llmError) {
                  log(`Error during generateLLMPlanAndMeals call or validation (Attempt ${planAttempt}): ${llmError.message}`, 'WARN', 'LLM_CALL', { name: llmError.name });
 
+                 // Check if the error was specifically the macro mismatch
                  if (llmError.message === "PLANNER_SUM_MISMATCH") {
+                      // Check if we still have retries left
                       if (planAttempt <= MAX_LLM_PLAN_RETRIES) {
                          log(`Retrying LLM call due to macro mismatch (Attempt ${planAttempt}).`, 'WARN', 'LLM_RETRY');
-                         await delay(1000);
+                         await delay(1000); // Optional delay before retry
+                         // Continue loop to retry
                          continue;
                      } else {
+                         // Max retries reached, log critical and proceed with the last (inaccurate) plan
                          log(`Macro mismatch persisted after ${MAX_LLM_PLAN_RETRIES + 1} attempts. Proceeding with inaccurate plan.`, 'CRITICAL', 'LLM_VALIDATION');
+                          // Ensure we have *some* result, even if inaccurate
                           if (!llmResult) {
                                throw new Error("LLM failed to produce any plan after retries.");
                           }
-                          macroCheckPassed = true; // Force exit loop and use potentially bad plan
+                          macroCheckPassed = true; // Force exit loop
                      }
                  } else {
                      // If it's a different error (e.g., schema validation, API error), re-throw immediately
@@ -434,7 +443,8 @@ module.exports = async function handler(request, response) {
              }
         } // End while loop
 
-        const { ingredients, mealPlan = [] } = llmResult || {};
+        // Proceed with the (potentially inaccurate on last retry) llmResult
+        const { ingredients, mealPlan = [] } = llmResult || {}; // Use last result even if check failed on final retry
         const rawIngredientPlan = Array.isArray(ingredients) ? ingredients : [];
 
 
@@ -444,7 +454,7 @@ module.exports = async function handler(request, response) {
         }
 
         // Ensure allowedCategories exists (as required by prompt now)
-        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && Array.isArray(ing.requiredWords) && Array.isArray(ing.negativeKeywords) && Array.isArray(ing.allowedCategories) && ing.allowedCategories.length > 0 && ing.totalGramsRequired >= 0);
+        const ingredientPlan = rawIngredientPlan.filter(ing => ing && ing.originalIngredient && ing.normalQuery && Array.isArray(ing.requiredWords) && Array.isArray(ing.negativeKeywords) && Array.isArray(ing.allowedCategories) && ing.allowedCategories.length > 0 && typeof ing.totalGramsRequired === 'number' && ing.totalGramsRequired >= 0);
         if (ingredientPlan.length !== rawIngredientPlan.length) {
             log(`Sanitized ingredient list: removed ${rawIngredientPlan.length - ingredientPlan.length} invalid entries (check required fields like allowedCategories).`, 'WARN', 'DATA');
         }
@@ -476,17 +486,17 @@ module.exports = async function handler(request, response) {
 
                 const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
                 let foundProduct = null;
-                let bestScoreSoFar = -1; // Keep score for skip heuristic
+                let bestScoreSoFar = -1;
                 const queriesToTry = [ { type: 'tight', query: ingredient.tightQuery }, { type: 'normal', query: ingredient.normalQuery }, { type: 'wide', query: ingredient.wideQuery } ];
 
-                // --- MODIFICATION (Mark 46): Initialize telemetry variables outside loop ---
-                let acceptedQueryIdx = -1; // Initialize to invalid state
+                let acceptedQueryIdx = -1;
                 let acceptedQueryType = 'none';
                 let pagesTouched = 0;
                 let priceZ = null;
                 let bucketWaitMs = 0;
                 const mode = 'speed';
-                // --- END MODIFICATION ---
+                let keptCount = 0; // Initialize keptCount here
+
 
                 for (const [index, { type, query }] of queriesToTry.entries()) {
                     if (!query) { result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0}); continue; }
@@ -520,14 +530,14 @@ module.exports = async function handler(request, response) {
                         const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log);
 
                         if (checklistResult.pass) {
-                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: checklistResult.score }); // Keep score for skip heuristic
+                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: checklistResult.score });
                         }
                     }
 
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
 
                     currentAttemptLog.foundCount = filteredProducts.length;
-                    currentAttemptLog.bestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0; // Use actual score for skip heuristic
+                    currentAttemptLog.bestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
 
                     if (filteredProducts.length > 0) {
                         log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
@@ -535,6 +545,7 @@ module.exports = async function handler(request, response) {
                         filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); currentUrls.add(vp.product.url); } });
 
                         if (result.allProducts.length > 0) {
+                            // Find best product based on unit price
                             foundProduct = result.allProducts.reduce((best, current) =>
                                 (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best,
                              result.allProducts[0]);
@@ -542,20 +553,20 @@ module.exports = async function handler(request, response) {
                         } else {
                              log(`[${ingredientKey}] No products available after filtering/price guard (${type}).`, 'WARN', 'DATA');
                              currentAttemptLog.status = 'no_match_post_filter';
-                             continue; // Try next query type
+                             continue;
                         }
 
                         result.source = 'discovery';
                         currentAttemptLog.status = 'success';
-                        bestScoreSoFar = Math.max(bestScoreSoFar, currentAttemptLog.bestScore); // Update best score found so far
+                        bestScoreSoFar = Math.max(bestScoreSoFar, currentAttemptLog.bestScore);
 
-                        // --- MODIFICATION (Mark 46): Set telemetry vars *on success* ---
-                        acceptedQueryIdx = index;
-                        acceptedQueryType = type;
-                        // --- END MODIFICATION ---
-                        const keptCount = result.allProducts.length;
+                        acceptedQueryIdx = index; // Set on success
+                        acceptedQueryType = type; // Set on success
+                        keptCount = result.allProducts.length; // Update keptCount on success
 
-                        // Calculate priceZ only if needed (moved before telemetry log)
+
+                        // Calculate priceZ only if needed
+                        priceZ = null; // Reset priceZ for each successful query
                         if (result.allProducts.length >= 3 && foundProduct.unit_price_per_100 != null && foundProduct.unit_price_per_100 > 0) {
                             const prices = result.allProducts.map(p => p.unit_price_per_100).filter(p => p != null && p > 0);
                              if (prices.length >= 2) {
@@ -565,24 +576,30 @@ module.exports = async function handler(request, response) {
                             }
                         }
 
-                        // --- MODIFICATION (Mark 46): Add defensive check before logging telemetry ---
+                         // --- *** MODIFICATION (Mark 47): Corrected telemetry variable names *** ---
                         if (typeof acceptedQueryIdx === 'number' && acceptedQueryIdx >= 0) {
                             log(`[${ingredientKey}] Success Telemetry`, 'INFO', 'LADDER_TELEMETRY', {
-                                 ingredientKey, accepted_query_idx, accepted_query_type, pages_touched, kept_count,
-                                 price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null,
-                                 mode, bucket_wait_ms
+                                 ingredientKey,
+                                 acceptedQueryIdx, // Use camelCase
+                                 acceptedQueryType, // Use camelCase
+                                 pagesTouched,      // Use camelCase
+                                 keptCount,         // Use camelCase
+                                 price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null, // snake_case ok if consistent
+                                 mode,
+                                 bucketWaitMs       // Use camelCase
                              });
                         } else {
-                             log(`[${ingredientKey}] CRITICAL Error: Telemetry skipped due to invalid accepted_query_idx: ${acceptedQueryIdx}`, 'CRITICAL', 'MARKET_RUN_ERROR', {
-                                ingredientKey, index, type, success: true // Log context
+                             // This log should ideally not be hit now, but kept for safety
+                             log(`[${ingredientKey}] CRITICAL Error: Telemetry skipped due to invalid acceptedQueryIdx: ${acceptedQueryIdx}`, 'CRITICAL', 'MARKET_RUN_ERROR', {
+                                ingredientKey, index, type, success: true
                              });
                         }
-                        // --- END MODIFICATION ---
+                        // --- *** END MODIFICATION *** ---
 
 
                         if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                             log(`[${ingredientKey}] Skip heuristic hit (Tight query successful with score >= ${SKIP_HEURISTIC_SCORE_THRESHOLD}).`, 'INFO', 'MARKET_RUN');
-                            break; // Skip normal/wide if tight query worked well enough
+                            break;
                         }
                         // If not skipping, break because mode is 'speed'
                         break;
@@ -630,7 +647,7 @@ module.exports = async function handler(request, response) {
              }
               // Check if the result itself indicates an error source
              if(currentResult[ingredientKey]?.source === 'error') {
-                 log(`Processing Error for "${ingredientKey}": ${currentResult[ingredientKey].error}`, 'CRITICAL', 'MARKET_RUN'); // Logged already in processSingleIngredientOptimized, but good to have context here
+                 log(`Processing Error logged for "${ingredientKey}": ${currentResult[ingredientKey].error}`, 'INFO', 'MARKET_RUN'); // Downgraded log as error is already logged in processSingleIngredientOptimized
                   const failedIngredientData = ingredientPlan.find(i => i.originalIngredient === ingredientKey);
                  const baseData = typeof failedIngredientData === 'object' && failedIngredientData !== null ? failedIngredientData : { originalIngredient: ingredientKey };
                  // Ensure essential fields exist even on error
@@ -685,7 +702,7 @@ module.exports = async function handler(request, response) {
             } else if (result.source === 'failed' || result.source === 'error') {
                  // Use AI fallback if grams and estimate exist
                  if (typeof result.totalGramsRequired === 'number' && result.totalGramsRequired > 0 && typeof result.aiEstCaloriesPer100g === 'number') {
-                     log(`[${key}] Market Run failed or error, adding to nutrition queue with AI fallback.`, 'WARN', 'MARKET_RUN');
+                     log(`[${key}] Market Run failed or error (${result.error || 'N/A'}), adding to nutrition queue with AI fallback.`, 'WARN', 'MARKET_RUN'); // Added error context
                      itemsToFetchNutrition.push({
                          ingredientKey: key, barcode: null, query: null, grams: result.totalGramsRequired,
                          aiEstCaloriesPer100g: result.aiEstCaloriesPer100g, aiEstProteinPer100g: result.aiEstProteinPer100g,
@@ -742,7 +759,7 @@ module.exports = async function handler(request, response) {
                          if (productToAttach) {
                              productToAttach.nutrition = nut;
                          } else {
-                             log(`[${item.ingredientKey}] Could not find selected product by URL to attach nutrition. Attaching to first product if available.`, 'WARN', 'CALC');
+                             log(`[${item.ingredientKey}] Could not find selected product by URL ${result.currentSelectionURL} to attach nutrition. Attaching to first product if available.`, 'WARN', 'CALC');
                              if (result.allProducts.length > 0 && result.allProducts[0]) {
                                 result.allProducts[0].nutrition = nut;
                              }
@@ -858,8 +875,8 @@ const within5 = (v, t) => {
     const value = Number(v);
     if (!Number.isFinite(target) || !Number.isFinite(value)) return false; // Fail if not numbers
     if (target === 0 && value === 0) return true;
-    if (target === 0) return false;
-    // Use Math.abs(target) in denominator to handle potential negative targets correctly (though unlikely here)
+    if (target === 0) return Math.abs(value) <= 0.05; // Handle zero target edge case (allow small absolute difference)
+    // Use Math.abs(target) in denominator to handle potential negative targets correctly
     return Math.abs(value - target) / Math.max(1, Math.abs(target)) <= 0.05;
 };
 
@@ -881,8 +898,7 @@ function assertDailyMacroSums(mealPlanDays = [], targets = {}, log) {
     for (const dayData of mealPlanDays) {
         if (!dayData || !Array.isArray(dayData.meals) || dayData.meals.length === 0) { // Check for empty meals array too
              log(`Macro Sum Check: Invalid day data or missing/empty meals for day ${dayData?.day || 'unknown'}.`, 'WARN', 'LLM_VALIDATION');
-             // Decide if this should be a failure or just a skip. Let's make it a failure.
-             throw new Error("PLANNER_SUM_MISMATCH");
+             throw new Error("PLANNER_SUM_MISMATCH"); // Fail if any day has invalid meal structure
         }
         const sums = dayData.meals.reduce((acc, meal) => {
             // Check meal structure and ensure subtotals are valid numbers before adding
@@ -891,6 +907,7 @@ function assertDailyMacroSums(mealPlanDays = [], targets = {}, log) {
                  const pVal = Number(meal.subtotal_protein);
                  const fVal = Number(meal.subtotal_fat);
                  const cVal = Number(meal.subtotal_carbs);
+                 // Only add if it's a valid, non-NaN number
                  acc.kcal += Number.isFinite(kcalVal) ? kcalVal : 0;
                  acc.p += Number.isFinite(pVal) ? pVal : 0;
                  acc.f += Number.isFinite(fVal) ? fVal : 0;
@@ -932,13 +949,13 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'capsicum' not 'bell pepper')." : "";
 
     // --- *** MODIFICATION (Mark 46): Rewrote Rule 16 *** ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers, integers). YOU MUST DO THIS MATH ACCURATELY. 16. CRITICAL FINAL VALIDATION RULE: Before returning the JSON, YOU MUST perform this final check for EACH day in the 'mealPlan': Calculate the SUM of 'subtotal_kcal' across all meals for that day. Verify if this SUM is within ±5% of the overall daily_kcal_target (${calorieTarget}). Do the same verification for the SUM of 'subtotal_protein' against the target (${proteinTargetGrams}g), SUM of 'subtotal_fat' against (${fatTargetGrams}g), and SUM of 'subtotal_carbs' against (${carbTargetGrams}g). If ANY of these sums for ANY day fall outside the ±5% tolerance, you MUST revise the meal portion sizes (grams in the 'description' field) and recalculate the corresponding 'subtotal_...' values for the affected meals until ALL daily sums meet the ±5% requirement for ALL macros. ONLY return the final, validated JSON object that passes this check for all days. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 18. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 19. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 18. Prioritize variety if needed. Output ONLY the valid JSON object described by the schema, nothing else.`;
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers, integers). YOU MUST DO THIS MATH ACCURATELY. 16. CRITICAL FINAL VALIDATION RULE: Before returning the JSON, YOU MUST perform this final check for EACH day in the 'mealPlan': Step 1: Calculate the SUM of 'subtotal_kcal' across all meals for that day. Step 2: VERIFY if this SUM is within ±5% of the overall daily_kcal_target (${calorieTarget}). Step 3: Repeat Step 1 and Step 2 for protein (target ${proteinTargetGrams}g), fat (target ${fatTargetGrams}g), and carbs (target ${carbTargetGrams}g). Step 4: If ANY of these sums for ANY day fall outside the ±5% tolerance, you MUST revise the meal portion sizes (grams in the 'description' field) and recalculate the corresponding 'subtotal_...' values for the affected meals. Step 5: Repeat Steps 1-4 until ALL daily sums meet the ±5% requirement for ALL macros for ALL days. Step 6: ONLY return the final, validated JSON object that passes this check for all days. DO NOT SKIP THIS FINAL VERIFICATION. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 18. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 19. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 18. Prioritize variety if needed. Output ONLY the valid JSON object described by the schema, nothing else.`;
     // --- *** END MODIFICATION *** ---
 
     let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
     if (isRetry) {
-        userQuery = `PREVIOUS ATTEMPT FAILED MACRO CHECK (Rule 16). Adjust meal portion sizes (grams) significantly and recalculate meal subtotals precisely. CRITICAL: You MUST verify that the SUM of subtotals for each day matches the daily targets (within +/- 5%) BEFORE returning the JSON, as per Rule 16.\nORIGINAL REQUEST:\n${userQuery}`;
+        userQuery = `PREVIOUS ATTEMPT FAILED MACRO CHECK (Rule 16). Adjust meal portion sizes (grams) significantly and recalculate meal subtotals precisely. CRITICAL: You MUST perform the final verification step (Rule 16, Step 1-6) ensuring the SUM of subtotals for each day matches the daily targets (within +/- 5%) BEFORE returning the JSON.\nORIGINAL REQUEST:\n${userQuery}`;
         log("Adding retry instruction to LLM prompt, emphasizing FINAL SUM CHECK.", 'WARN', 'LLM_RETRY');
     }
 
