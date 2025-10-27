@@ -1,22 +1,21 @@
-// --- ORCHESTRATOR API for Cheffy V5 ---
+// --- ORCHESTRATOR API for Cheffy V6 ---
 
-// Mark 49 (Critical Bug Fixes):
-// 1. FIXED: `parseIngredientsFromDescription` logic was reversed.
-//    - Changed `if (text.includes(keyLower))`
-//    - TO `if (keyLower.includes(text))`
-//    - This now correctly matches meal text (e.g., "chicken breast") to the ingredient key (e.g., "Chicken Breast Fillets...").
-//    - This fixes the catastrophic 490 kcal calculation error.
+// Mark 50 (Critical Parser Fix):
+// 1. REVERTED Mark 49's incorrect parser logic.
+// 2. RE-FIXED: `parseIngredientsFromDescription` matching logic.
+//    - Now correctly checks if the `description text` (e.g., "dry rolled oats")
+//      CONTAINS the core part of the `ingredient key` (e.g., "rolled oats").
+//    - Extracts core noun(s) from the ingredient key for more robust matching.
+//    - Keeps sorting by length to prioritize specific matches.
+//    - This should finally fix the calorie calculation inaccuracies.
 //
-// 2. FIXED: `runSmarterChecklist` was failing "Banana" and other loose produce on size checks.
-//    - Added a bypass to the `sizeOk` check for any ingredient categorized as "produce" or "fruit".
-//    - This will allow loose items (often 180g "each") to pass the check.
+// Mark 49 (Partial Fixes):
+// 1. Attempted parser fix (incorrectly).
+// 2. Added size check bypass for produce/fruit (Correct).
 //
 // Mark 48 (Architectural Fix):
-// 1. REMOVED all nutritional math from LLM.
-// 2. LLM is now a CREATIVE engine only.
-// 3. ADDED NEW PHASE 5: Orchestrator calculates all meal/day subtotals based on Phase 4's REAL nutrition data.
-// 4. REMOVED LLM retry loop.
-// 5. Modified `passRequiredWords` regex.
+// 1. Moved all math out of LLM and into Orchestrator Phase 5.
+// 2. Simplified LLM prompt, removed retries.
 
 // ... (rest of changelog)
 
@@ -317,71 +316,77 @@ function isCreativePrompt(cuisinePrompt) {
     return cuisinePrompt.length > 30 || cuisinePrompt.includes(' like ') || cuisinePrompt.includes(' inspired by ') || cuisinePrompt.includes(' themed ');
 }
 
-// --- NEW HELPER (Mark 48): Parses ingredients from meal description ---
+// --- HELPER (Mark 50): Extract core noun(s) from ingredient key ---
+function getCoreIngredient(key) {
+    if (!key) return '';
+    // Remove text in parentheses, measurements, trailing 's'
+    let core = key.toLowerCase()
+                 .replace(/\(.*?\)/g, '') // Remove (xyz)
+                 .replace(/\b\d+(\.\d+)?(kg|g|ml|l)\b/g, '') // Remove 1kg, 500g etc.
+                 .replace(/[\d\W_]+/g, ' ') // Replace non-alphanumeric with space
+                 .replace(/\bs\b/g, '') // Remove trailing 's' potentially left
+                 .trim();
+    // Prioritize longer words if multiple remain
+    const words = core.split(' ').filter(w => w.length > 2); // Filter short words
+    if (words.length > 1) {
+        words.sort((a, b) => b.length - a.length);
+        // Take the longest word, maybe the second longest too if relevant
+        core = words.slice(0, 2).join(' '); // e.g., "chicken breast"
+    } else if (words.length === 1) {
+        core = words[0];
+    }
+    // Fallback to original if processing fails badly
+    return core.trim() || key.toLowerCase().trim();
+}
+
+// --- REVISED HELPER (Mark 50): Parses ingredients using better matching ---
 /**
  * @typedef {Object} IngredientObject
  * @property {string} originalIngredient - The key (e.g., "Chicken Breast")
- * @property {string} [category]
- * @property {string} [tightQuery]
- * @property {string} normalQuery
- * @property {string} [wideQuery]
- * @property {string[]} requiredWords
- * @property {string[]} negativeKeywords
- *//**
- * @typedef {Object} MatchedIngredient
- * @property {string} key - The originalIngredient key (e.g., "Chicken Breast")
- * @property {number} grams - The parsed gram amount
+ * // ... other properties
+ * @property {string} [coreName] - Pre-calculated core name for matching
  */
 /**
- * Parses gram amounts from a meal description string.
- * @param {string} description - The meal description (e.g., "...with 150g chicken breast and 100g rice...")
- * @param {IngredientObject[]} ingredientPlan - The master list of ingredient objects from the LLM
- * @param {function} log - The logger function
- * @returns {MatchedIngredient[]} An array of matched ingredients with their keys and gram amounts
+ * Parses gram amounts from a meal description string using robust matching.
  */
 function parseIngredientsFromDescription(description, ingredientPlan, log) {
     if (!description || !Array.isArray(ingredientPlan) || ingredientPlan.length === 0) {
         return [];
     }
     
-    // Sort plan by length descending, so "Chicken Breast" is checked before "Chicken"
-    const sortedIngredientPlan = [...ingredientPlan].sort((a, b) => b.originalIngredient.length - a.originalIngredient.length);
+    // Pre-calculate core names and sort plan by core name length descending
+    const sortedIngredientPlan = ingredientPlan
+        .map(ing => ({ ...ing, coreName: getCoreIngredient(ing.originalIngredient) }))
+        .sort((a, b) => b.coreName.length - a.coreName.length);
 
     const matches = [];
-    // Regex to find patterns like "150g chicken breast", "150 g chicken", "150g rice"
-    // It captures: (\d+\.?\d*) -> numbers (150), \s*(g|ml) -> unit (g), \s*([\w\s-]+) -> text (chicken breast)
     const regex = /(\d+\.?\d*)\s*(g|ml)\s*([\w\s-]+)/gi;
     let match;
 
     while ((match = regex.exec(description)) !== null) {
         try {
             const amount = parseFloat(match[1]);
-            const unit = match[2].toLowerCase(); // g or ml
-            const text = match[3].toLowerCase().trim().replace(/s$/, ''); // Remove trailing 's'
+            const unit = match[2].toLowerCase();
+            const text = match[3].toLowerCase().trim(); // Text from description, e.g., "dry rolled oats"
 
             if (isNaN(amount) || amount <= 0) continue;
 
-            // Find the best matching ingredient from the plan
             let bestMatch = null;
+            // Iterate through sorted plan (longest core names first)
             for (const ing of sortedIngredientPlan) {
-                const keyLower = ing.originalIngredient.toLowerCase();
-                
-                // --- CRITICAL FIX (Mark 49): Reversed logic ---
-                // OLD: if (text.includes(keyLower))
-                // NEW: if (keyLower.includes(text))
-                if (keyLower.includes(text)) {
-                    // This is the first (and longest) match
+                // Check if the description text CONTAINS the core ingredient name
+                if (ing.coreName && text.includes(ing.coreName)) {
                     bestMatch = ing;
-                    break; // Exit loop since we found the best match
+                    break; // Found the best (longest) match
                 }
             }
 
             if (bestMatch) {
                 matches.push({
                     key: bestMatch.originalIngredient,
-                    grams: amount // We assume g and ml are 1:1 for this calculation
+                    grams: amount
                 });
-                log(`[MEAL_PARSE] Matched "${match[0]}" (text: "${text}") to [${bestMatch.originalIngredient}] (${amount}${unit})`, 'DEBUG', 'CALC');
+                log(`[MEAL_PARSE] Matched "${match[0]}" (text: "${text}") to [${bestMatch.originalIngredient}] using core "${bestMatch.coreName}" (${amount}${unit})`, 'DEBUG', 'CALC');
             } else {
                  log(`[MEAL_PARSE] No match found for "${match[0]}" (text: "${text}")`, 'DEBUG', 'CALC');
             }
@@ -391,7 +396,7 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
     }
     return matches;
 }
-// --- END NEW HELPER (Mark 48) ---
+// --- END REVISED HELPER (Mark 50) ---
 
 
 /// ===== HELPERS-END ===== ////
@@ -864,13 +869,30 @@ module.exports = async function handler(request, response) {
                         } else {
                             // --- NEW (Mark 49): Add canonical fallback for items that failed market run (like Banana)
                             const ingredientData = ingredientPlan.find(ing => ing.originalIngredient === key);
-                            if (ingredientData && (ingredientData.source === 'failed' || ingredientData.source === 'error')) {
-                                log(`[${meal.name}] Using CANONICAL fallback for [${key}] (${grams}g). Market run failed.`, 'WARN', 'CALC', { key });
-                                // This is a rough fallback, as canonical is limited.
-                                // In a future version, this should use the `nutrition-search`'s canonical function.
-                                // For now, we'll log it as a known gap.
+                            // Only use fallback if market run failed AND nutrition wasn't found (or map lookup failed)
+                            if (ingredientData && (finalResults[key]?.source === 'failed' || finalResults[key]?.source === 'error') && (!nutritionData || nutritionData.status !== 'found')) {
+                                log(`[${meal.name}] Using CANONICAL fallback attempt for [${key}] (${grams}g). Market run failed/error.`, 'WARN', 'CALC', { key });
+                                // This is a rough fallback - TODO: Integrate nutrition-search.js canonical logic
+                                const canonicalNutrition = { // Hardcoded examples, replace with actual call
+                                    "Banana": { calories: 89, protein: 1.1, fat: 0.3, carbs: 22.8 },
+                                    "Eggs (700g dozen)": { calories: 143, protein: 12.6, fat: 9.5, carbs: 0.7 }, // Example for eggs
+                                }[key]; // Lookup by key
+
+                                if (canonicalNutrition) {
+                                    const p = (canonicalNutrition.protein / 100) * grams;
+                                    const f = (canonicalNutrition.fat / 100) * grams;
+                                    const c = (canonicalNutrition.carbs / 100) * grams;
+                                    const kcal = (p * 4) + (f * 9) + (c * 4);
+                                    mealSubtotals.kcal += kcal;
+                                    mealSubtotals.protein += p;
+                                    mealSubtotals.fat += f;
+                                    mealSubtotals.carbs += c;
+                                    log(`[${meal.name}] Applied CANONICAL for [${key}]`, 'DEBUG', 'CALC', { kcal, p, f, c });
+                                } else {
+                                    log(`[${meal.name}] No CANONICAL fallback found for failed ingredient [${key}]. Skipping.`, 'WARN', 'CALC');
+                                }
                             } else {
-                                log(`[${meal.name}] Skipping nutrition for [${key}] (${grams}g). No valid nutrition data found.`, 'WARN', 'CALC', { key, status: nutritionData?.status });
+                                log(`[${meal.name}] Skipping nutrition for [${key}] (${grams}g). No valid/found nutrition data.`, 'WARN', 'CALC', { key, status: nutritionData?.status, source: finalResults[key]?.source });
                             }
                             // --- END NEW (Mark 49) ---
                         }
@@ -890,7 +912,7 @@ module.exports = async function handler(request, response) {
                     });
 
                     // Add to the day's total
-                    currentDayTotals.calories += mealSubtotals.kcal;
+                    currentDayTotals.calories += mealSubtotals.kcal; // Use unrounded for accuracy
                     currentDayTotals.protein += mealSubtotals.protein;
                     currentDayTotals.fat += mealSubtotals.fat;
                     currentDayTotals.carbs += mealSubtotals.carbs;
@@ -982,8 +1004,6 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
 }
 
 // --- REMOVED (Mark 48): within5 and assertDailyMacroSums are no longer needed ---
-// const within5 = (...)
-// function assertDailyMacroSums(...)
 
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) {
