@@ -1189,7 +1189,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     // --- START: MODIFICATION (Preventative Model Swap) ---
     // --- FIX: Use a v1beta-compatible model name ---
     const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-1.5-pro-preview-0514'; // Use Pro for plan generation
-    const GEMINI_API_URL = `https::/generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
     log(`Using plan generation model: ${PLAN_MODEL_NAME}`, 'INFO', 'LLM_CALL');
     // --- END: MODIFICATION ---
 
