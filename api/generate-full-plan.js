@@ -31,8 +31,8 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// --- FIX: Using v1 endpoint ---
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent';
+// --- FIX: Using v1beta endpoint for 1.5-flash ---
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
 const MAX_RETRIES = 2; // Retries for Gemini calls (Reduced from 3)
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
@@ -1195,8 +1195,8 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) {
-    // --- FIX: Use v1 endpoint ---
-    const CREATIVE_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent'; // FIX: Use v1 endpoint
+    // --- FIX: Use v1beta endpoint for 1.5-flash ---
+    const CREATIVE_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent'; // FIX: Use v1beta endpoint
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -1205,7 +1205,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
     try{
         // Using fetchWithRetry configured for the MAIN plan call (2 min timeout, 2 retries)
         const res=await fetchWithRetry(
-            CREATIVE_GEMINI_API_URL, // Using the corrected v1 URL
+            CREATIVE_GEMINI_API_URL, // Using the corrected v1beta URL
             { method:'POST', headers:{ 'Content-Type':'application/json', 'x-goog-api-key': GEMINI_API_KEY }, body:JSON.stringify(payload) },
             log
         );
@@ -1226,7 +1226,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; // Uses the corrected v1 URL
+    const GEMINI_API_URL = GEMINI_API_URL_BASE; // Uses the corrected v1beta URL
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
@@ -1454,5 +1454,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
 
