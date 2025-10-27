@@ -1195,15 +1195,18 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) {
-    // ... (Unchanged) ...
-    const GEMINI_API_URL = GEMINI_API_URL_BASE;
+    // ... (Unchanged from previous versions using v1beta/flash-latest) ...
+    // NOTE: This function still uses the v1beta URL and structure.
+    // If it also fails, it will need similar adjustments (combine prompts, remove systemInstruction/genConfig).
+    const CREATIVE_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent'; // Using v1beta for this simpler call for now
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
     const payload={contents:[{parts:[{text:userQuery}]}],systemInstruction:{parts:[{text:sysPrompt}]}};
     try{
+        // Using fetchWithRetry configured for the MAIN plan call (2 min timeout, 2 retries)
         const res=await fetchWithRetry(
-            GEMINI_API_URL,
+            CREATIVE_GEMINI_API_URL, // Using the beta URL here
             { method:'POST', headers:{ 'Content-Type':'application/json', 'x-goog-api-key': GEMINI_API_KEY }, body:JSON.stringify(payload) },
             log
         );
@@ -1224,7 +1227,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    const GEMINI_API_URL = GEMINI_API_URL_BASE;
+    const GEMINI_API_URL = GEMINI_API_URL_BASE; // Uses the corrected v1 URL
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
@@ -1233,16 +1236,17 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'capsicum' not 'bell pepper')." : "";
 
     // --- V11 System Prompt (Integrated into user query for v1 API) ---
+    // --- FIX: Escaped backticks and curly braces in JSON example ---
     const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 10. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 11. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 12. NO 'nutritionalTargets' or 'aiEst...' nutrition properties in output. 13. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 14. MEAL PORTIONS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) DO NOT include 'subtotal_...' fields. 15. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 16. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 17. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 16. Prioritize variety if needed.
-18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the provided daily calorie target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise caloric goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. Output ONLY the valid JSON object described below (with 'ingredients' and 'mealPlan' keys), wrapped in ```json ... ```, nothing else.
+18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the provided daily calorie target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise caloric goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. Output ONLY the valid JSON object described below (with 'ingredients' and 'mealPlan' keys), wrapped in \`\`\`json ... \`\`\`, nothing else.
 
 JSON Structure:
-{
-  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] } /* ... more ingredients */ ],
-  "mealPlan": [ { "day": number, "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } /* ... more items */ ] } /* ... more meals */ ] } /* ... more days */ ]
-}
+\\{
+  "ingredients": [ \\{ "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": \\{ "value": number, "unit": "g"|"ml" \\}|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] \\} /* ... more ingredients */ ],
+  "mealPlan": [ \\{ "day": number, "meals": [ \\{ "type": "string", "name": "string", "description": "string", "items": [ \\{ "key": "string", "qty": number, "unit": "string" \\} /* ... more items */ ] \\} /* ... more meals */ ] \\} /* ... more days */ ]
+\\}
 `;
-    // --- End V11 Prompt ---
+    // --- End V11 Prompt & FIX ---
 
     let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
