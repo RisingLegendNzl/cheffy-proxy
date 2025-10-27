@@ -1,13 +1,15 @@
-// --- ORCHESTRATOR API for Cheffy V6 ---
+// --- ORCHESTRATOR API for Cheffy V7 ---
 
-// Mark 50 (Critical Parser Fix):
-// 1. REVERTED Mark 49's incorrect parser logic.
-// 2. RE-FIXED: `parseIngredientsFromDescription` matching logic.
-//    - Now correctly checks if the `description text` (e.g., "dry rolled oats")
-//      CONTAINS the core part of the `ingredient key` (e.g., "rolled oats").
-//    - Extracts core noun(s) from the ingredient key for more robust matching.
-//    - Keeps sorting by length to prioritize specific matches.
-//    - This should finally fix the calorie calculation inaccuracies.
+// Mark 51 (CRITICAL PARSER FIX - AGAIN):
+// 1. REPLACED `text.includes(coreName)` logic in `parseIngredientsFromDescription`.
+// 2. NEW LOGIC:
+//    - Splits both description text fragment and ingredient key into significant words.
+//    - Checks if ALL significant words from the ingredient key are PRESENT in the description fragment words.
+//    - Still sorts by original key length to prioritize specificity (e.g., "Chicken Breast Fillet" before "Chicken").
+//    - This fuzzy word matching should finally handle variations like "dry white rice" vs "Long Grain White Rice".
+//
+// Mark 50 (Incorrect Parser Fix):
+// 1. Reverted Mark 49's incorrect logic. Attempted fix using core names (still too strict).
 //
 // Mark 49 (Partial Fixes):
 // 1. Attempted parser fix (incorrectly).
@@ -42,6 +44,8 @@ const REQUIRED_WORD_SCORE_THRESHOLD = 0.60;
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
+// --- NEW (Mark 51): Stop words for parser ---
+const PARSER_STOP_WORDS = new Set(['a', 'an', 'and', 'the', 'with', 'in', 'on', 'of', 'for', 'to', 'g', 'ml', 'approx', 'drained', 'raw', 'cooked', 'dry', 'fresh', 'sliced', 'diced', 'shredded', 'budget', 'lean', 'medium', 'large', 'small', 'post-cooking', 'or', 'minimal', 'water', 'oil', 'cans', 'can', 'standard', 'weight', 'approx', 'approximately']);
 
 /// ===== CONFIG-END ===== ////
 
@@ -316,35 +320,24 @@ function isCreativePrompt(cuisinePrompt) {
     return cuisinePrompt.length > 30 || cuisinePrompt.includes(' like ') || cuisinePrompt.includes(' inspired by ') || cuisinePrompt.includes(' themed ');
 }
 
-// --- HELPER (Mark 50): Extract core noun(s) from ingredient key ---
-function getCoreIngredient(key) {
-    if (!key) return '';
-    // Remove text in parentheses, measurements, trailing 's'
-    let core = key.toLowerCase()
-                 .replace(/\(.*?\)/g, '') // Remove (xyz)
-                 .replace(/\b\d+(\.\d+)?(kg|g|ml|l)\b/g, '') // Remove 1kg, 500g etc.
-                 .replace(/[\d\W_]+/g, ' ') // Replace non-alphanumeric with space
-                 .replace(/\bs\b/g, '') // Remove trailing 's' potentially left
-                 .trim();
-    // Prioritize longer words if multiple remain
-    const words = core.split(' ').filter(w => w.length > 2); // Filter short words
-    if (words.length > 1) {
-        words.sort((a, b) => b.length - a.length);
-        // Take the longest word, maybe the second longest too if relevant
-        core = words.slice(0, 2).join(' '); // e.g., "chicken breast"
-    } else if (words.length === 1) {
-        core = words[0];
-    }
-    // Fallback to original if processing fails badly
-    return core.trim() || key.toLowerCase().trim();
+// --- NEW HELPER (Mark 51): Get significant words from a string ---
+function getSignificantWords(text) {
+    if (!text) return [];
+    return text.toLowerCase()
+               .replace(/\(.*?\)/g, '') // Remove (xyz)
+               .replace(/[\d\W_]+/g, ' ') // Replace non-alphanumeric with space
+               .split(' ')
+               .filter(word => word.length > 2 && !PARSER_STOP_WORDS.has(word)) // Keep words > 2 chars, not stop words
+               .map(word => word.replace(/s$/, '')); // Remove trailing 's'
 }
 
-// --- REVISED HELPER (Mark 50): Parses ingredients using better matching ---
+
+// --- REVISED HELPER (Mark 51): Parses ingredients using fuzzy word matching ---
 /**
  * @typedef {Object} IngredientObject
- * @property {string} originalIngredient - The key (e.g., "Chicken Breast")
+ * @property {string} originalIngredient - The key (e.g., "Chicken Breast Fillet (1kg)")
  * // ... other properties
- * @property {string} [coreName] - Pre-calculated core name for matching
+ * @property {string[]} significantWords - Pre-calculated significant words for matching
  */
 /**
  * Parses gram amounts from a meal description string using robust matching.
@@ -354,12 +347,13 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
         return [];
     }
     
-    // Pre-calculate core names and sort plan by core name length descending
+    // Pre-calculate significant words and sort plan by original key length descending (prioritize specifics)
     const sortedIngredientPlan = ingredientPlan
-        .map(ing => ({ ...ing, coreName: getCoreIngredient(ing.originalIngredient) }))
-        .sort((a, b) => b.coreName.length - a.coreName.length);
+        .map(ing => ({ ...ing, significantWords: getSignificantWords(ing.originalIngredient) }))
+        .sort((a, b) => b.originalIngredient.length - a.originalIngredient.length);
 
     const matches = [];
+    // Regex to find patterns like "150g chicken breast", "150 g chicken", "150g rice"
     const regex = /(\d+\.?\d*)\s*(g|ml)\s*([\w\s-]+)/gi;
     let match;
 
@@ -367,17 +361,27 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
         try {
             const amount = parseFloat(match[1]);
             const unit = match[2].toLowerCase();
-            const text = match[3].toLowerCase().trim(); // Text from description, e.g., "dry rolled oats"
+            const textFragment = match[3].toLowerCase().trim(); // Text from description, e.g., "dry white rice"
 
             if (isNaN(amount) || amount <= 0) continue;
 
+            // Get significant words from the description fragment
+            const fragmentWords = getSignificantWords(textFragment);
+            if (fragmentWords.length === 0) {
+                 log(`[MEAL_PARSE] No significant words found in fragment: "${textFragment}"`, 'DEBUG', 'CALC');
+                 continue; // Cannot match if fragment has no words
+            }
+            const fragmentWordSet = new Set(fragmentWords); // Use a Set for faster lookups
+
             let bestMatch = null;
-            // Iterate through sorted plan (longest core names first)
+            // Iterate through sorted plan (most specific keys first)
             for (const ing of sortedIngredientPlan) {
-                // Check if the description text CONTAINS the core ingredient name
-                if (ing.coreName && text.includes(ing.coreName)) {
+                // Check if ALL significant words from the ingredient key are present in the fragment words
+                if (ing.significantWords && ing.significantWords.length > 0 &&
+                    ing.significantWords.every(keyWord => fragmentWordSet.has(keyWord)))
+                {
                     bestMatch = ing;
-                    break; // Found the best (longest) match
+                    break; // Found the best (most specific) match
                 }
             }
 
@@ -386,9 +390,9 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
                     key: bestMatch.originalIngredient,
                     grams: amount
                 });
-                log(`[MEAL_PARSE] Matched "${match[0]}" (text: "${text}") to [${bestMatch.originalIngredient}] using core "${bestMatch.coreName}" (${amount}${unit})`, 'DEBUG', 'CALC');
+                log(`[MEAL_PARSE] Matched "${match[0]}" (Frag words: [${fragmentWords.join(', ')}]) to [${bestMatch.originalIngredient}] using key words [${bestMatch.significantWords.join(', ')}] (${amount}${unit})`, 'DEBUG', 'CALC');
             } else {
-                 log(`[MEAL_PARSE] No match found for "${match[0]}" (text: "${text}")`, 'DEBUG', 'CALC');
+                 log(`[MEAL_PARSE] No match found for "${match[0]}" (Frag words: [${fragmentWords.join(', ')}])`, 'DEBUG', 'CALC');
             }
         } catch (e) {
              log(`[MEAL_PARSE] Error parsing regex match: ${e.message}`, 'WARN', 'CALC', { match });
@@ -396,7 +400,7 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
     }
     return matches;
 }
-// --- END REVISED HELPER (Mark 50) ---
+// --- END REVISED HELPER (Mark 51) ---
 
 
 /// ===== HELPERS-END ===== ////
@@ -876,6 +880,7 @@ module.exports = async function handler(request, response) {
                                 const canonicalNutrition = { // Hardcoded examples, replace with actual call
                                     "Banana": { calories: 89, protein: 1.1, fat: 0.3, carbs: 22.8 },
                                     "Eggs (700g dozen)": { calories: 143, protein: 12.6, fat: 9.5, carbs: 0.7 }, // Example for eggs
+                                    // Add more common fallbacks if needed
                                 }[key]; // Lookup by key
 
                                 if (canonicalNutrition) {
