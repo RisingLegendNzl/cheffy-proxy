@@ -1,6 +1,6 @@
-// --- ORCHESTRATOR API for Cheffy V11.1 (Patched) ---
+// --- ORCHESTRATOR API for Cheffy V11.2 (Patched) ---
 //
-// V11.1 Architecture (Mark 55+):
+// V11.2 Architecture (Mark 55+):
 // 1. ELIMINATED all free-text parsing. Nutrition is 100% deterministic.
 // 2. FORCES structured `meal.items[{key, qty, unit}]` from LLM schema (via prompt, best-effort).
 // 3. NORMALIZES units (g, kg, ml, l, egg, slice) to g/ml via `normalizeToGramsOrMl`.
@@ -17,7 +17,7 @@
 //    - Fails if final deviation is still > 5%.
 // 8. MODEL (NEW):
 //    - Uses Gemini 1.5 Pro (or env var) for plan generation (preventative fix).
-//    - Keeps Flash for creative routing.
+//    - MODEL FIX: Default model changed to v1beta-compatible 'gemini-1.5-pro-preview-0514'.
 // 9. ERRORS: Returns 422 { code: "PLAN_INVALID" } for all plan failures.
 
 /// ===== IMPORTS-START ===== \\\\
@@ -463,7 +463,7 @@ module.exports = async function handler(request, response) {
         }
     };
 
-    const schema_version = "v11.1-patch"; // Tweak 1/4
+    const schema_version = "v11.2-patch"; // Tweak 1/4
     log(`Orchestrator ${schema_version} invoked.`, 'INFO', 'SYSTEM', { schema_version });
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -1131,7 +1131,7 @@ module.exports = async function handler(request, response) {
                 code: error.code || "PLAN_INVALID", // Machine-readable code
                 day: dayMatch ? parseInt(dayMatch[1], 10) : null,
                 firstInvalidMeal: mealMatch ? mealMatch[1] : null,
-                logs // Include logs for debugging
+                logs // Include logs
             });
         }
         
@@ -1187,9 +1187,9 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     
     // --- START: MODIFICATION (Preventative Model Swap) ---
-    // Use a more powerful model for plan generation, read from env var
-    const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-1.5-pro-latest'; // Use Pro for plan generation
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
+    // --- FIX: Use a v1beta-compatible model name ---
+    const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-1.5-pro-preview-0514'; // Use Pro for plan generation
+    const GEMINI_API_URL = `https::/generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
     log(`Using plan generation model: ${PLAN_MODEL_NAME}`, 'INFO', 'LLM_CALL');
     // --- END: MODIFICATION ---
 
@@ -1437,4 +1437,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
