@@ -515,8 +515,145 @@ module.exports = async function handler(request, response) {
                     return { ['unknown_invalid_ingredient']: { source: 'error', error: 'Invalid ingredient data provided' } };
                 }
                 const ingredientKey = ingredient.originalIngredient;
-                 if (!ingredient.normalQuery || !Array.isArray(ingredie...
-            // ... (rest of function is unchanged from V10, as it's robust) ...
+                 // --- *** FIX: Corrected variable name and added missing checks *** ---
+                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories) || ingredient.allowedCategories.length === 0) {
+                 // --- *** END FIX *** ---
+                    log(`[${ingredientKey}] Skipping due to missing critical fields`, 'ERROR', 'MARKET_RUN', { ingredient });
+                    return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields from AI', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
+                 }
+
+                const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
+                let foundProduct = null;
+                let bestScoreSoFar = -1;
+                const queriesToTry = [ { type: 'tight', query: ingredient.tightQuery }, { type: 'normal', query: ingredient.normalQuery }, { type: 'wide', query: ingredient.wideQuery } ];
+
+                let acceptedQueryIdx = -1;
+                let acceptedQueryType = 'none';
+                let pagesTouched = 0;
+                let priceZ = null;
+                let bucketWaitMs = 0;
+                const mode = 'speed';
+                let keptCount = 0;
+
+
+                for (const [index, { type, query }] of queriesToTry.entries()) {
+                    if (!query || query.toLowerCase() === 'null') {
+                         result.searchAttempts.push({ queryType: type, query: null, status: 'skipped', foundCount: 0});
+                         log(`[${ingredientKey}] Skipping "${type}" query because it was null/empty.`, 'DEBUG', 'HTTP');
+                         continue;
+                    }
+
+
+                    log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
+                    pagesTouched = 1;
+
+                    const { data: priceData, waitMs: currentWaitMs } = await fetchPriceData(store, query, 1, log);
+                    bucketWaitMs = Math.max(bucketWaitMs, currentWaitMs);
+
+                    result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0, rawCount: 0, bestScore: 0});
+                    const currentAttemptLog = result.searchAttempts.at(-1);
+
+                    if (priceData.error) {
+                        log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
+                        currentAttemptLog.status = 'fetch_error';
+                        continue;
+                    }
+
+                    const rawProducts = priceData.results || [];
+                    currentAttemptLog.rawCount = rawProducts.length;
+
+                    const validProductsOnPage = [];
+                    for (const rawProduct of rawProducts) {
+                         if (!rawProduct || !rawProduct.product_name) {
+                             log(`[${ingredientKey}] Skipping invalid raw product data`, 'WARN', 'DATA', { rawProduct });
+                             continue;
+                         }
+                        const productWithCategory = { ...rawProduct, product_category: rawProduct.product_category };
+                        const checklistResult = runSmarterChecklist(productWithCategory, ingredient, log);
+
+                        if (checklistResult.pass) {
+                             validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: checklistResult.score });
+                        }
+                    }
+
+                    const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
+
+                    currentAttemptLog.foundCount = filteredProducts.length;
+                    currentAttemptLog.bestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
+
+                    if (filteredProducts.length > 0) {
+                        log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
+                        const currentUrls = new Set(result.allProducts.map(p => p.url));
+                        filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); currentUrls.add(vp.product.url); } });
+
+                        if (result.allProducts.length > 0) {
+                            foundProduct = result.allProducts.reduce((best, current) =>
+                                (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best,
+                             result.allProducts[0]);
+                            result.currentSelectionURL = foundProduct.url;
+                        } else {
+                             log(`[${ingredientKey}] No products available after filtering/price guard (${type}).`, 'WARN', 'DATA');
+                             currentAttemptLog.status = 'no_match_post_filter';
+                             continue;
+                        }
+
+                        result.source = 'discovery';
+                        currentAttemptLog.status = 'success';
+                        bestScoreSoFar = Math.max(bestScoreSoFar, currentAttemptLog.bestScore);
+
+                        acceptedQueryIdx = index;
+                        acceptedQueryType = type;
+                        keptCount = result.allProducts.length;
+
+
+                        priceZ = null;
+                        if (result.allProducts.length >= 3 && foundProduct.unit_price_per_100 != null && foundProduct.unit_price_per_100 > 0) {
+                            const prices = result.allProducts.map(p => p.unit_price_per_100).filter(p => p != null && p > 0);
+                             if (prices.length >= 2) {
+                                const m = mean(prices);
+                                const s = stdev(prices);
+                                priceZ = (s > 0) ? ((foundProduct.unit_price_per_100 - m) / s) : 0;
+                            }
+                        }
+
+                        if (typeof acceptedQueryIdx === 'number' && acceptedQueryIdx >= 0) {
+                            log(`[${ingredientKey}] Success Telemetry`, 'INFO', 'LADDER_TELEMETRY', {
+                                 ingredientKey,
+                                 acceptedQueryIdx,
+                                 acceptedQueryType,
+                                 pagesTouched,
+                                 keptCount,
+                                 price_z: priceZ !== null ? parseFloat(priceZ.toFixed(2)) : null,
+                                 mode,
+                                 bucketWaitMs
+                             });
+                        } else {
+                             log(`[${ingredientKey}] CRITICAL Error: Telemetry skipped due to invalid acceptedQueryIdx: ${acceptedQueryIdx}`, 'CRITICAL', 'MARKET_RUN_ERROR', {
+                                ingredientKey, index, type, success: true
+                             });
+                        }
+
+
+                        if (type === 'tight' && bestScoreSoFar >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
+                            log(`[${ingredientKey}] Skip heuristic hit (Tight query successful with score >= ${SKIP_HEURISTIC_SCORE_THRESHOLD}).`, 'INFO', 'MARKET_RUN');
+                            break;
+                        }
+                        break; // Mode is 'speed'
+
+                    } else {
+                        log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA');
+                        currentAttemptLog.status = 'no_match';
+                    }
+                } // End query loop
+
+                if (result.source === 'failed') { log(`[${ingredientKey}] Definitive fail after trying all queries.`, 'WARN', 'MARKET_RUN'); }
+                return { [ingredientKey]: result };
+
+            } catch(e) {
+                log(`CRITICAL Error processing single ingredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
+                 const errorKey = ingredient?.originalIngredient || `unknown_error_${Date.now()}`;
+                 return { [errorKey]: { source: 'error', error: e.message, originalIngredient: errorKey, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
+            }
         };
 
         log(`Market Run: ${ingredientPlan.length} ingredients, K=${MAX_MARKET_RUN_CONCURRENCY}...`, 'INFO', 'MARKET_RUN');
@@ -669,6 +806,7 @@ module.exports = async function handler(request, response) {
                             // Simple sum for same units, complex logic needed if units differ (future)
                             // For now, assume LLM provides consistent units for dupes, or normalizeToGramsOrMl handles it
                             existing.qty += item.qty;
+                             log(`[${meal.name}] Merging duplicate item: '${item.key}'`, 'DEBUG', 'CALC');
                         } else {
                             mergedItems.set(itemKeyNormalized, { ...item, normalizedKey: itemKeyNormalized });
                         }
@@ -681,7 +819,7 @@ module.exports = async function handler(request, response) {
                         const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
 
                         // --- Tweak 3: Quantity Sanity Guard ---
-                        if (!Number.isFinite(gramsOrMl) || gramsOrMl <= 0 || gramsOrMl > 3000) {
+                        if (!Number.isFinite(gramsOrMl) || gramsOrMl <= 0 || gramsOrMl > 3000) { // Limit adjusted to 3000
                              log(`[${meal.name}] CRITICAL: Invalid quantity for item '${key}'.`, 'CRITICAL', 'CALC', { item, gramsOrMl });
                             throw new Error(`Plan generation failed: Invalid quantity (${qty} ${unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${key}" in meal: "${meal.name}"`);
                         }
@@ -703,9 +841,10 @@ module.exports = async function handler(request, response) {
                                 if (foundDensityKey) {
                                     density = DENSITY_MAP[foundDensityKey];
                                     isHeuristic = false;
+                                } else {
+                                     telemetry.densityHeuristics++; // Only count heuristic uses
                                 }
                                 grams = gramsOrMl * density;
-                                telemetry.densityHeuristics++;
                                 log(`[Density] Converting ${gramsOrMl}ml to ${grams}g (density ${density}) for '${key}'.`, 'DEBUG', 'CALC', {
                                     key: key, heuristic: isHeuristic
                                 });
@@ -722,7 +861,6 @@ module.exports = async function handler(request, response) {
                             mealSubtotals.carbs += c;
                         } else {
                             // --- Tweak 5: Canonical Fallback ---
-                            // Use canonical fallback ONLY if market run failed AND nutrition wasn't found
                             if (finalResultData && (finalResultData.source === 'failed' || finalResultData.source === 'error') && (!nutritionData || nutritionData.status !== 'found')) {
                                 log(`[${meal.name}] Attempting CANONICAL fallback for [${key}] (${gramsOrMl}${normalizedUnit}). Market run failed/error.`, 'WARN', 'CALC', { key });
                                 const canonicalNutrition = await fetchNutritionData(null, key, log); // Pass key as query
@@ -732,7 +870,6 @@ module.exports = async function handler(request, response) {
                                     meal.sources = meal.sources || [];
                                     if (!meal.sources.includes('canonical')) meal.sources.push('canonical');
                                     
-                                    // Canonical is per 100g, so 'grams' is correct
                                     const p = (canonicalNutrition.protein / 100) * grams;
                                     const f = (canonicalNutrition.fat / 100) * grams;
                                     const c = (canonicalNutrition.carbs / 100) * grams;
@@ -908,9 +1045,9 @@ module.exports = async function handler(request, response) {
         // --- Tweak 4/8: Final Telemetry Log ---
         log("Final Telemetry:", 'INFO', 'SYSTEM', {
             ...telemetry,
-            pct_canonical_hits: telemetry.totalMeals > 0 ? (telemetry.canonicalHits / telemetry.totalMeals) * 100 : 0,
-            pct_density_heuristics: telemetry.totalMeals > 0 ? (telemetry.densityHeuristics / telemetry.totalMeals) * 100 : 0,
-            scaleFactor: scaleFactor,
+            pct_canonical_hits: telemetry.totalMeals > 0 ? parseFloat(((telemetry.canonicalHits / telemetry.totalMeals) * 100).toFixed(1)) : 0,
+            pct_density_heuristics: telemetry.totalMeals > 0 ? parseFloat(((telemetry.densityHeuristics / telemetry.totalMeals) * 100).toFixed(1)) : 0,
+            scaleFactor: scaleFactor ? parseFloat(scaleFactor.toFixed(3)) : null,
             schema_version: "v11"
         });
 
@@ -1060,7 +1197,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                                                     "properties": {
                                                         "key": { "type": "STRING" },
                                                         "qty": { "type": "NUMBER" },
-                                                        "unit": { "type": "STRING" }
+                                                        "unit": { "type": "STRING" } // No longer enum
                                                     },
                                                     "required": ["key", "qty", "unit"]
                                                 }
@@ -1249,4 +1386,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
