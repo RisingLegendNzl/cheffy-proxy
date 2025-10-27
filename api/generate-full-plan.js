@@ -1,6 +1,6 @@
-// --- ORCHESTRATOR API for Cheffy V11 ---
+// --- ORCHESTRATOR API for Cheffy V11.1 (Patched) ---
 //
-// V11 Architecture (Mark 55+):
+// V11.1 Architecture (Mark 55+):
 // 1. ELIMINATED all free-text parsing. Nutrition is 100% deterministic.
 // 2. FORCES structured `meal.items[{key, qty, unit}]` from LLM schema (via prompt, best-effort).
 // 3. NORMALIZES units (g, kg, ml, l, egg, slice) to g/ml via `normalizeToGramsOrMl`.
@@ -10,10 +10,14 @@
 //    - Qty Sanity: Fails if any item qty <= 0 or > 3000.
 //    - Meal Guard: Fails (422) if any meal.items is empty or subtotal_kcal <= 0.
 //    - Validator Guard: Fails if scaling would drop a meal < 100 kcal.
-// 7. VALIDATOR:
-//    - Scales (0.9-1.1) if deviation is 5-10%.
-//    - Fails (422) if deviation > 10%.
-// 8. TELEMETRY: Logs run_id, v11 schema, scaling, and heuristic counters.
+// 7. VALIDATOR (NEW):
+//    - Refactored Phase 5 to use helper functions.
+//    - Pre-caches canonical fallbacks.
+//    - Runs non-protein reconciliation (curative patch) if deviation > 5%.
+//    - Fails if final deviation is still > 5%.
+// 8. MODEL (NEW):
+//    - Uses Gemini 1.5 Pro (or env var) for plan generation (preventative fix).
+//    - Keeps Flash for creative routing.
 // 9. ERRORS: Returns 422 { code: "PLAN_INVALID" } for all plan failures.
 
 /// ===== IMPORTS-START ===== \\\\
@@ -23,6 +27,9 @@ const crypto = require('crypto'); // For run_id
 // Now importing the CACHE-WRAPPED versions with SWR and Token Buckets
 const { fetchPriceData } = require('./price-search.js');
 const { fetchNutritionData } = require('./nutrition-search.js');
+// --- START: MODIFICATION (Import Reconciler) ---
+const { reconcileNonProtein } = require('../utils/reconcileNonProtein.js');
+// --- END: MODIFICATION ---
 
 /// ===== IMPORTS-END ===== ////
 
@@ -389,9 +396,14 @@ function normalizeToGramsOrMl(item, log) {
     }
 
     const grams = qty * weightPerUnit;
-    log(`[Unit Conversion] Converting ${qty} ${unit} of '${key}' to ${grams}g using ${weightPerUnit}g/unit.`, 'DEBUG', 'CALC', {
-        key: key, fromUnit: unit, qty: qty, toGrams: grams, heuristic: usedHeuristic // Tweak 5 log
-    });
+    // --- START: MODIFICATION (Reduce log noise) ---
+    // Only log this conversion if it's NOT a standard 'g', 'ml', 'kg', 'l' conversion
+    if (!['g', 'ml', 'kg', 'l'].includes(unit)) {
+        log(`[Unit Conversion] Converting ${qty} ${unit} of '${key}' to ${grams}g using ${weightPerUnit}g/unit.`, 'DEBUG', 'CALC', {
+            key: key, fromUnit: unit, qty: qty, toGrams: grams, heuristic: usedHeuristic // Tweak 5 log
+        });
+    }
+    // --- END: MODIFICATION ---
     return { value: grams, unit: 'g' };
 }
 
@@ -451,7 +463,7 @@ module.exports = async function handler(request, response) {
         }
     };
 
-    const schema_version = "v11"; // Tweak 1/4
+    const schema_version = "v11.1-patch"; // Tweak 1/4
     log(`Orchestrator ${schema_version} invoked.`, 'INFO', 'SYSTEM', { schema_version });
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -832,291 +844,235 @@ module.exports = async function handler(request, response) {
         }
 
 
-        // --- NEW Phase 5: Orchestrator Math Engine (V11) ---
+        // --- START: MODIFICATION (Phase 5 Refactor) ---
+        //
+        // --- NEW Phase 5: Orchestrator Math Engine (V11.1) ---
         log("Phase 5: Orchestrator Math Engine...", 'INFO', 'PHASE');
-        
-        let weeklyTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-        const dailyTotalsList = [];
 
-        if (!Array.isArray(mealPlan) || mealPlan.length === 0) {
-            log("No meal plan provided by LLM, skipping Phase 5 math.", 'WARN', 'CALC');
-        } else {
-            for (const dayPlan of mealPlan) {
+        // --- Phase 5.1: Pre-caching Canonical Fallbacks (Async) ---
+        // Run a pass to pre-cache canonical fallbacks before synchronous calculations
+        log("Phase 5.1: Pre-caching Canonical Fallbacks...", 'INFO', 'CALC');
+        if (Array.isArray(mealPlan) && mealPlan.length > 0) {
+            for (const [normalizedKey, result] of normalizedFinalResults.entries()) {
+                const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
+                // If no nutrition AND market run failed, try canonical
+                if (!hasNutri && (result.source === 'failed' || result.source === 'error')) {
+                    const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log);
+                    if (canonicalNutrition && canonicalNutrition.status === 'found' && canonicalNutrition.source.startsWith('canonical')) {
+                        log(`[${result.originalIngredient}] Storing CANONICAL fallback.`, 'DEBUG', 'CALC');
+                        nutritionDataMap.set(normalizedKey, canonicalNutrition);
+                        telemetry.canonicalHits++; // Count canonical hit
+                        // Tag the result so it can be seen in the meal
+                        const finalResult = normalizedFinalResults.get(normalizedKey);
+                        if(finalResult) finalResult.source = 'canonical_fallback';
+                    }
+                }
+            }
+        }
+
+        // --- Phase 5.2: Synchronous Helper Functions ---
+        // Helper to get macros for a single item. Reads from pre-populated nutritionDataMap.
+        const computeItemMacros = (item) => {
+            const { key, qty, unit } = item;
+            // Get normalizedKey, which was added in Phase 2/3
+            const normalizedKey = item.normalizedKey || normalizeKey(key); 
+            
+            const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
+            
+            if (!Number.isFinite(gramsOrMl) || gramsOrMl <= 0 || gramsOrMl > 3000) { // Keep sanity check
+                log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${key}'.`, 'CRITICAL', 'CALC', { item, gramsOrMl });
+                throw new Error(`Plan generation failed: Invalid quantity (${qty} ${unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${key}"`);
+            }
+
+            const nutritionData = nutritionDataMap.get(normalizedKey);
+            let grams = gramsOrMl;
+            let p = 0, f = 0, c = 0, kcal = 0;
+
+            if (normalizedUnit === 'ml') {
+                let density = 1.0;
+                let isHeuristic = true;
+                const keyLower = key.toLowerCase();
+                const foundDensityKey = Object.keys(DENSITY_MAP).find(k => keyLower.includes(k));
+                if (foundDensityKey) {
+                    density = DENSITY_MAP[foundDensityKey];
+                    isHeuristic = false;
+                } else {
+                    telemetry.densityHeuristics++;
+                }
+                grams = gramsOrMl * density;
+            }
+
+            if (nutritionData && nutritionData.status === 'found') {
+                p = (nutritionData.protein / 100) * grams;
+                f = (nutritionData.fat / 100) * grams;
+                c = (nutritionData.carbs / 100) * grams;
+                kcal = (p * 4) + (f * 9) + (c * 4);
+            }
+            
+            return { p, f, c, kcal, key }; // Return macros
+        };
+
+        // Helper to compute totals for the entire plan and validate meals
+        const computeDayTotals = (plan) => {
+            let totals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+            let invalidMealCount = 0;
+            let firstInvalidName = null;
+            
+            if (!Array.isArray(plan) || plan.length === 0) {
+                log("computeDayTotals: No meal plan provided.", 'WARN', 'CALC');
+                return { ...totals, isInvalid: true, firstInvalidName: "No Plan" };
+            }
+
+            // Reset meal count for this pass
+            telemetry.totalMeals = 0;
+
+            for (const dayPlan of plan) {
                 if (!dayPlan || !Array.isArray(dayPlan.meals) || dayPlan.meals.length === 0) {
-                     log(`Skipping invalid day or empty meals array for day ${dayPlan?.day || 'unknown'}`, 'WARN', 'CALC');
-                     continue;
+                    invalidMealCount++;
+                    firstInvalidName = firstInvalidName || `Day ${dayPlan?.day || 'unknown'} empty`;
+                    continue;
                 }
                 
-                let currentDayTotals = { calories: 0, protein: 0, fat: 0, carbs: 0 }; // Use floats
-
                 for (const meal of dayPlan.meals) {
-                     telemetry.totalMeals++;
-                     if (!meal || typeof meal.description !== 'string' || !Array.isArray(meal.items) || meal.items.length === 0) {
-                         log(`[${meal.name || 'Unknown Meal'}] CRITICAL: Meal is missing structured 'items' array.`, 'CRITICAL', 'CALC', { meal });
-                         meal.subtotal_kcal = 0; // Mark as invalid for guard check
-                         // Error will be thrown by the per-day guard
-                         continue;
-                     }
+                    telemetry.totalMeals++; // Count meals
+                    if (!meal || !Array.isArray(meal.items) || meal.items.length === 0) {
+                        invalidMealCount++;
+                        firstInvalidName = firstInvalidName || (meal.name || 'Unnamed Meal');
+                        meal.subtotal_kcal = 0; // Mark as invalid
+                        continue;
+                    }
 
-                    let mealSubtotals = { kcal: 0, protein: 0, fat: 0, carbs: 0 }; // Use floats
-                    
-                    // --- Tweak 3: Merge duplicate items ---
+                    // --- Merge duplicate items ---
                     const mergedItems = new Map();
                     for (const item of meal.items) {
-                        const itemKeyNormalized = normalizeKey(item.key); // Normalize once
+                        const itemKeyNormalized = item.normalizedKey || normalizeKey(item.key);
+                        item.normalizedKey = itemKeyNormalized; // Ensure normalizedKey is present
                         const existing = mergedItems.get(itemKeyNormalized);
                         if (existing) {
-                            // Basic sum - assumes units are compatible or normalization handles it
                             existing.qty += item.qty;
-                            log(`[${meal.name}] Merging duplicate item: '${item.key}'`, 'DEBUG', 'CALC');
                         } else {
-                            // Store with the normalized key attached for easy access later
-                            mergedItems.set(itemKeyNormalized, { ...item, normalizedKey: itemKeyNormalized });
+                            mergedItems.set(itemKeyNormalized, { ...item });
                         }
                     }
-
+                    
+                    let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
+                    
                     for (const item of mergedItems.values()) {
-                        const { key, qty, unit, normalizedKey } = item;
-                        
-                        // --- Tweak 1: Normalize units ---
-                        const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
-
-                        // --- Tweak 3: Quantity Sanity Guard ---
-                        if (!Number.isFinite(gramsOrMl) || gramsOrMl <= 0 || gramsOrMl > 3000) { // Limit 3000
-                             log(`[${meal.name}] CRITICAL: Invalid quantity for item '${key}'.`, 'CRITICAL', 'CALC', { item, gramsOrMl });
-                             // Tweak 7: Use specific error format
-                            throw new Error(`Plan generation failed: Invalid quantity (${qty} ${unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${key}" in meal: "${meal.name}"`);
-                        }
-
-                        const nutritionData = nutritionDataMap.get(normalizedKey);
-                        const finalResultData = normalizedFinalResults.get(normalizedKey);
-                        
-                        let grams = gramsOrMl; // Assume g unless converted by density
-                        let nutritionSource = 'none';
-                        
-                        if (nutritionData && nutritionData.status === 'found') {
-                            nutritionSource = nutritionData.source; // Record the source
-                            const nutritionServingUnit = 'g'; // Our nutrition API standardizes to per 100g
-                            
-                            // --- Tweak 1: Density Conversion ---
-                            if (normalizedUnit === 'ml' && nutritionServingUnit === 'g') {
-                                let density = 1.0;
-                                let isHeuristic = true;
-                                const keyLower = key.toLowerCase();
-                                const foundDensityKey = Object.keys(DENSITY_MAP).find(k => keyLower.includes(k));
-                                if (foundDensityKey) {
-                                    density = DENSITY_MAP[foundDensityKey];
-                                    isHeuristic = false;
-                                } else {
-                                     telemetry.densityHeuristics++; // Count heuristic uses
-                                }
-                                grams = gramsOrMl * density;
-                                log(`[Density] Converting ${gramsOrMl}ml to ${grams}g (density ${density}) for '${key}'.`, 'DEBUG', 'CALC', {
-                                    key: key, heuristic: isHeuristic // Tweak 5 log
-                                });
-                            }
-                            
-                            // Use 'grams' for calculation against per-100g data
-                            const p = (nutritionData.protein / 100) * grams;
-                            const f = (nutritionData.fat / 100) * grams;
-                            const c = (nutritionData.carbs / 100) * grams;
-                            const kcal = (p * 4) + (f * 9) + (c * 4);
-                            
-                            mealSubtotals.kcal += kcal;
-                            mealSubtotals.protein += p;
-                            mealSubtotals.fat += f;
-                            mealSubtotals.carbs += c;
-                        } else {
-                            // --- Tweak 5: Canonical Fallback ---
-                            // Check if market run actually failed for this specific item
-                            const marketFailed = finalResultData && (finalResultData.source === 'failed' || finalResultData.source === 'error');
-                            if (marketFailed && (!nutritionData || nutritionData.status !== 'found')) {
-                                log(`[${meal.name}] Attempting CANONICAL fallback for [${key}] (${gramsOrMl}${normalizedUnit}). Market run failed/error.`, 'WARN', 'CALC', { key });
-                                const canonicalNutrition = await fetchNutritionData(null, key, log); // Pass original key
-
-                                if (canonicalNutrition && canonicalNutrition.status === 'found' && canonicalNutrition.source.startsWith('canonical')) {
-                                    telemetry.canonicalHits++; // Tweak 4 telemetry
-                                    nutritionSource = 'canonical'; // Record source
-                                    meal.sources = meal.sources || [];
-                                    if (!meal.sources.includes('canonical')) meal.sources.push('canonical'); // Tag meal
-                                    
-                                    // Use 'grams' (potentially density converted) for calculation
-                                    const p = (canonicalNutrition.protein / 100) * grams;
-                                    const f = (canonicalNutrition.fat / 100) * grams;
-                                    const c = (canonicalNutrition.carbs / 100) * grams;
-                                    const kcal = (p * 4) + (f * 9) + (c * 4);
-                                    mealSubtotals.kcal += kcal;
-                                    mealSubtotals.protein += p;
-                                    mealSubtotals.fat += f;
-                                    mealSubtotals.carbs += c;
-                                    log(`[${meal.name}] Applied CANONICAL (${canonicalNutrition.source}) for [${key}]`, 'DEBUG', 'CALC', { kcal: kcal.toFixed(0), p: p.toFixed(1), f: f.toFixed(1), c: c.toFixed(1) });
-                                } else {
-                                    log(`[${meal.name}] No CANONICAL fallback found or applicable for failed ingredient [${key}]. Skipping.`, 'WARN', 'CALC');
-                                }
-                            } else {
-                                log(`[${meal.name}] Skipping nutrition for [${key}] (${gramsOrMl}${normalizedUnit}). No valid/found nutrition data (Market source: ${finalResultData?.source}).`, 'WARN', 'CALC', { key, nutriStatus: nutritionData?.status });
-                            }
-                        }
-                        // Log source used for this item's nutrition
-                        // log(`[${meal.name}] Nutrition source for [${key}]: ${nutritionSource}`, 'DEBUG', 'CALC');
-
-                    } // End ingredient loop for meal
-
-                    // --- Tweak 4: NaN Guard ---
-                    if (isNaN(mealSubtotals.kcal) || isNaN(mealSubtotals.protein) || isNaN(mealSubtotals.fat) || isNaN(mealSubtotals.carbs)) {
-                        log(`[${meal.name}] CRITICAL: Meal subtotal is NaN.`, 'CRITICAL', 'CALC', { meal });
-                        // Tweak 7: Use specific error format
-                        throw new Error(`Plan generation failed: Calculation error (NaN) for meal: "${meal.name}"`);
+                        const macros = computeItemMacros(item);
+                        mealKcal += macros.kcal;
+                        mealP += macros.p;
+                        mealF += macros.f;
+                        mealC += macros.c;
                     }
 
-                    // Store subtotals as floats
-                    meal.subtotal_kcal = mealSubtotals.kcal;
-                    meal.subtotal_protein = mealSubtotals.protein;
-                    meal.subtotal_fat = mealSubtotals.fat;
-                    meal.subtotal_carbs = mealSubtotals.carbs;
+                    // Store/update meal subtotals (floats)
+                    meal.subtotal_kcal = mealKcal;
+                    meal.subtotal_protein = mealP;
+                    meal.subtotal_fat = mealF;
+                    meal.subtotal_carbs = mealC;
+                    
+                    if (mealKcal <= 0) { // Guard for zero-cal meals
+                        invalidMealCount++;
+                        firstInvalidName = firstInvalidName || (meal.name || 'Zero Cal Meal');
+                    }
 
-                    log(`[${meal.name}] Calculated Subtotals (Float):`, 'DEBUG', 'CALC', {
-                        kcal: meal.subtotal_kcal.toFixed(2),
-                        p: meal.subtotal_protein.toFixed(2),
-                        f: meal.subtotal_fat.toFixed(2),
-                        c: meal.subtotal_carbs.toFixed(2),
-                        sources: meal.sources // Log canonical sources if present
-                    });
-
-                    // Add floats to day totals
-                    currentDayTotals.calories += mealSubtotals.kcal;
-                    currentDayTotals.protein += mealSubtotals.protein;
-                    currentDayTotals.fat += mealSubtotals.fat;
-                    currentDayTotals.carbs += mealSubtotals.carbs;
-
-                } // End meal loop for day
-                
-                // --- Tweak 4/7/8: Per-Day Meal Guard & Log ---
-                const invalidMealList = dayPlan.meals.filter(m => !m.items || m.items.length === 0 || !Number.isFinite(m.subtotal_kcal) || m.subtotal_kcal <= 0);
-                const invalidCount = invalidMealList.length;
-                const validCount = dayPlan.meals.length - invalidCount;
-                telemetry.invalidMeals += invalidCount;
-
-                log(`Day ${dayPlan.day} Meal Stats: ${validCount} OK, ${invalidCount} Invalid.`, 'INFO', 'CALC', { // Tweak 8
-                    meals_ok: validCount, meals_invalid: invalidCount,
-                    first_invalid: invalidCount > 0 ? invalidMealList[0].name : null
-                });
-                
-                // Tweak 4: Throw immediately if invalid meals found
-                if (invalidCount > 0) {
-                    const firstInvalidName = invalidMealList[0].name || 'Unnamed Meal';
-                    log(`CRITICAL: Day ${dayPlan.day} contains invalid meals. Failing plan generation. First invalid: "${firstInvalidName}"`, 'CRITICAL', 'CALC');
-                    // Tweak 7: Use specific error format
-                    throw new Error(`Plan generation failed: Meal(s) on Day ${dayPlan.day} are invalid (missing items or zero calories). First invalid meal: "${firstInvalidName}"`);
+                    totals.calories += mealKcal;
+                    totals.protein += mealP;
+                    totals.fat += mealF;
+                    totals.carbs += mealC;
                 }
-                
-                dailyTotalsList.push(currentDayTotals);
-                log(`Calculated Totals for Day ${dayPlan.day} (Float):`, 'INFO', 'CALC', {
-                     calories: currentDayTotals.calories.toFixed(2),
-                     protein: currentDayTotals.protein.toFixed(2),
-                     fat: currentDayTotals.fat.toFixed(2),
-                     carbs: currentDayTotals.carbs.toFixed(2),
-                });
-            } // End day loop
-
-            weeklyTotals = dailyTotalsList.reduce((acc, day) => {
-                acc.calories += day.calories;
-                acc.protein += day.protein;
-                acc.fat += day.fat;
-                acc.carbs += day.carbs;
-                return acc;
-            }, { calories: 0, protein: 0, fat: 0, carbs: 0 });
-        }
-
-        const validNumDays = (dailyTotalsList.length > 0) ? dailyTotalsList.length : ( (numDays >= 1 && numDays <= 7) ? numDays : 1 );
-        log(`Averaging totals over ${validNumDays} days.`, 'DEBUG', 'CALC');
-
-        const finalDailyTotals = { // Still floats at this stage
-             calories: weeklyTotals.calories / validNumDays,
-             protein: weeklyTotals.protein / validNumDays,
-             fat: weeklyTotals.fat / validNumDays,
-             carbs: weeklyTotals.carbs / validNumDays,
-        };
-        
-        // --- Tweak 4: NaN Guard ---
-        if (isNaN(finalDailyTotals.calories) || isNaN(finalDailyTotals.protein) || isNaN(finalDailyTotals.fat) || isNaN(finalDailyTotals.carbs)) {
-            log(`CRITICAL: Final daily totals are NaN.`, 'CRITICAL', 'CALC', { finalDailyTotals });
-             // Tweak 7: Use specific error format
-            throw new Error(`Plan generation failed: Final calculation resulted in NaN.`);
-        }
-        
-        log("ACCURATE DAILY nutrition totals calculated (Float).", 'SUCCESS', 'CALC', finalDailyTotals);
-
-
-        // --- Phase 5.5: Final Validator (Tweak 6) ---
-        const targetCalories = calorieTarget;
-        let calculatedCalories = finalDailyTotals.calories; // Float
-        let deviation = (targetCalories > 0) ? (calculatedCalories - targetCalories) / targetCalories : 0;
-        let deviation_pct = deviation * 100;
-        scaleFactor = null; // Reset scaleFactor for this run
-
-        const validatorLogData = { // Tweak 8
-             target: targetCalories,
-             final_unscaled: parseFloat(calculatedCalories.toFixed(1)),
-             deviation_pct_unscaled: parseFloat(deviation_pct.toFixed(1)),
-             scaleFactor: null
-        };
-
-        // 1. Scale if deviation is > 5% and <= 10%
-        if (Math.abs(deviation) > 0.05 && Math.abs(deviation) <= 0.10) {
-            scaleFactor = Math.max(0.9, Math.min(1.1, targetCalories / calculatedCalories)); // Bounded 0.9-1.1
-            validatorLogData.scaleFactor = parseFloat(scaleFactor.toFixed(3)); // Log the factor
-            
-            // --- Tweak 6: Pre-scaling Guard ---
-            const anyMealTooLow = mealPlan.some(day => 
-                day.meals.some(meal => (meal.subtotal_kcal * scaleFactor) < 100) // Check if scaling drops below 100
-            );
-            if (anyMealTooLow) {
-                log(`CRITICAL: Scaling aborted. Factor ${scaleFactor.toFixed(3)} would drop a meal below 100kcal. Failing.`, 'CRITICAL', 'CALC');
-                 // Tweak 7: Use specific error format
-                throw new Error(`Plan generation failed: Calculated calories (${calculatedCalories.toFixed(0)}) deviate from target (${targetCalories}), and scaling would create invalid meals.`);
             }
-            // --- End Guard ---
+            
+            telemetry.invalidMeals = invalidMealCount; // Update telemetry
+            
+            if (invalidMealCount > 0) {
+                log(`CRITICAL: Plan contains ${invalidMealCount} invalid meals. First invalid: "${firstInvalidName}"`, 'CRITICAL', 'CALC');
+                throw new Error(`Plan generation failed: Meal(s) are invalid (missing items or zero calories). First invalid meal: "${firstInvalidName}"`);
+            }
+            
+            const numDays = plan.length || 1;
+            return {
+                calories: totals.calories / numDays,
+                protein: totals.protein / numDays,
+                fat: totals.fat / numDays,
+                carbs: totals.carbs / numDays,
+                isInvalid: false
+            };
+        };
+        // --- END: MODIFICATION (Helper Functions) ---
 
-            log(`Applying bounded scaling. Factor: ${scaleFactor.toFixed(3)}`, 'WARN', 'CALC');
+
+        // --- Phase 5.5: Final Validator (Rebuilt w/ Patch) ---
+        log("Phase 5.2: Calculating Initial Totals...", 'INFO', 'CALC');
+        const targetCalories = calorieTarget;
+        let currentMealPlan = mealPlan;
+        
+        // Run initial calculation
+        const totals1 = computeDayTotals(currentMealPlan); 
+        log("ACCURATE DAILY nutrition totals calculated (Float).", 'SUCCESS', 'CALC', {
+            calories: totals1.calories.toFixed(1),
+            protein: totals1.protein.toFixed(1),
+            fat: totals1.fat.toFixed(1),
+            carbs: totals1.carbs.toFixed(1),
+        });
+
+        let finalDailyTotals = totals1;
+        
+        // --- START: MODIFICATION (Curative Patch) ---
+        const deviation1 = (totals1.calories - targetCalories) / targetCalories;
+        const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1';
+        
+        // Run reconciliation if deviation is > 5% and flag is enabled
+        if (RECONCILE_FLAG && Math.abs(deviation1) > 0.05) { 
+            log(`[RECON] Initial deviation ${ (deviation1 * 100).toFixed(1) }% > 5%. Attempting non-protein reconciliation.`, 'WARN', 'CALC');
             
-            // Scale ALL totals (floats)
-            finalDailyTotals.calories *= scaleFactor;
-            finalDailyTotals.protein *= scaleFactor;
-            finalDailyTotals.fat *= scaleFactor;
-            finalDailyTotals.carbs *= scaleFactor;
-            
-            // Scale ALL meal subtotals (floats) - Tweak 6
-            mealPlan.forEach(day => {
-                day.meals.forEach(meal => {
-                    meal.subtotal_kcal *= scaleFactor;
-                    meal.subtotal_protein *= scaleFactor;
-                    meal.subtotal_fat *= scaleFactor;
-                    meal.subtotal_carbs *= scaleFactor;
-                });
+            const { adjusted, factor, meals: scaledMealPlan } = reconcileNonProtein({
+                meals: currentMealPlan,
+                targetKcal: targetCalories,
+                getItemMacros: computeItemMacros, // Pass the helper
+                tolPct: 5
             });
             
-            // Recalculate deviation for logging
-            calculatedCalories = finalDailyTotals.calories;
-            deviation = (targetCalories > 0) ? (calculatedCalories - targetCalories) / targetCalories : 0;
-            deviation_pct = deviation * 100;
-
-             validatorLogData.final_scaled = parseFloat(calculatedCalories.toFixed(1));
-             validatorLogData.deviation_pct_scaled = parseFloat(deviation_pct.toFixed(1));
-
-            log(`Post-Scaling: Calculated=${calculatedCalories.toFixed(0)}, Deviation=${deviation_pct.toFixed(1)}%`, 'INFO', 'CALC');
+            if (adjusted) {
+                currentMealPlan = scaledMealPlan; // Use the scaled plan
+                finalDailyTotals = computeDayTotals(currentMealPlan); // Recalculate totals
+                scaleFactor = factor; // Store scale factor for telemetry
+                
+                log(`[RECON] Reconciliation complete.`, 'INFO', 'CALC', {
+                    pre: { kcal: totals1.calories.toFixed(1), p: totals1.protein.toFixed(1), f: totals1.fat.toFixed(1), c: totals1.carbs.toFixed(1) },
+                    factor: factor.toFixed(3),
+                    post: { kcal: finalDailyTotals.calories.toFixed(1), p: finalDailyTotals.protein.toFixed(1), f: finalDailyTotals.fat.toFixed(1), c: finalDailyTotals.carbs.toFixed(1) }
+                });
+            } else {
+                log("[RECON] Reconciliation ran but no adjustments were made (already within tolerance).", 'INFO', 'CALC');
+            }
+        } else if (!RECONCILE_FLAG) {
+             log("[RECON] Reconciliation skipped (CHEFFY_RECONCILE_NONPROTEIN not '1').", 'INFO', 'CALC');
+        } else {
+             log("[RECON] Initial deviation within 5%. No reconciliation needed.", 'INFO', 'CALC');
         }
+        // --- END: MODIFICATION (Curative Patch) ---
 
-        // Log validator results (Tweak 8)
-        log("Final Validation Result", 'INFO', 'CALC', validatorLogData);
+        // --- Final Validation (uses 'finalDailyTotals') ---
+        const finalDeviation = (finalDailyTotals.calories - targetCalories) / targetCalories;
+        const finalDeviationPct = finalDeviation * 100;
 
-        // 2. Fail-fast if deviation is still > 10% (after potential scaling)
-        if (Math.abs(deviation) > 0.10) { 
-            log(`CRITICAL: Final calculation failed hard validation. Target: ${targetCalories} kcal, Final: ${calculatedCalories.toFixed(0)} kcal.`, 'CRITICAL', 'CALC', { deviation_pct });
-             // Tweak 7: Use specific error format
-            throw new Error(`Plan generation failed: Calculated daily calories (${calculatedCalories.toFixed(0)}) deviate too much from target (${targetCalories}).`);
+        log("Final Validation Result", 'INFO', 'CALC', {
+             target: targetCalories,
+             final_kcal: parseFloat(finalDailyTotals.calories.toFixed(1)),
+             final_deviation_pct: parseFloat(finalDeviationPct.toFixed(1)),
+             reconcile_run: RECONCILE_FLAG,
+             reconcile_applied: !!scaleFactor
+        });
+
+        // Fail-fast if deviation is *still* > 5% (as per patch logic)
+        const FINAL_TOLERANCE = 0.05; // 5%
+        if (Math.abs(finalDeviation) > FINAL_TOLERANCE) { 
+            log(`CRITICAL: Final calculation failed hard validation. Target: ${targetCalories} kcal, Final: ${finalDailyTotals.calories.toFixed(0)} kcal.`, 'CRITICAL', 'CALC', { deviation_pct: finalDeviationPct });
+            // Tweak 7: Use specific error format
+            throw new Error(`Plan generation failed: Calculated daily calories (${finalDailyTotals.calories.toFixed(0)}) deviate too much from target (${targetCalories}). [Code: E_MACRO_MISMATCH]`);
         }
-        // --- END VALIDATOR ---
+        // --- END: MODIFICATION (Phase 5 Refactor) ---
 
 
         // --- Phase 6: Assembling Final Response ---
@@ -1128,7 +1084,8 @@ module.exports = async function handler(request, response) {
         finalDailyTotals.fat = Math.round(finalDailyTotals.fat);
         finalDailyTotals.carbs = Math.round(finalDailyTotals.carbs);
         
-        mealPlan.forEach(day => {
+        // Use the (potentially scaled) currentMealPlan
+        currentMealPlan.forEach(day => {
             day.meals.forEach(meal => {
                 meal.subtotal_kcal = Math.round(meal.subtotal_kcal);
                 meal.subtotal_protein = Math.round(meal.subtotal_protein);
@@ -1149,7 +1106,7 @@ module.exports = async function handler(request, response) {
 
         const finalResponseData = {
              plan_schema: schema_version, // Tweak 1
-             mealPlan: mealPlan || [],
+             mealPlan: currentMealPlan || [], // Use the (potentially scaled) plan
              // Remove normalizedKey before sending to frontend
              uniqueIngredients: ingredientPlan.map(({ normalizedKey, ...rest }) => rest),
              // Convert Map back to object for JSON response
@@ -1164,13 +1121,14 @@ module.exports = async function handler(request, response) {
         console.error("ORCHESTRATOR UNHANDLED ERROR:", error);
         
         // --- Tweak 7: Return 422 for plan errors, 500 for server errors ---
-        if (error.message.startsWith('Plan generation failed:')) {
+        // --- MODIFICATION: Added E_MACRO_MISMATCH code ---
+        if (error.message.startsWith('Plan generation failed:') || error.code === 'E_MACRO_MISMATCH') {
             const dayMatch = error.message.match(/Day (\d+)/);
             const mealMatch = error.message.match(/meal: "([^"]+)"/);
             
             return response.status(422).json({ // Use 422
                 message: error.message,
-                code: "PLAN_INVALID", // Machine-readable code
+                code: error.code || "PLAN_INVALID", // Machine-readable code
                 day: dayMatch ? parseInt(dayMatch[1], 10) : null,
                 firstInvalidMeal: mealMatch ? mealMatch[1] : null,
                 logs // Include logs for debugging
@@ -1195,8 +1153,9 @@ module.exports = async function handler(request, response) {
 
 
 async function generateCreativeIdeas(cuisinePrompt, log) {
-    // --- FIX: Use v1beta endpoint and correct model name ---
-    const CREATIVE_GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent'; // FIX: Use v1beta endpoint and correct model
+    // --- FIX: Use v1beta endpoint and correct model ---
+    // --- MODIFICATION: This function still uses the (cheaper) Flash model ---
+    const CREATIVE_GEMINI_API_URL = GEMINI_API_URL_BASE; 
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -1226,7 +1185,14 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; // Uses the corrected v1beta URL
+    
+    // --- START: MODIFICATION (Preventative Model Swap) ---
+    // Use a more powerful model for plan generation, read from env var
+    const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-1.5-pro-latest'; // Use Pro for plan generation
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
+    log(`Using plan generation model: ${PLAN_MODEL_NAME}`, 'INFO', 'LLM_CALL');
+    // --- END: MODIFICATION ---
+
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']}; const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const maxRepetitions = {'High Repetition':3,'Low Repetition':1,'Balanced Variety':2}[mealVariety]||2;
@@ -1243,8 +1209,9 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
 
     // --- V11 System Prompt (Integrated into user query for v1 API) ---
     // --- FIX: Escaped backticks and curly braces in JSON example ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 10. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 11. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 12. NO 'nutritionalTargets' or 'aiEst...' nutrition properties in output. 13. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 14. MEAL PORTIONS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) DO NOT include 'subtotal_...' fields. 15. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 16. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 17. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 16. Prioritize variety if needed.
-18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the **${calorieTarget} kcal** daily target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise **${calorieTarget} kcal** goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array.
+    // --- START: MODIFICATION (Tighten Prompt) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 10. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 11. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 12. NO 'nutritionalTargets' or 'aiEst...' nutrition properties in output. 13. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 14. MEAL PORTIONS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) DO NOT include 'subtotal_...' fields. 15. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 16. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 17. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 16. Prioritize variety if needed.
+18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the **${calorieTarget} kcal** daily target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise **${calorieTarget} kcal** goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. **SELF-CORRECTION: Before outputting, you MUST internally sum the calories. If the deviation from ${calorieTarget} kcal is >5%, you MUST revise item quantities (especially carbs/fats) and re-check. A plan that misses the target is a failed plan.**
 19. MEAL CALORIE LIMITS: Distribute calories reasonably. No single meal's 'items' should sum to more than **${mealMax} kcal**. This is a hard limit.
 Output ONLY the valid JSON object described below (with 'ingredients' and 'mealPlan' keys), wrapped in \`\`\`json ... \`\`\`, nothing else.
 
@@ -1255,6 +1222,8 @@ JSON Structure:
 \\}
 `;
     // --- End V11 Prompt & FIX ---
+    // --- END: MODIFICATION (Tighten Prompt) ---
+
 
     let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
@@ -1468,5 +1437,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
 
