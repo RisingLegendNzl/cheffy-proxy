@@ -31,8 +31,8 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
-const MAX_RETRIES = 2; // Retries for Gemini calls
+const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
+const MAX_RETRIES = 2; // Retries for Gemini calls (Reduced from 3)
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
 const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'];
@@ -116,7 +116,7 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 // --- START: MODIFIED fetchWithRetry ---
 async function fetchWithRetry(url, options, log) {
     // Add a generous timeout for the large Gemini payload
-    const REQUEST_TIMEOUT_MS = 120000; // 120 seconds
+    const REQUEST_TIMEOUT_MS = 120000; // 120 seconds (2 minutes)
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         
@@ -1490,4 +1490,5 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
 
