@@ -2,7 +2,7 @@
 //
 // V11 Architecture (Mark 55+):
 // 1. ELIMINATED all free-text parsing. Nutrition is 100% deterministic.
-// 2. FORCES structured `meal.items[{key, qty, unit}]` from LLM schema.
+// 2. FORCES structured `meal.items[{key, qty, unit}]` from LLM schema (via prompt, best-effort).
 // 3. NORMALIZES units (g, kg, ml, l, egg, slice) to g/ml via `normalizeToGramsOrMl`.
 // 4. USES density map for ml->g conversion.
 // 5. NORMALIZES keys (lowercase, trim) to prevent string mismatch.
@@ -31,7 +31,7 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 /// ===== CONFIG-START ===== \\\\
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// --- FIX: Changed v1beta to v1 ---
+// --- FIX: Using v1 endpoint ---
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent';
 const MAX_RETRIES = 2; // Retries for Gemini calls (Reduced from 3)
 const MAX_NUTRITION_CONCURRENCY = 5;
@@ -1232,91 +1232,38 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'capsicum' not 'bell pepper')." : "";
 
-    // --- V11 System Prompt (Stronger Target Adherence - Tweak from previous step) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 10. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 11. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 12. NO 'nutritionalTargets' or 'aiEst...' nutrition properties in output. 13. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 14. MEAL PORTIONS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) DO NOT include 'subtotal_...' fields. 15. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 16. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 17. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 16. Prioritize variety if needed. // Inside the systemPrompt string:
-18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the provided daily calorie target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise caloric goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. Output ONLY the valid JSON object described by the schema, nothing else.
+    // --- V11 System Prompt (Integrated into user query for v1 API) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 10. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 11. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 12. NO 'nutritionalTargets' or 'aiEst...' nutrition properties in output. 13. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 14. MEAL PORTIONS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) DO NOT include 'subtotal_...' fields. 15. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 16. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 17. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 16. Prioritize variety if needed.
+18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the provided daily calorie target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise caloric goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. Output ONLY the valid JSON object described below (with 'ingredients' and 'mealPlan' keys), wrapped in ```json ... ```, nothing else.
+
+JSON Structure:
+{
+  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] } /* ... more ingredients */ ],
+  "mealPlan": [ { "day": number, "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } /* ... more items */ ] } /* ... more meals */ ] } /* ... more days */ ]
+}
 `;
     // --- End V11 Prompt ---
 
     let userQuery = `Gen ${days}-day plan for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Target: ~${calorieTarget} kcal. Macro Targets: Protein ~${proteinTargetGrams}g, Fat ~${fatTargetGrams}g, Carbs ~${carbTargetGrams}g. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority} (${costInstruction}). Rep Max: ${maxRepetitions}. Cuisine: ${cuisineInstruction}.`;
 
-    if (userQuery.trim().length < 50) {
+    // --- Combine system prompt and user query for v1 API ---
+    const combinedPrompt = `${systemPrompt}\n\nUSER REQUEST:\n${userQuery}`;
+
+    if (userQuery.trim().length < 50) { // Check original user query length
         log("Critical Input Failure: User query is too short/empty.", 'CRITICAL', 'LLM_PAYLOAD', { userQuery, sanitizedData: getSanitizedFormData(formData) });
         // Use specific error format
         throw new Error("Plan generation failed: Cannot generate plan due to missing user input.");
     }
 
-    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 500) + '...', sanitizedData: getSanitizedFormData(formData) });
+    log("Technical Prompt (Combined)", 'INFO', 'LLM_PROMPT', { promptStart: combinedPrompt.substring(0, 500) + '...', sanitizedData: getSanitizedFormData(formData) });
 
-    // --- V11 Schema (Unchanged from previous step) ---
+    // --- FIX: Simplified payload for v1 API ---
     const payload = {
-        contents: [{ parts: [{ text: userQuery }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: { /* ... schema structure ... */
-                 type: "OBJECT",
-                properties: {
-                    "ingredients": {
-                        type: "ARRAY",
-                        items: {
-                            type: "OBJECT",
-                            properties: {
-                                "originalIngredient": { "type": "STRING" },
-                                "category": { "type": "STRING" },
-                                "tightQuery": { "type": "STRING", nullable: true },
-                                "normalQuery": { "type": "STRING" },
-                                "wideQuery": { "type": "STRING", nullable: true },
-                                "requiredWords": { type: "ARRAY", items: { "type": "STRING" } },
-                                "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } },
-                                "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
-                                "totalGramsRequired": { "type": "NUMBER" },
-                                "quantityUnits": { "type": "STRING" },
-                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }},
-                            },
-                            required: ["originalIngredient", "normalQuery", "requiredWords", "negativeKeywords", "allowedCategories", "totalGramsRequired", "quantityUnits"]
-                        }
-                    },
-                    "mealPlan": {
-                        type: "ARRAY",
-                        items: {
-                            type: "OBJECT",
-                            properties: {
-                                "day": { "type": "NUMBER" },
-                                "meals": {
-                                    type: "ARRAY",
-                                    items: {
-                                        type: "OBJECT",
-                                        properties: {
-                                            "type": { "type": "STRING" },
-                                            "name": { "type": "STRING" },
-                                            "description": { "type": "STRING" },
-                                            "items": {
-                                                "type": "ARRAY",
-                                                "items": {
-                                                    "type": "OBJECT",
-                                                    "properties": {
-                                                        "key": { "type": "STRING" },
-                                                        "qty": { "type": "NUMBER" },
-                                                        "unit": { "type": "STRING" } // No longer enum
-                                                    },
-                                                    "required": ["key", "qty", "unit"]
-                                                }
-                                            }
-                                        },
-                                        required: ["type", "name", "description", "items"] // "items" is REQUIRED
-                                    }
-                                }
-                            },
-                             required: ["day", "meals"]
-                        }
-                    }
-                },
-                required: ["ingredients", "mealPlan"]
-            }
-        }
+        contents: [{ parts: [{ text: combinedPrompt }] }],
+        // Removed systemInstruction
+        // Removed generationConfig
     };
-    // --- End V11 Schema ---
+    // --- End FIX ---
 
 
     try {
@@ -1326,17 +1273,30 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
             log
         );
         const result = await response.json();
-        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        let jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        
         if (!jsonText) {
             log("Technical AI returned no JSON text.", 'CRITICAL', 'LLM', result);
             throw new Error("LLM response was empty or contained no text part."); // Caught as 500
         }
-        log("Technical Raw", 'INFO', 'LLM', { raw: jsonText.substring(0, 200) + '...' });
+
+        // --- FIX: Extract JSON from markdown code block if necessary ---
+        const jsonMatch = jsonText.match(/```json\s*([\s\S]*?)\s*```/);
+        if (jsonMatch && jsonMatch[1]) {
+            jsonText = jsonMatch[1];
+            log("Extracted JSON from markdown block.", 'DEBUG', 'LLM');
+        } else {
+            log("Response was not wrapped in ```json block, attempting direct parse.", 'WARN', 'LLM');
+        }
+        // --- End FIX ---
+
+        log("Technical Raw (potential JSON)", 'INFO', 'LLM', { raw: jsonText.substring(0, 200) + '...' });
+        
         try {
             const parsed = JSON.parse(jsonText);
             log("Parsed Technical", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
 
-            // Validation (V11: Checks meal.items)
+            // Validation (V11: Checks meal.items) - Remains the same
             if (!parsed || typeof parsed !== 'object') throw new Error("LLM response was not a valid object.");
              if (!parsed.ingredients || !Array.isArray(parsed.ingredients)) throw new Error("LLM response 'ingredients' is missing or not an array.");
              if (!parsed.mealPlan || !Array.isArray(parsed.mealPlan) || parsed.mealPlan.length === 0) throw new Error("LLM response is missing a valid 'mealPlan'.");
