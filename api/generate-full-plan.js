@@ -1,15 +1,15 @@
-// --- ORCHESTRATOR API for Cheffy V9 ---
+// --- ORCHESTRATOR API for Cheffy V10 ---
 
-// Mark 53 (CRITICAL PARSER FIX - V9 Logic):
-// 1. REFINED Regex in `parseIngredientsFromDescription` to be non-greedy
-//    and stop before separators (and, with, next quantity) using lookahead.
+// Mark 54 (CRITICAL PARSER FIX - V10 Logic):
+// 1. FIXED Regex in `parseIngredientsFromDescription` by REMOVING the problematic `|\)`
+//    alternative match added in V9.
 //    Regex: `(\d+\.?\d*)\s*(g|ml)\s*([\w\s]+?)(?=\s+\d{1,4}\s*(?:g|ml)|\s+and|\s+with|$)`
 // 2. KEPT V8 matching logic: Check if ALL significant words from the (now correctly captured)
 //    `description fragment` are PRESENT IN the significant words of the `ingredient key`.
 // 3. Kept sorting by original key length descending to prioritize specific matches first.
-// 4. This combination should correctly isolate fragments like "smooth peanut butter" even
-//    when followed by "and 300ml...", and then match them accurately.
+// 4. This combination should correctly isolate fragments AND match them accurately.
 //
+// Mark 53 (Incorrect Parser Fix V9): Regex error introduced `|\)` which broke parsing.
 // Mark 52 (Incorrect Parser Fix V8): Logic flaw - checked key words in fragment.
 // Mark 51 (Incorrect Parser Fix V7): Logic flaw - used `every()` incorrectly.
 // Mark 50 (Incorrect Parser Fix V6): Logic flaw - used `includes()` incorrectly.
@@ -322,7 +322,7 @@ function getSignificantWords(text) {
 }
 
 
-// --- REVISED HELPER (Mark 53 - V9): Parses ingredients using non-greedy regex + V8 logic ---
+// --- REVISED HELPER (Mark 54 - V10): Parses ingredients using FIXED non-greedy regex + V8 logic ---
 /**
  * @typedef {Object} IngredientObject
  * @property {string} originalIngredient - The key (e.g., "Chicken Breast Fillet (1kg)")
@@ -343,8 +343,8 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
         .sort((a, b) => b.originalIngredient.length - a.originalIngredient.length);
 
     const matches = [];
-    // V9 Regex: Non-greedy capture + lookahead to stop before separators/next quantity
-    const regex = /(\d+\.?\d*)\s*(g|ml)\s*([\w\s]+?)(?=\s+\d{1,4}\s*(?:g|ml)|\s+and|\s+with|$)|\)/gi; // Added \) to stop at closing parenthesis
+    // V10 Regex: Non-greedy capture + lookahead, REMOVED `|\)` alternative
+    const regex = /(\d+\.?\d*)\s*(g|ml)\s*([\w\s]+?)(?=\s+\d{1,4}\s*(?:g|ml)|\s+and|\s+with|$)/gi;
 
 
     let match;
@@ -367,7 +367,7 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
 
             // Basic validation
             if (isNaN(amount) || amount <= 0 || !unit || !textFragment) {
-                 log(`[MEAL_PARSE] V9 Skipping invalid regex match components`, 'DEBUG', 'CALC', { amount, unit, textFragment });
+                 log(`[MEAL_PARSE] V10 Skipping invalid regex match components`, 'DEBUG', 'CALC', { amount, unit, textFragment });
                  continue;
             }
 
@@ -375,14 +375,14 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
             // Get significant words from the description fragment
             const fragmentWords = getSignificantWords(textFragment);
             if (fragmentWords.length === 0) {
-                 log(`[MEAL_PARSE] V9 No significant words in fragment: "${textFragment}"`, 'DEBUG', 'CALC');
+                 log(`[MEAL_PARSE] V10 No significant words in fragment: "${textFragment}"`, 'DEBUG', 'CALC');
                  continue; // Cannot match if fragment has no words
             }
 
             let bestMatch = null;
             // Iterate through sorted plan (most specific keys first)
             for (const ing of sortedIngredientPlan) {
-                // V8 Logic (Corrected in V9): Check if ALL fragment words are present IN the key words
+                // V8 Logic (Corrected in V9/V10): Check if ALL fragment words are present IN the key words
                 if (ing.significantWords && ing.significantWords.length > 0) {
                     const keyWordSet = new Set(ing.significantWords); // Use Set for efficient check
                     if (fragmentWords.every(fragWord => keyWordSet.has(fragWord))) {
@@ -397,14 +397,14 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
                     key: bestMatch.originalIngredient,
                     grams: amount
                 });
-                log(`[MEAL_PARSE] V9 MATCHED "${match[0].trim()}" (FragW: [${fragmentWords.join(', ')}]) to [${bestMatch.originalIngredient}] (KeyW: [${bestMatch.significantWords.join(', ')}]) (${amount}${unit})`, 'DEBUG', 'CALC');
+                log(`[MEAL_PARSE] V10 MATCHED "${match[0].trim()}" (FragW: [${fragmentWords.join(', ')}]) to [${bestMatch.originalIngredient}] (KeyW: [${bestMatch.significantWords.join(', ')}]) (${amount}${unit})`, 'DEBUG', 'CALC');
                 lastIndex = regex.lastIndex; // Update position after a successful match
             } else {
-                 log(`[MEAL_PARSE] V9 NO MATCH for "${match[0].trim()}" (FragW: [${fragmentWords.join(', ')}])`, 'DEBUG', 'CALC');
+                 log(`[MEAL_PARSE] V10 NO MATCH for "${match[0].trim()}" (FragW: [${fragmentWords.join(', ')}])`, 'DEBUG', 'CALC');
                  // Don't update lastIndex here, let the next loop attempt continue from where it left off
             }
         } catch (e) {
-             log(`[MEAL_PARSE] V9 Error parsing regex match: ${e.message}`, 'WARN', 'CALC', { match: match ? match[0] : 'N/A', index: match ? match.index : 'N/A'});
+             log(`[MEAL_PARSE] V10 Error parsing regex match: ${e.message}`, 'WARN', 'CALC', { match: match ? match[0] : 'N/A', index: match ? match.index : 'N/A'});
              // If error occurs, advance regex index to avoid infinite loop
               if (regex.lastIndex <= match.index) {
                    regex.lastIndex++;
@@ -413,7 +413,7 @@ function parseIngredientsFromDescription(description, ingredientPlan, log) {
     }
     return matches;
 }
-// --- END REVISED HELPER (Mark 53 - V9) ---
+// --- END REVISED HELPER (Mark 54 - V10) ---
 
 
 /// ===== HELPERS-END ===== ////
@@ -870,9 +870,9 @@ module.exports = async function handler(request, response) {
                             mealSubtotals.carbs += c;
                         } else {
                             const ingredientData = ingredientPlan.find(ing => ing.originalIngredient === key);
+                            // Use canonical fallback ONLY if market run failed AND nutrition wasn't found
                             if (ingredientData && (finalResults[key]?.source === 'failed' || finalResults[key]?.source === 'error') && (!nutritionData || nutritionData.status !== 'found')) {
-                                log(`[${meal.name}] Using CANONICAL fallback attempt for [${key}] (${grams}g). Market run failed/error.`, 'WARN', 'CALC', { key });
-                                // Using nutrition-search's canonical lookup
+                                log(`[${meal.name}] Attempting CANONICAL fallback for [${key}] (${grams}g). Market run failed/error.`, 'WARN', 'CALC', { key });
                                 const canonicalNutrition = await fetchNutritionData(null, key, log); // Pass key as query
 
                                 if (canonicalNutrition && canonicalNutrition.status === 'found' && canonicalNutrition.source.startsWith('canonical')) {
@@ -1015,7 +1015,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
         throw new Error("Cannot generate plan: Invalid input data caused an empty prompt.");
     }
 
-    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...', sanitizedData: getSanitizedFormData(formData) });
+    log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 500) + '...', sanitizedData: getSanitizedFormData(formData) }); // Log less prompt
 
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
@@ -1086,7 +1086,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
             log("Technical AI returned no JSON text.", 'CRITICAL', 'LLM', result);
             throw new Error("LLM response was empty or contained no text part.");
         }
-        log("Technical Raw", 'INFO', 'LLM', { raw: jsonText.substring(0, 500) + '...' }); // Log less raw data
+        log("Technical Raw", 'INFO', 'LLM', { raw: jsonText.substring(0, 200) + '...' }); // Log even less raw data
         try {
             const parsed = JSON.parse(jsonText);
             log("Parsed Technical", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
@@ -1113,7 +1113,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
 
             return parsed;
         } catch (e) {
-            log(`Failed to parse or validate Technical AI JSON: ${e.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 500) });
+            log(`Failed to parse or validate Technical AI JSON: ${e.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 200) });
              if (e.message.includes("LLM response")) throw e;
             throw new Error(`Failed to parse LLM JSON: ${e.message}`);
         }
