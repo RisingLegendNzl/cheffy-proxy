@@ -33,7 +33,7 @@ const { fetchNutritionData } = require('./nutrition-search.js');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // --- FIX: Using v1beta endpoint and correct model name ---
 const GEMINI_API_URL_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
-const MAX_RETRIES = 3; // Retries for Gemini calls (Reduced from 3)
+const MAX_RETRIES = 3; // MODIFIED: Increased from 2
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
 const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'];
@@ -117,7 +117,7 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 // --- START: MODIFIED fetchWithRetry ---
 async function fetchWithRetry(url, options, log) {
     // Add a generous timeout for the large Gemini payload
-    const REQUEST_TIMEOUT_MS = 90000; // 90 seconds (2 minutes)
+    const REQUEST_TIMEOUT_MS = 90000; // MODIFIED: Decreased from 120000
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         
@@ -1237,7 +1237,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     // --- V11 System Prompt (Integrated into user query for v1 API) ---
     // --- FIX: Escaped backticks and curly braces in JSON example ---
     const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. Examples: fresh produce → ["bread","cake","sauce","canned","powder","chips","dried","frozen"], herb/spice → ["spray","cleaner","mouthwash","deodorant"], meat cuts → ["cat","dog","pet","toy"]. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. 'OR' INGREDIENTS: Use broad 'requiredWords', add relevant 'negativeKeywords'. 10. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 11. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = singular noun ONLY. Specify form only in 'tightQuery'. 12. NO 'nutritionalTargets' or 'aiEst...' nutrition properties in output. 13. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories for each ingredient using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 14. MEAL PORTIONS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 80g dry rice...'). b) DO NOT include 'subtotal_...' fields. 15. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions. 16. MEAL VARIETY: Critical. User maxRepetitions=${maxRepetitions}. DO NOT repeat exact meals more than this across the entire ${days}-day plan. Ensure variety, especially if maxRepetitions < ${days}. 17. COST vs. VARIETY: User costPriority='${costPriority}'. Balance with Rule 16. Prioritize variety if needed.
-18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the provided daily calorie target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise caloric goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. Output ONLY the valid JSON object described below (with 'ingredients' and 'mealPlan' keys), wrapped in \`\`\`json ... \`\`\`, nothing else.
+18. MEAL ITEMS & TARGET ADHERENCE (ULTRA-PRECISE): For each meal in 'mealPlan.meals', you MUST populate the 'items' array. Each object in 'items' must contain a 'key' that EXACTLY matches one of the 'originalIngredient' strings from the main 'ingredients' list, the 'qty' (e.g., 150), and the 'unit' (e.g., 'g', 'ml', 'slice', 'egg'). ABSOLUTELY CRITICAL: The sum of estimated calories from ALL 'items' across ALL meals for a day MUST be within 5% of the **${calorieTarget} kcal** daily target. You MUST meticulously adjust the 'qty' values for ingredients in the 'items' arrays (especially primary carb/fat/protein sources) to achieve this precise **${calorieTarget} kcal** goal for EACH day. Do not deviate significantly. The 'description' field is for human display only; all calculations depend ONLY on the 'items' array. Output ONLY the valid JSON object described below (with 'ingredients' and 'mealPlan' keys), wrapped in \`\`\`json ... \`\`\`, nothing else.
 
 JSON Structure:
 \\{
@@ -1459,5 +1459,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
 
