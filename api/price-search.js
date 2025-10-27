@@ -9,7 +9,9 @@ const kv = createClient({
 });
 // --- END MODIFICATION ---
 
-const { validateProduct, selectBest } = require('./product-validator');
+// --- *** MODIFICATION: Removed unused require for product-validator *** ---
+// const { validateProduct, selectBest } = require('./product-validator');
+// --- *** END MODIFICATION *** ---
 
 // --- CONFIGURATION ---
 const RAPID_API_HOSTS = {
@@ -31,17 +33,9 @@ const BUCKET_CAPACITY = 10;
 const BUCKET_REFILL_RATE = 8; // Tokens per second
 const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
 
-// --- MODIFICATION (Mark 41): Removed stateful Bucket class ---
-// The old class Bucket and global `buckets` map have been removed.
-// They are replaced by a stateless KV-based rate limiter inside `fetchStoreSafe`.
-// --- END MODIFICATION ---
-
-// --- HELPER TO CHECK KV STATUS ---
-// --- MODIFICATION: Check for your Upstash variables instead of Vercel's KV variables ---
 const isKvConfigured = () => {
     return process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
 };
-// --- END MODIFICATION ---
 
 const normalizeKey = (str) => (str || '').toString().toLowerCase().trim().replace(/\s+/g, '_');
 const inflightRefreshes = new Set();
@@ -72,7 +66,6 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
         log(`Attempt ${attempt + 1}/${MAX_RETRIES}: Requesting product data (Page ${page}).`, 'DEBUG', 'RAPID_REQUEST', { store, query, page, endpoint: endpointUrl });
 
         try {
-            // *** Uses axios here ***
             const rapidResp = await axios.get(endpointUrl, {
                 params: apiParams,
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
@@ -91,8 +84,10 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
             log(`RapidAPI fetch failed (Attempt ${attempt + 1})`, 'WARN', 'RAPID_FAILURE', { store, query, page, status: status || 'Network/Timeout', message: error.message, is429, isRetryable: is429 || isRetryableNetworkError, latency_ms: attemptLatency });
 
             if (is429) {
-                error.statusCode = 429;
-                throw error;
+                // Throw specifically for the fetchStoreSafe wrapper to catch and handle retry
+                const rateLimitError = new Error(`Rate limit exceeded (429)`);
+                rateLimitError.statusCode = 429;
+                throw rateLimitError;
             }
 
             if (isRetryableNetworkError && attempt < MAX_RETRIES - 1) {
@@ -102,120 +97,98 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
                 continue;
             }
 
-            const finalErrorMessage = `Request failed. Status: ${status || 'Network/Timeout'}.`;
+            // Non-retryable error or final attempt failed
+            const finalErrorMessage = `Request failed after ${attempt + 1} attempts. Status: ${status || 'Network/Timeout'}.`;
             log(finalErrorMessage, 'CRITICAL', 'RAPID_FAILURE', { store, query, page, status: status || 504, details: error.message });
-             return { error: { message: finalErrorMessage, status: status || 504, details: error.message }, results: [], total_pages: 0 };
+             // Return an error object consistent with success structure but indicating failure
+             return { error: { message: finalErrorMessage, status: status || 504, details: error.message }, results: [], total_pages: 0, current_page: 1 };
         }
     }
-    const fallbackMsg = `Price search failed definitely after ${MAX_RETRIES} internal retries.`;
-    log(fallbackMsg, 'CRITICAL', 'RAPID_FAILURE', { store, query, page });
-    return { error: { message: fallbackMsg, status: 500 }, results: [], total_pages: 0 };
+     // Fallback if loop finishes without returning (should only happen after max retries fail)
+     const fallbackMsg = `Price search failed definitely after ${MAX_RETRIES} internal retries.`;
+     log(fallbackMsg, 'CRITICAL', 'RAPID_FAILURE', { store, query, page });
+     return { error: { message: fallbackMsg, status: 500 }, results: [], total_pages: 0, current_page: 1 };
 }
 
-
-// --- MODIFICATION (Mark 41): Replaced stateful bucket with stateless KV rate limiter ---
 /**
  * Wrapper for API calls using a STATELESS token bucket (Vercel KV) and adding a single 429 retry.
- * This is CRITICAL for serverless environments.
- * Returns { data, waitMs }
  */
 async function fetchStoreSafe(store, query, page = 1, log = console.log) {
     const storeKey = store?.toLowerCase();
-    if (!RAPID_API_HOSTS[store]) { // Check against hosts map
+    if (!RAPID_API_HOSTS[store]) {
         log(`Invalid store key "${storeKey}" for token bucket.`, 'CRITICAL', 'BUCKET_ERROR');
         return { data: { error: { message: `Internal configuration error: Invalid store key ${storeKey}`, status: 500 } }, waitMs: 0 };
     }
 
-    // --- STATELESS BUCKET LOGIC ---
     const bucketKey = `bucket:rapidapi:${storeKey}`;
     const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
     let waitMs = 0;
     const waitStart = Date.now();
 
-    // Loop until we successfully acquire a token
     while (true) {
         const now = Date.now();
         let bucketState = null;
 
         if (isKvConfigured()) {
-            try {
-                bucketState = await kv.get(bucketKey);
-            } catch (kvError) {
-                log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message });
-                // Don't loop, just break and proceed with the API call.
-                break;
+            try { bucketState = await kv.get(bucketKey); } catch (kvError) {
+                log(`CRITICAL: KV GET failed for bucket ${bucketKey}. Bypassing rate limit.`, 'CRITICAL', 'KV_ERROR', { error: kvError.message }); break;
             }
         }
 
         if (!bucketState) {
-            // First run or KV error: Initialize and take one token
             log(`Initializing KV bucket: ${bucketKey}`, 'DEBUG', 'BUCKET_INIT');
             if (isKvConfigured()) {
-                try {
-                    // Set with capacity - 1, and a TTL (using search TTL / 10 as an example) to prevent stale buckets
-                    await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) });
-                } catch (kvError) {
-                    log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
-                }
-            }
-            break; // Acquired token
+                try { await kv.set(bucketKey, { tokens: BUCKET_CAPACITY - 1, lastRefill: now }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) }); } catch (kvError) { log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message }); }
+            } break;
         }
 
-        // State exists, calculate refill
         const elapsedMs = now - bucketState.lastRefill;
         const tokensToAdd = elapsedMs * refillRatePerMs;
         let currentTokens = Math.min(BUCKET_CAPACITY, bucketState.tokens + tokensToAdd);
         const newLastRefill = now;
 
         if (currentTokens >= 1) {
-            // Take token and update KV
             currentTokens -= 1;
             if (isKvConfigured()) {
-                try {
-                    await kv.set(bucketKey, { tokens: currentTokens, lastRefill: newLastRefill }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) });
-                } catch (kvError) {
-                    log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message });
-                }
-            }
-            break; // Acquired token
+                try { await kv.set(bucketKey, { tokens: currentTokens, lastRefill: newLastRefill }, { ex: Math.ceil(TTL_SEARCH_MS / 1000) }); } catch (kvError) { log(`Warning: KV SET failed for bucket ${bucketKey}.`, 'WARN', 'KV_ERROR', { error: kvError.message }); }
+            } break;
         } else {
-            // Not enough tokens, calculate wait time
             const tokensNeeded = 1 - currentTokens;
-            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs)); // Wait at least 50ms
-
+            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs));
             log(`Rate limiter active. Waiting ${waitTime}ms for ${tokensNeeded.toFixed(2)} tokens...`, 'INFO', 'BUCKET_WAIT');
             await delay(waitTime);
-            // Loop will restart, re-getting state and refilling
         }
-    } // end while(true)
+    }
 
-    waitMs = Date.now() - waitStart; // Total time spent in the loop
+    waitMs = Date.now() - waitStart;
     log(`Acquired token for ${store} (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
-    // --- END STATELESS BUCKET LOGIC ---
 
     try {
         const data = await _fetchPriceDataFromApi(store, query, page, log);
-        return { data, waitMs }; // Return data and wait time
+        return { data, waitMs };
     } catch (error) {
         if (error.statusCode === 429) {
             log(`RapidAPI returned 429. Retrying once after ${BUCKET_RETRY_DELAY_MS}ms...`, 'WARN', 'BUCKET_RETRY', { store, query, page });
             await delay(BUCKET_RETRY_DELAY_MS);
              try {
+                 // Directly call the internal fetch again for the retry
                  const retryData = await _fetchPriceDataFromApi(store, query, page, log);
-                 return { data: retryData, waitMs };
+                 return { data: retryData, waitMs }; // Return potentially successful retry data
              } catch (retryError) {
+                  // Catch errors from the RETRY attempt
                   log(`Retry after 429 failed: ${retryError.message}`, 'ERROR', 'BUCKET_RETRY_FAIL', { store, query, page });
                   const status = retryError.response?.status || retryError.statusCode || 500;
-                  const errorData = { error: { message: `Retry after 429 failed. Status: ${status}`, status: status, details: retryError.message }, results: [], total_pages: 0 };
-                  return { data: errorData, waitMs };
+                  // Ensure error structure matches success structure
+                  const errorData = { error: { message: `Retry after 429 failed. Status: ${status}`, status: status, details: retryError.message }, results: [], total_pages: 0, current_page: 1 };
+                  return { data: errorData, waitMs }; // Return error structure
              }
         }
+        // Handle unexpected errors not caught by _fetchPriceDataFromApi (should be rare)
         log(`Unhandled error during fetchStoreSafe after bucket wait: ${error.message}`, 'CRITICAL', 'BUCKET_ERROR', { store, query, page });
-         const errorData = { error: { message: `Unexpected error during safe fetch: ${error.message}`, status: 500 }, results: [], total_pages: 0 };
+         const errorData = { error: { message: `Unexpected error during safe fetch: ${error.message}`, status: 500 }, results: [], total_pages: 0, current_page: 1 };
          return { data: errorData, waitMs };
     }
 }
-// --- END MODIFICATION ---
 
 /**
  * Initiates a background refresh for a given cache key.
@@ -228,22 +201,28 @@ async function refreshInBackground(cacheKey, store, query, page, log, keyType) {
     inflightRefreshes.add(cacheKey);
     log(`Starting background refresh for ${cacheKey}...`, 'INFO', 'SWR_REFRESH_START', { key_type: keyType });
 
+    // Use IIFE to handle async logic without awaiting in the main flow
     (async () => {
         try {
+            // Fetch fresh data using the rate-limited wrapper
             const { data: freshData } = await fetchStoreSafe(store, query, page, log);
+            // Check if fetch was successful before caching
             if (freshData && !freshData.error) {
+                // Cache the successful fresh data
                 await kv.set(cacheKey, { data: freshData, ts: Date.now() }, { px: TTL_SEARCH_MS });
                 log(`Background refresh successful for ${cacheKey}`, 'INFO', 'SWR_REFRESH_SUCCESS', { key_type: keyType });
             } else {
+                 // Log failure if fetch returned an error structure
                  log(`Background refresh failed to fetch data for ${cacheKey}`, 'WARN', 'SWR_REFRESH_FAIL', { error: freshData?.error, key_type: keyType });
             }
-        } catch (error) {
+        } catch (error) { // Catch errors from fetchStoreSafe itself
             log(`Background refresh error for ${cacheKey}: ${error.message}`, 'ERROR', 'SWR_REFRESH_ERROR', { key_type: keyType });
         } finally {
-            inflightRefreshes.delete(cacheKey);
+            inflightRefreshes.delete(cacheKey); // Always remove from inflight set
         }
-    })();
+    })(); // Immediately invoke the async function
 }
+
 
 /**
  * Cache-wrapped function for fetching price data with SWR.
@@ -256,15 +235,12 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
     const keyType = 'price_search';
 
     if (!isKvConfigured()) {
-        // --- MODIFICATION: Updated error message to reflect correct env var names ---
-        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache and running uncached API fetch.', 'CRITICAL', 'CONFIG_ERROR');
-        // --- END MODIFICATION ---
-        // Fallback to uncached fetch, still using rate limiting
+        log('CRITICAL: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN are missing. Bypassing cache.', 'CRITICAL', 'CONFIG_ERROR');
         const { data: fetchedData, waitMs: fetchWaitMs } = await fetchStoreSafe(store, query, page, log);
-        return { data: fetchedData, waitMs: fetchWaitMs };
+        // Ensure fetchedData exists and return consistent structure
+        return { data: fetchedData || { error: { message: "Uncached fetch failed unexpectedly", status: 500 }}, waitMs: fetchWaitMs };
     }
 
-    // 1. Check Cache (Only if KV is configured)
     let cachedItem = null;
     try {
         cachedItem = await kv.get(cacheKey);
@@ -274,25 +250,21 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
 
     if (cachedItem && typeof cachedItem === 'object' && cachedItem.data && cachedItem.ts) {
         const ageMs = Date.now() - cachedItem.ts;
-
         if (ageMs < SWR_SEARCH_MS) {
-            const latencyMs = Date.now() - startTime;
-            log(`Cache Hit (Fresh) for ${cacheKey}`, 'INFO', 'CACHE_HIT', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
-            return { data: cachedItem.data, waitMs: 0 };
+            log(`Cache Hit (Fresh) for ${cacheKey}`, 'INFO', 'CACHE_HIT', { key_type: keyType, latency_ms: Date.now() - startTime, age_ms: ageMs });
+            return { data: cachedItem.data, waitMs: 0 }; // Fresh data, no wait
         } else if (ageMs < TTL_SEARCH_MS) {
-            const latencyMs = Date.now() - startTime;
-            log(`Cache Hit (Stale) for ${cacheKey}, serving stale and refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: latencyMs, age_ms: ageMs });
-            refreshInBackground(cacheKey, store, query, page, log, keyType);
-            return { data: cachedItem.data, waitMs: 0 };
+            log(`Cache Hit (Stale) for ${cacheKey}, serving stale and refreshing.`, 'INFO', 'CACHE_HIT_STALE', { key_type: keyType, latency_ms: Date.now() - startTime, age_ms: ageMs });
+            refreshInBackground(cacheKey, store, query, page, log, keyType); // Trigger background refresh
+            return { data: cachedItem.data, waitMs: 0 }; // Serve stale, no wait
         }
     }
 
-    // 2. Cache Miss or Expired: Fetch using rate-limited wrapper
     log(`Cache Miss or Expired for ${cacheKey}`, 'INFO', 'CACHE_MISS', { key_type: keyType });
     const { data: fetchedData, waitMs: fetchWaitMs } = await fetchStoreSafe(store, query, page, log);
     const fetchLatencyMs = Date.now() - startTime;
 
-    // 3. Cache Result
+    // Cache only if fetch was successful
     if (fetchedData && !fetchedData.error) {
         try {
             await kv.set(cacheKey, { data: fetchedData, ts: Date.now() }, { px: TTL_SEARCH_MS });
@@ -303,13 +275,13 @@ async function fetchPriceData(store, query, page = 1, log = console.log) {
     }
 
     log(`Fetch completed for ${cacheKey}`, 'INFO', 'FETCH_COMPLETE', { key_type: keyType, latency_ms: fetchLatencyMs, success: !fetchedData?.error, bucket_wait_ms: fetchWaitMs });
-    const returnData = fetchedData || { error: { message: "Fetch returned undefined", status: 500 }};
+    // Ensure fetchedData exists and return consistent structure
+    const returnData = fetchedData || { error: { message: "Fetch returned undefined after cache miss", status: 500 }};
     return { data: returnData, waitMs: fetchWaitMs };
 }
 
 
-// --- Vercel Handler (MODIFIED Mark 41) ---
-// This handler now uses the public, cached, and rate-limited `fetchPriceData` function.
+// --- Vercel Handler ---
 module.exports = async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -321,69 +293,33 @@ module.exports = async (req, res) => {
 
     try {
         const { store, query, page } = req.query;
+        const log = (message, level = 'INFO', tag = 'HANDLER') => { console.log(`[${level}] [${tag}] ${message}`); };
 
-        // --- MODIFICATION: Use the public, cached, rate-limited function ---
-        // We create a simple log function for this handler's scope
-        const log = (message, level = 'INFO', tag = 'HANDLER') => {
-            console.log(`[${level}] [${tag}] ${message}`);
-        };
+        const { data: result, waitMs } = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1, log);
 
-        const { data: result } = await fetchPriceData(store, query, page ? parseInt(page, 10) : 1, log);
-        // --- END MODIFICATION ---
-
-        if (result.error) {
+        // Check the structure of the result from fetchPriceData
+        if (result && result.error) {
+             log(`Price search handler returning error: ${result.error.message}`, 'WARN', 'HANDLER');
             return res.status(result.error.status || 500).json(result.error);
+        } else if (result) {
+            // Successful result, return it
+            return res.status(200).json(result);
+        } else {
+             // Handle unexpected case where result is null/undefined
+            log('Price search handler received unexpected null/undefined result.', 'ERROR', 'HANDLER');
+            return res.status(500).json({ message: "Internal server error: Price search failed unexpectedly." });
         }
-        return res.status(200).json(result);
     } catch (error) {
         console.error("Handler error:", error);
         return res.status(500).json({ message: "Internal server error in price search handler.", details: error.message });
     }
 };
-// --- END MODIFICATION ---
 
-
-
-// === Validator integration helpers ===
-function buildSpec(ingredient = {}) {
-  const id = String(ingredient.ingredient_id || '').toLowerCase();
-  const spec = { requiredWords: [], negativeWords: [], mustIncludeTokens: [], mustExcludeTokens: [], allowedCategories: [] };
-  const PRODUCE_NEG = ['bread','chips','crisps','plantain','dried','muffin','cake','pie','pastry'];
-
-  if (id.includes('banana')) {
-    spec.requiredWords = ['banana'];
-    spec.negativeWords = PRODUCE_NEG;
-    spec.allowedCategories = ['produce','fruit'];
-  }
-  if (id.includes('blueberr') && id.includes('frozen')) {
-    spec.requiredWords = ['blueberr','frozen'];
-    spec.negativeWords = ['carrot','mix','medley','baton','vegetable','strawberry'];
-    spec.allowedCategories = ['frozen'];
-  }
-  if (id.includes('canola_spray') || id.includes('olive_oil_spray') || id.includes('cooking_spray')) {
-    spec.requiredWords = ['spray'];
-    spec.mustIncludeTokens = ['spray'];
-    spec.mustExcludeTokens = ['bottle','refill','pump'];
-    spec.negativeWords = ['bottle','refill','pump'];
-    spec.allowedCategories = ['oils','pantry','cooking'];
-  }
-  if (id.includes('egg')) {
-    spec.requiredWords = ['egg'];
-    spec.negativeWords = ['mayonnaise','mayo','sauce'];
-    spec.allowedCategories = ['produce','dairy','eggs'];
-  }
-  return spec;
-}
-
-function selectBestForIngredient(results = [], ingredient = {}) {
-  const spec = buildSpec(ingredient);
-  const filtered = results.filter(p => validateProduct(p, spec).ok);
-  return selectBest(filtered, spec);
-}
-
-
+// Expose fetchPriceData for generate-full-plan.js
 module.exports.fetchPriceData = fetchPriceData;
-module.exports.selectBestForIngredient = selectBestForIngredient;
-module.exports.buildSpec = buildSpec;
 
+// --- *** MODIFICATION: Removed unused exports *** ---
+// module.exports.selectBestForIngredient = selectBestForIngredient;
+// module.exports.buildSpec = buildSpec;
+// --- *** END MODIFICATION *** ---
 
