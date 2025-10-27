@@ -1,5 +1,6 @@
 // --- ORCHESTRATOR API for Cheffy V3 ---
 
+// Mark 43: Merged stricter AI prompt rules, added meal subtotals schema, fixed validator plural matching.
 // Mark 42: REPLACED macro calculation with industry-standard, dual-validation system.
 // Mark 40: PRIVACY FIX - Added redaction for PII (name, age, weight, height) in logs
 // Mark 39: CRITICAL SECURITY FIX - Moved API key from URL query to x-goog-api-key header
@@ -114,7 +115,7 @@ async function fetchWithRetry(url, options, log) {
         try {
             // --- MODIFICATION (Mark 39): URL no longer contains the key ---
             log(`Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, options); 
+            const response = await fetch(url, options);
             if (response.ok) {
                 return response; // Success
             }
@@ -181,18 +182,25 @@ function parseSize(sizeString) {
     return null; // Return null if format doesn't match g/kg/ml/l
 }
 
+// --- MODIFICATION (Mark 43): Updated validator to handle simple plurals ---
 function calculateRequiredWordScore(productNameLower, requiredWords) {
     if (!requiredWords || requiredWords.length === 0) return 1.0;
     let wordsFound = 0;
     requiredWords.forEach(kw => {
-        // Ensure keyword is treated as a whole word, avoid partial matches like "apple" in "pineapple"
-        const regex = new RegExp(`\\b${kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        const singular = kw.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Simple plural check: add 's' or 'es'
+        const plural_s = singular.endsWith('s') ? singular + 'es' : singular + 's';
+        const plural_es = singular.endsWith('s') ? singular + 'es' : singular; // handles cases like 'gas' -> 'gases' already covered by plural_s
+
+        // Regex to check for singular or simple plural forms as whole words
+        const regex = new RegExp(`\\b(${singular}|${plural_s}|${plural_es})\\b`);
         if (regex.test(productNameLower)) {
             wordsFound++;
         }
     });
     return wordsFound / requiredWords.length;
 }
+// --- END MODIFICATION ---
 
 // --- Statistical Helper Functions ---
 const mean = (arr) => arr.reduce((acc, val) => acc + val, 0) / arr.length;
@@ -273,7 +281,7 @@ function runSmarterChecklist(product, ingredientData, log) {
         }
     }
 
-    // --- 3. Required Words ---
+    // --- 3. Required Words (using updated plural-aware function) ---
     score = calculateRequiredWordScore(productNameLower, requiredWords || []);
     if (score < REQUIRED_WORD_SCORE_THRESHOLD) {
         log(`${checkLogPrefix}: FAIL (Score ${score.toFixed(2)} < ${REQUIRED_WORD_SCORE_THRESHOLD} vs [${(requiredWords || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
@@ -405,7 +413,7 @@ module.exports = async function handler(request, response) {
         }
         
         const numDays = parseInt(days, 10);
-        if (isNaN(numDays) || numDays < 1 || numDays > 7) { 
+        if (isNaN(numDays) || numDays < 1 || numDays > 7) {
              log(`Invalid number of days: ${days}. Proceeding with default 1.`, 'WARN', 'INPUT');
         }
         const weightKg = parseFloat(weight); // Parse weight for macro calc
@@ -427,7 +435,7 @@ module.exports = async function handler(request, response) {
         log(`Daily target: ${calorieTarget} kcal.`, 'INFO', 'CALC');
         
         // --- MODIFICATION (Mark 42): calculateMacroTargets now uses new dual-validation system ---
-        const { proteinGrams, fatGrams, carbGrams } = calculateMacroTargets(calorieTarget, goal, weightKg, log); 
+        const { proteinGrams, fatGrams, carbGrams } = calculateMacroTargets(calorieTarget, goal, weightKg, log);
 
         let llmResult;
         try {
@@ -659,8 +667,8 @@ module.exports = async function handler(request, response) {
                 // --- MODIFICATION: Attach nutrition data to the final result object ---
                 const result = finalResults[item.ingredientKey];
                 if (result && result.allProducts) {
-                    const selectedProduct = result.allProducts.find(p => 
-                        (item.barcode && p.barcode === item.barcode) || 
+                    const selectedProduct = result.allProducts.find(p =>
+                        (item.barcode && p.barcode === item.barcode) ||
                         (item.query && p.name === item.query)
                     );
                     if (selectedProduct) {
@@ -672,7 +680,7 @@ module.exports = async function handler(request, response) {
                     }
                 }
                 // --- END MODIFICATION ---
-                
+
                 let proteinG = 0;
                 let fatG = 0;
                 let carbsG = 0;
@@ -742,7 +750,7 @@ module.exports = async function handler(request, response) {
 
 async function generateCreativeIdeas(cuisinePrompt, log) { // Pass log
     // --- MODIFICATION (Mark 39): Use base URL, key in header ---
-    const GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    const GEMINI_API_URL = GEMINI_API_URL_BASE;
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -788,10 +796,8 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion' not 'scallion', 'allspice' not 'pimento')." : "";
 
-    // --- MODIFICATION (Mark 38): Added rules 18 & 19 to system prompt ---
-    // --- MODIFICATION (Mark 42): Updated macro rule 16 to emphasize targets ---
-    // --- *** MODIFICATION: Merged user's stricter accuracy rules into Rule 16 *** ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1-2] ESSENTIAL, CORE NOUNS ONLY, lowercase. NO adjectives or forms. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' OPTIONAL but BEST EFFORT. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS: For each meal in 'mealPlan.description', MUST specify clear portion sizes for key ingredients (e.g., '...150g chicken breast, 1 cup rice...'). 16. CRITICAL ADHERENCE RULE: Meal portions (from 'mealPlan.description') MUST sum precisely to 'totalGramsRequired' for each item in 'ingredients'. The total estimated Calories, Protein, Fat, and Carbs from ALL 'ingredients' (using 'totalGramsRequired' and 'aiEst...' values) MUST match the provided daily targets with high precision (within 5%). You are provided with daily grams for P/F/C and a calorie target. HIT THESE TARGETS. If your first pass misses the targets by >5%, you MUST correct the quantities and recalculate until the totals are compliant. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets. 18. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 19. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 18). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
+    // --- *** MODIFICATION (Mark 43): Updated rules for requiredWords, meal portions, and accuracy *** ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meal plan ('mealPlan') & shopping list ('ingredients'). 2. QUERIES: For each ingredient: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Make robust and use the MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content (e.g., 'full cream'), specific forms (block/ball/wedge/sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase. NO adjectives, forms, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']). 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough, include non-food types. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for plan. MUST accurately reflect sum of meal portions. 7. Adhere to constraints. 8. 'ingredients' MANDATORY. 'mealPlan' MANDATORY. 9. AI FALLBACK NUTRITION: Provide estimated 'aiEst...' per 100g (numbers, realistic). 10. 'OR' INGREDIENTS: Use broad 'requiredWords', add 'negativeKeywords'. 11. NICHE ITEMS: Set 'tightQuery' null, broaden queries/words. 12. FORM/TYPE: 'normalQuery' = generic form. 'requiredWords' = noun ONLY. Specify form only in 'tightQuery'. 13. NO 'nutritionalTargets' in output. 14. CATEGORY (Optional): 'allowedCategories' string array. 15. MEAL PORTIONS & SUBTOTALS: For each meal in 'mealPlan.meals': a) Specify clear portion sizes for key ingredients in 'description' (e.g., '...150g chicken breast, 1 cup rice...'). b) MANDATORY: Calculate and include 'subtotal_kcal', 'subtotal_protein', 'subtotal_fat', 'subtotal_carbs' (numbers). 16. CRITICAL ADHERENCE RULE: Meal portions (from 'description') MUST sum precisely to 'totalGramsRequired' for each item in 'ingredients'. The sum of ALL meal subtotals ('subtotal_kcal', etc.) MUST match the provided daily targets (kcal, P, F, C grams) with high precision (within 5%). HIT THESE TARGETS. If your calculations miss the targets by >5%, you MUST correct the meal quantities/subtotals and recalculate until the final sum is compliant. 17. BULKING MACRO PRIORITY: For 'bulk' goals, prioritize carbohydrate sources over fats when adjusting portions to meet targets. 18. MEAL VARIETY: This is critical. The user has set 'maxRepetitions' to ${maxRepetitions}. You MUST NOT repeat the same meal for the *entire* ${days}-day plan more than this number of times. Each day's plan MUST be different and varied if 'maxRepetitions' is less than ${days}. DO NOT BE LAZY. Generate a unique and interesting plan for each day. 19. COST vs. VARIETY: The user's 'costPriority' is '${costPriority}'. However, this MUST NOT override the 'mealVariety' constraint (Rule 18). You MUST balance both. It is better to be slightly more expensive than to be repetitive.`;
     // --- *** END MODIFICATION *** ---
 
 
@@ -809,7 +815,7 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
     // --- MODIFICATION (Mark 40): Use sanitizer for PII ---
     log("Technical Prompt", 'INFO', 'LLM_PROMPT', { userQuery: userQuery.substring(0, 1000) + '...', sanitizedData: getSanitizedFormData(formData) });
 
-    // Schema (Mark 25 - Remains Valid)
+    // --- *** MODIFICATION (Mark 43): Updated Schema for Meal Subtotals *** ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -828,12 +834,12 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                                 "tightQuery": { "type": "STRING", nullable: true },
                                 "normalQuery": { "type": "STRING" },
                                 "wideQuery": { "type": "STRING", nullable: true },
-                                "requiredWords": { type: "ARRAY", items: { "type": "STRING" } },
+                                "requiredWords": { type: "ARRAY", items: { "type": "STRING" } }, // Keep as array for flexibility, but prompt for 1 item
                                 "negativeKeywords": { type: "ARRAY", items: { "type": "STRING" } },
                                 "targetSize": { type: "OBJECT", properties: { "value": { "type": "NUMBER" }, "unit": { "type": "STRING", enum: ["g", "ml"] } }, nullable: true },
                                 "totalGramsRequired": { "type": "NUMBER" },
                                 "quantityUnits": { "type": "STRING" },
-                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true }, 
+                                "allowedCategories": { type: "ARRAY", items: { "type": "STRING" }, nullable: true },
                                 "aiEstCaloriesPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstProteinPer100g": { "type": "NUMBER", nullable: true },
                                 "aiEstFatPer100g": { "type": "NUMBER", nullable: true },
@@ -853,32 +859,40 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
                                     items: {
                                         type: "OBJECT",
                                         properties: {
-                                            "type": { "type": "STRING" },
-                                            "name": { "type": "STRING" },
-                                            "description": { "type": "STRING" }
-                                        }
+                                            "type": { "type": "STRING" }, // e.g., B, L, D, S1
+                                            "name": { "type": "STRING" }, // e.g., Chicken Stir-fry
+                                            "description": { "type": "STRING" }, // e.g., 150g chicken breast, 1 cup rice...
+                                            "subtotal_kcal": { "type": "NUMBER" },
+                                            "subtotal_protein": { "type": "NUMBER" },
+                                            "subtotal_fat": { "type": "NUMBER" },
+                                            "subtotal_carbs": { "type": "NUMBER" }
+                                        },
+                                        required: ["type", "name", "description", "subtotal_kcal", "subtotal_protein", "subtotal_fat", "subtotal_carbs"] // Subtotals now required
                                     }
                                 }
-                            }
+                            },
+                             required: ["day", "meals"]
                         }
                     }
                 },
-                required: ["ingredients"]
+                required: ["ingredients", "mealPlan"] // MealPlan is now mandatory
             }
         }
     };
+    // --- *** END MODIFICATION *** ---
+
 
     try {
         const response = await fetchWithRetry(
-            GEMINI_API_URL, 
-            { 
-                method: 'POST', 
+            GEMINI_API_URL,
+            {
+                method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'x-goog-api-key': GEMINI_API_KEY // Pass key as header
                 },
-                body: JSON.stringify(payload) 
-            }, 
+                body: JSON.stringify(payload)
+            },
             log
         );
         const result = await response.json();
@@ -900,6 +914,24 @@ async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGra
              if (parsed.ingredients && !Array.isArray(parsed.ingredients)) {
                  log("Validation Error: 'ingredients' exists but is not an array.", 'CRITICAL', 'LLM', parsed);
              }
+             // --- *** MODIFICATION (Mark 43): Add validation for mealPlan structure and subtotals *** ---
+             if (!parsed.mealPlan || !Array.isArray(parsed.mealPlan) || parsed.mealPlan.length === 0) {
+                 log("Validation Error: 'mealPlan' is missing, not an array, or empty.", 'CRITICAL', 'LLM', parsed);
+                 throw new Error("LLM response is missing a valid 'mealPlan'.");
+             }
+             for(const dayPlan of parsed.mealPlan) {
+                 if (!dayPlan.meals || !Array.isArray(dayPlan.meals) || dayPlan.meals.length === 0) {
+                     log(`Validation Error: Day ${dayPlan.day} is missing 'meals' array or it's empty.`, 'CRITICAL', 'LLM', dayPlan);
+                     throw new Error(`LLM response has invalid meals for day ${dayPlan.day}.`);
+                 }
+                 for(const meal of dayPlan.meals) {
+                     if (typeof meal.subtotal_kcal !== 'number' || typeof meal.subtotal_protein !== 'number' || typeof meal.subtotal_fat !== 'number' || typeof meal.subtotal_carbs !== 'number') {
+                          log(`Validation Error: Meal "${meal.name}" on day ${dayPlan.day} is missing required numerical subtotals.`, 'CRITICAL', 'LLM', meal);
+                          throw new Error(`LLM response has missing subtotals for meal "${meal.name}" on day ${dayPlan.day}.`);
+                     }
+                 }
+             }
+             // --- *** END MODIFICATION *** ---
 
             return parsed; // Return the parsed object
         } catch (e) {
@@ -1069,11 +1101,12 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
     
     log(`Calculated Macro Targets (Dual-Validation) (Goal: ${goal}, Cals: ${calorieTarget}, Weight: ${validWeightKg}kg): P ${finalProteinGrams}g, F ${finalFatGrams}g, C ${finalCarbGrams}g`, 'INFO', 'CALC');
 
-    return { 
-        proteinGrams: finalProteinGrams, 
-        fatGrams: finalFatGrams, 
-        carbGrams: finalCarbGrams 
+    return {
+        proteinGrams: finalProteinGrams,
+        fatGrams: finalFatGrams,
+        carbGrams: finalCarbGrams
     };
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
+
