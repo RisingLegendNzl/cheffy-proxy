@@ -14,7 +14,7 @@ const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); /
 // --- CONFIGURATION ---
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-2.5-pro'; // Use Pro for plan generation
+const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-2.5-flash-preview-09-2025'; // Use flash for plan generation
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
