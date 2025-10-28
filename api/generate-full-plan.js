@@ -16,7 +16,7 @@
 //    - Runs non-protein reconciliation (curative patch) if deviation > 5%.
 //    - Fails if final deviation is still > 5%.
 // 8. MODEL (NEW):
-//    - Uses Gemini 1.5 Pro (or env var) for plan generation (preventative fix).
+//    - Uses Gemini Pro (or env var) for plan generation (preventative fix).
 //    - MODEL FIX: Default model changed to 'gemini-2.5-pro'.
 // 9. ERRORS: Returns 422 { code: "PLAN_INVALID" } for all plan failures.
 
@@ -127,7 +127,7 @@ async function fetchWithRetry(url, options, log) {
     const REQUEST_TIMEOUT_MS = 90000; // MODIFIED: Decreased from 120000
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        
+
         // --- START FIX: Add AbortController for timeout ---
         const controller = new AbortController();
         const timeout = setTimeout(() => {
@@ -137,16 +137,16 @@ async function fetchWithRetry(url, options, log) {
 
         try {
             log(`Attempt ${attempt}: Fetching from ${url} (Timeout: ${REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
-            
-            const response = await fetch(url, { 
+
+            const response = await fetch(url, {
                 ...options,
                 signal: controller.signal // Pass the abort signal
             });
-            
+
             clearTimeout(timeout); // Clear the timeout if fetch completes
 
             if (response.ok) return response;
-            
+
             if (response.status === 429 || response.status >= 500) {
                 log(`Attempt ${attempt}: Received retryable error ${response.status} from API. Retrying...`, 'WARN', 'HTTP');
             } else {
@@ -156,7 +156,7 @@ async function fetchWithRetry(url, options, log) {
             }
         } catch (error) {
              clearTimeout(timeout); // Always clear timeout on error
-             
+
              // --- START FIX: Handle AbortError specifically ---
              if (error.name === 'AbortError') {
                  log(`Attempt ${attempt}: Fetch timed out after ${REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
@@ -168,7 +168,7 @@ async function fetchWithRetry(url, options, log) {
                  throw error; // Rethrow client errors immediately
             }
         }
-        
+
         if (attempt < MAX_RETRIES) {
             const delayTime = Math.pow(2, attempt - 1) * 2000;
             await delay(delayTime);
@@ -339,7 +339,7 @@ function runSmarterChecklist(product, ingredientData, log) {
     // 5. Size Check (skip for loose fruit/veg)
     const isProduceOrFruit = (allowedCategories || []).some(c => c === 'fruit' || c === 'produce' || c === 'veg');
     const productSizeParsed = parseSize(product.product_size);
-    
+
     if (!isProduceOrFruit) {
         if (!sizeOk(productSizeParsed, targetSize, allowedCategories, log, originalIngredient, checkLogPrefix)) {
             // Failed size check is non-recoverable
@@ -373,17 +373,17 @@ function normalizeToGramsOrMl(item, log) {
     let { qty, unit, key } = item;
     unit = unit.toLowerCase().trim().replace(/s$/, ''); // trim, lower, de-plural
     key = key.toLowerCase(); // Use lowercase key for matching
-    
+
     // Direct passthrough or simple conversion
     if (unit === 'g' || unit === 'ml') return { value: qty, unit: unit };
     if (unit === 'kg') return { value: qty * 1000, unit: 'g' };
     if (unit === 'l') return { value: qty * 1000, unit: 'ml' };
-    
+
     // --- Tweak 1: Unit conversion (e.g., 'egg' -> 'g') using map as fallback ---
     // Note: Prefer SKU serving info if available later in nutrition join phase.
     let weightPerUnit = CANONICAL_UNIT_WEIGHTS_G[unit];
     let usedHeuristic = true; // Assume heuristic unless specific unit found
-    
+
     if (!weightPerUnit) {
         // Try to infer standard weight from key name if unit is generic like 'piece'
         if (key.includes('egg')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['egg'];
@@ -473,7 +473,7 @@ module.exports = async function handler(request, response) {
         log("Handling OPTIONS pre-flight request.", 'INFO', 'HTTP');
         return response.status(200).end();
     }
-    
+
     if (request.method !== 'POST') {
         log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
         response.setHeader('Allow', 'POST, OPTIONS');
@@ -495,13 +495,13 @@ module.exports = async function handler(request, response) {
         }
         const formData = request.body;
         const { store, cuisine, days, goal, weight } = formData;
-        
+
         if (!store || !days || !goal || isNaN(parseFloat(formData.weight)) || isNaN(parseFloat(formData.height))) {
              log("CRITICAL: Missing core form data (store, days, goal, weight, or height). Cannot calculate plan.", 'CRITICAL', 'INPUT', getSanitizedFormData(formData));
              // Tweak 7: Use specific error for missing input
              throw new Error("Plan generation failed: Missing critical profile data (store, days, goal, weight, height).");
         }
-        
+
         const numDays = parseInt(days, 10);
         if (isNaN(numDays) || numDays < 1 || numDays > 7) {
              log(`Invalid number of days: ${days}. Using default 1.`, 'WARN', 'INPUT');
@@ -739,7 +739,7 @@ module.exports = async function handler(request, response) {
                  normalizedFinalResults.set(baseData.normalizedKey, { ...baseData, source: 'error', error: `Market run processing failed: ${currentResult.message}`, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
                  return;
              }
-             
+
              // Process successful results (which are objects like { "Original Key": {...} })
              const ingredientKey = Object.keys(currentResult)[0];
              if (!ingredientKey || ingredientKey.startsWith('unknown_')) {
@@ -875,10 +875,10 @@ module.exports = async function handler(request, response) {
         const computeItemMacros = (item) => {
             const { key, qty, unit } = item;
             // Get normalizedKey, which was added in Phase 2/3
-            const normalizedKey = item.normalizedKey || normalizeKey(key); 
-            
+            const normalizedKey = item.normalizedKey || normalizeKey(key);
+
             const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
-            
+
             if (!Number.isFinite(gramsOrMl) || gramsOrMl <= 0 || gramsOrMl > 3000) { // Keep sanity check
                 log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${key}'.`, 'CRITICAL', 'CALC', { item, gramsOrMl });
                 throw new Error(`Plan generation failed: Invalid quantity (${qty} ${unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${key}"`);
@@ -908,7 +908,7 @@ module.exports = async function handler(request, response) {
                 c = (nutritionData.carbs / 100) * grams;
                 kcal = (p * 4) + (f * 9) + (c * 4);
             }
-            
+
             return { p, f, c, kcal, key }; // Return macros
         };
 
@@ -917,7 +917,7 @@ module.exports = async function handler(request, response) {
             let totals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
             let invalidMealCount = 0;
             let firstInvalidName = null;
-            
+
             if (!Array.isArray(plan) || plan.length === 0) {
                 log("computeDayTotals: No meal plan provided.", 'WARN', 'CALC');
                 return { ...totals, isInvalid: true, firstInvalidName: "No Plan" };
@@ -932,7 +932,7 @@ module.exports = async function handler(request, response) {
                     firstInvalidName = firstInvalidName || `Day ${dayPlan?.day || 'unknown'} empty`;
                     continue;
                 }
-                
+
                 for (const meal of dayPlan.meals) {
                     telemetry.totalMeals++; // Count meals
                     if (!meal || !Array.isArray(meal.items) || meal.items.length === 0) {
@@ -954,9 +954,9 @@ module.exports = async function handler(request, response) {
                             mergedItems.set(itemKeyNormalized, { ...item });
                         }
                     }
-                    
+
                     let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
-                    
+
                     for (const item of mergedItems.values()) {
                         const macros = computeItemMacros(item);
                         mealKcal += macros.kcal;
@@ -970,7 +970,7 @@ module.exports = async function handler(request, response) {
                     meal.subtotal_protein = mealP;
                     meal.subtotal_fat = mealF;
                     meal.subtotal_carbs = mealC;
-                    
+
                     if (mealKcal <= 0) { // Guard for zero-cal meals
                         invalidMealCount++;
                         firstInvalidName = firstInvalidName || (meal.name || 'Zero Cal Meal');
@@ -982,14 +982,14 @@ module.exports = async function handler(request, response) {
                     totals.carbs += mealC;
                 }
             }
-            
+
             telemetry.invalidMeals = invalidMealCount; // Update telemetry
-            
+
             if (invalidMealCount > 0) {
                 log(`CRITICAL: Plan contains ${invalidMealCount} invalid meals. First invalid: "${firstInvalidName}"`, 'CRITICAL', 'CALC');
                 throw new Error(`Plan generation failed: Meal(s) are invalid (missing items or zero calories). First invalid meal: "${firstInvalidName}"`);
             }
-            
+
             const numDays = plan.length || 1;
             return {
                 calories: totals.calories / numDays,
@@ -1006,9 +1006,9 @@ module.exports = async function handler(request, response) {
         log("Phase 5.2: Calculating Initial Totals...", 'INFO', 'CALC');
         const targetCalories = calorieTarget;
         let currentMealPlan = mealPlan;
-        
+
         // Run initial calculation
-        const totals1 = computeDayTotals(currentMealPlan); 
+        const totals1 = computeDayTotals(currentMealPlan);
         log("ACCURATE DAILY nutrition totals calculated (Float).", 'SUCCESS', 'CALC', {
             calories: totals1.calories.toFixed(1),
             protein: totals1.protein.toFixed(1),
@@ -1017,40 +1017,69 @@ module.exports = async function handler(request, response) {
         });
 
         let finalDailyTotals = totals1;
-        
+
         // --- START: MODIFICATION (Curative Patch) ---
+        // --- START REPLACEMENT BLOCK ---
         const deviation1 = (totals1.calories - targetCalories) / targetCalories;
         const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1';
-        
+
         // Run reconciliation if deviation is > 5% and flag is enabled
-        if (RECONCILE_FLAG && Math.abs(deviation1) > 0.05) { 
+        if (RECONCILE_FLAG && Math.abs(deviation1) > 0.05) {
             log(`[RECON] Initial deviation ${ (deviation1 * 100).toFixed(1) }% > 5%. Attempting non-protein reconciliation.`, 'WARN', 'CALC');
-            
-            const { adjusted, factor, meals: scaledMealPlan } = reconcileNonProtein({
-                meals: currentMealPlan,
-                targetKcal: targetCalories,
-                getItemMacros: computeItemMacros, // Pass the helper
-                tolPct: 5
+
+            let cumulativeFactor = 0;
+            let daysAdjusted = 0;
+
+            // --- START FIX: Iterate over each day and apply reconciliation to that day's meals ---
+            const newMealPlan = currentMealPlan.map(dayPlan => {
+                if (!dayPlan || !Array.isArray(dayPlan.meals)) {
+                    log(`[RECON] Skipping invalid day structure in reconciliation`, 'WARN', 'CALC', { dayPlan });
+                    return dayPlan; // Skip invalid day structures
+                }
+
+                // Pass the array of meals *for this day*
+                const { adjusted, factor, meals: scaledMealsForDay } = reconcileNonProtein({
+                    meals: dayPlan.meals,
+                    targetKcal: targetCalories, // Reconcile each day to the target (potential future improvement: reconcile day total)
+                    getItemMacros: computeItemMacros,
+                    tolPct: 5
+                });
+
+                if (adjusted) {
+                    log(`[RECON] Day ${dayPlan.day} adjusted with factor ${factor.toFixed(3)}`, 'DEBUG', 'CALC');
+                    cumulativeFactor += factor;
+                    daysAdjusted++;
+                    // Return the dayPlan with its 'meals' array replaced by the scaled version
+                    return { ...dayPlan, meals: scaledMealsForDay };
+                }
+
+                // Return the original dayPlan if no adjustment was made
+                return dayPlan;
             });
-            
-            if (adjusted) {
-                currentMealPlan = scaledMealPlan; // Use the scaled plan
+            // --- END FIX ---
+
+            // Check if any adjustments were actually made
+            if (daysAdjusted > 0) {
+                currentMealPlan = newMealPlan; // Assign the new, corrected plan structure
                 finalDailyTotals = computeDayTotals(currentMealPlan); // Recalculate totals
-                scaleFactor = factor; // Store scale factor for telemetry
-                
-                log(`[RECON] Reconciliation complete.`, 'INFO', 'CALC', {
+                // Use average factor for logging/telemetry, avoid division by zero
+                scaleFactor = daysAdjusted > 0 ? (cumulativeFactor / daysAdjusted) : null;
+
+                log(`[RECON] Reconciliation complete for ${daysAdjusted} day(s).`, 'INFO', 'CALC', {
                     pre: { kcal: totals1.calories.toFixed(1), p: totals1.protein.toFixed(1), f: totals1.fat.toFixed(1), c: totals1.carbs.toFixed(1) },
-                    factor: factor.toFixed(3),
+                    avg_factor: scaleFactor ? parseFloat(scaleFactor.toFixed(3)) : null,
                     post: { kcal: finalDailyTotals.calories.toFixed(1), p: finalDailyTotals.protein.toFixed(1), f: finalDailyTotals.fat.toFixed(1), c: finalDailyTotals.carbs.toFixed(1) }
                 });
             } else {
-                log("[RECON] Reconciliation ran but no adjustments were made (already within tolerance).", 'INFO', 'CALC');
+                log("[RECON] Reconciliation ran but no adjustments were made (all days within tolerance).", 'INFO', 'CALC');
             }
+
         } else if (!RECONCILE_FLAG) {
              log("[RECON] Reconciliation skipped (CHEFFY_RECONCILE_NONPROTEIN not '1').", 'INFO', 'CALC');
         } else {
              log("[RECON] Initial deviation within 5%. No reconciliation needed.", 'INFO', 'CALC');
         }
+        // --- END REPLACEMENT BLOCK ---
         // --- END: MODIFICATION (Curative Patch) ---
 
         // --- Final Validation (uses 'finalDailyTotals') ---
@@ -1067,7 +1096,7 @@ module.exports = async function handler(request, response) {
 
         // Fail-fast if deviation is *still* > 5% (as per patch logic)
         const FINAL_TOLERANCE = 0.05; // 5%
-        if (Math.abs(finalDeviation) > FINAL_TOLERANCE) { 
+        if (Math.abs(finalDeviation) > FINAL_TOLERANCE) {
             log(`CRITICAL: Final calculation failed hard validation. Target: ${targetCalories} kcal, Final: ${finalDailyTotals.calories.toFixed(0)} kcal.`, 'CRITICAL', 'CALC', { deviation_pct: finalDeviationPct });
             // Tweak 7: Use specific error format
             throw new Error(`Plan generation failed: Calculated daily calories (${finalDailyTotals.calories.toFixed(0)}) deviate too much from target (${targetCalories}). [Code: E_MACRO_MISMATCH]`);
@@ -1077,22 +1106,27 @@ module.exports = async function handler(request, response) {
 
         // --- Phase 6: Assembling Final Response ---
         log("Phase 6: Final Response...", 'INFO', 'PHASE');
-        
+
         // --- Tweak 4: Round all values at the very end ---
         finalDailyTotals.calories = Math.round(finalDailyTotals.calories);
         finalDailyTotals.protein = Math.round(finalDailyTotals.protein);
         finalDailyTotals.fat = Math.round(finalDailyTotals.fat);
         finalDailyTotals.carbs = Math.round(finalDailyTotals.carbs);
-        
+
         // Use the (potentially scaled) currentMealPlan
         currentMealPlan.forEach(day => {
-            day.meals.forEach(meal => {
-                meal.subtotal_kcal = Math.round(meal.subtotal_kcal);
-                meal.subtotal_protein = Math.round(meal.subtotal_protein);
-                meal.subtotal_fat = Math.round(meal.subtotal_fat);
-                meal.subtotal_carbs = Math.round(meal.subtotal_carbs);
-            });
+            if (day && Array.isArray(day.meals)) { // Add null check for day
+                day.meals.forEach(meal => {
+                    if (meal) { // Add null check for meal
+                        meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
+                        meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
+                        meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
+                        meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
+                    }
+                });
+            }
         });
+
 
         // --- Tweak 4/8: Final Telemetry Log ---
         log("Final Telemetry:", 'INFO', 'SYSTEM', { // Tweak 8
@@ -1119,13 +1153,13 @@ module.exports = async function handler(request, response) {
     } catch (error) {
         log(`CRITICAL Orchestrator ERROR: ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
         console.error("ORCHESTRATOR UNHANDLED ERROR:", error);
-        
+
         // --- Tweak 7: Return 422 for plan errors, 500 for server errors ---
         // --- MODIFICATION: Added E_MACRO_MISMATCH code ---
         if (error.message.startsWith('Plan generation failed:') || error.code === 'E_MACRO_MISMATCH') {
             const dayMatch = error.message.match(/Day (\d+)/);
             const mealMatch = error.message.match(/meal: "([^"]+)"/);
-            
+
             return response.status(422).json({ // Use 422
                 message: error.message,
                 code: error.code || "PLAN_INVALID", // Machine-readable code
@@ -1134,10 +1168,10 @@ module.exports = async function handler(request, response) {
                 logs // Include logs
             });
         }
-        
+
         // Default to 500 for unexpected server errors
-        return response.status(500).json({ 
-            message: "An unrecoverable server error occurred during plan generation.", 
+        return response.status(500).json({
+            message: "An unrecoverable server error occurred during plan generation.",
             error: error.message,
             code: "SERVER_FAULT",
             logs // Include logs
@@ -1155,7 +1189,7 @@ module.exports = async function handler(request, response) {
 async function generateCreativeIdeas(cuisinePrompt, log) {
     // --- FIX: Use v1beta endpoint and correct model ---
     // --- MODIFICATION: This function still uses the (cheaper) Flash model ---
-    const CREATIVE_GEMINI_API_URL = GEMINI_API_URL_BASE; 
+    const CREATIVE_GEMINI_API_URL = GEMINI_API_URL_BASE;
     const sysPrompt=`Creative chef... comma-separated list.`;
     const userQuery=`Theme: "${cuisinePrompt}"...`;
     log("Creative Prompt",'INFO','LLM_PROMPT',{userQuery});
@@ -1185,7 +1219,7 @@ async function generateCreativeIdeas(cuisinePrompt, log) {
 
 async function generateLLMPlanAndMeals(formData, calorieTarget, proteinTargetGrams, fatTargetGrams, carbTargetGrams, creativeIdeas, log) {
     const { name, height, weight, age, gender, goal, dietary, days, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
-    
+
     // --- START: MODIFICATION (Preventative Model Swap) ---
     // --- FIX: Use a v1beta-compatible model name ---
     const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-2.5-pro'; // Use Pro for plan generation
@@ -1236,10 +1270,10 @@ JSON Structure:
         throw new Error("Plan generation failed: Cannot generate plan due to missing user input.");
     }
 
-    log("Technical Prompt (Separated)", 'INFO', 'LLM_PROMPT', { 
-        systemPromptStart: systemPrompt.substring(0, 200) + '...', 
+    log("Technical Prompt (Separated)", 'INFO', 'LLM_PROMPT', {
+        systemPromptStart: systemPrompt.substring(0, 200) + '...',
         userQuery: userQuery,
-        sanitizedData: getSanitizedFormData(formData) 
+        sanitizedData: getSanitizedFormData(formData)
     });
 
     // --- FIX: Use systemInstruction payload for v1beta API ---
@@ -1260,7 +1294,7 @@ JSON Structure:
         );
         const result = await response.json();
         let jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-        
+
         if (!jsonText) {
             log("Technical AI returned no JSON text.", 'CRITICAL', 'LLM', result);
             throw new Error("LLM response was empty or contained no text part."); // Caught as 500
@@ -1277,7 +1311,7 @@ JSON Structure:
         // --- End FIX ---
 
         log("Technical Raw (potential JSON)", 'INFO', 'LLM', { raw: jsonText.substring(0, 200) + '...' });
-        
+
         try {
             const parsed = JSON.parse(jsonText);
             log("Parsed Technical", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, hasMealPlan: !!parsed.mealPlan?.length });
@@ -1437,5 +1471,4 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
 }
 
 /// ===== NUTRITION-CALC-END ===== \\\\
-
 
