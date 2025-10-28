@@ -15,12 +15,9 @@ const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); /
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// --- START MODIFICATION: Add Fallback Model Logic ---
-const PRIMARY_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-2.5-pro';
-// Define a fallback model. If the primary is 'pro', fall back to 'flash'. Otherwise, fall back to 'pro'.
-const FALLBACK_MODEL_NAME = PRIMARY_MODEL_NAME === 'gemini-2.5-pro' ? 'gemini-2.5-flash' : 'gemini-2.5-pro';
-const PRIMARY_GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PRIMARY_MODEL_NAME}:generateContent`;
-const FALLBACK_GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${FALLBACK_MODEL_NAME}:generateContent`;
+// --- START MODIFICATION: Hard-code gemini-2.5-flash and remove fallback ---
+const PLAN_MODEL_NAME = 'gemini-2.5-flash'; // Forcing flash model
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
 // --- END MODIFICATION ---
 
 
@@ -412,19 +409,17 @@ JSON Structure:
             temperature: 0.4, // Slightly lower temp for consistency
             topK: 32,
             topP: 0.9,
-            // --- START MODIFICATION: Increase maxOutputTokens ---
-            maxOutputTokens: 8192, // Increased from 4096
-            // --- END MODIFICATION ---
+            maxOutputTokens: 8192, // Kept increased token limit
             responseMimeType: "application/json", // Enforce JSON output
         }
     };
     
-    // --- START MODIFICATION: Replace single try/catch with fallback logic ---
+    // --- START MODIFICATION: Remove fallback logic, use only one model ---
     let response;
     try {
-        log(`LLM Day ${day}: Attempting PRIMARY model: ${PRIMARY_MODEL_NAME}`, 'INFO', 'LLM');
+        log(`LLM Day ${day}: Attempting model: ${PLAN_MODEL_NAME}`, 'INFO', 'LLM');
         response = await fetchLLMWithRetry(
-            PRIMARY_GEMINI_URL,
+            GEMINI_API_URL, // Use the single, hard-coded URL
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
@@ -432,52 +427,26 @@ JSON Structure:
             },
             log
         );
-        log(`LLM Day ${day}: PRIMARY model ${PRIMARY_MODEL_NAME} succeeded.`, 'SUCCESS', 'LLM');
+        log(`LLM Day ${day}: Model ${PLAN_MODEL_NAME} succeeded.`, 'SUCCESS', 'LLM');
 
-    } catch (primaryError) {
-        log(`LLM Day ${day}: PRIMARY model ${PRIMARY_MODEL_NAME} failed: ${primaryError.message}`, 'WARN', 'LLM');
-        
-        // Check if it was a definitive fetch failure (which already retried 3 times)
-        if (primaryError.message.includes('failed after 3 attempts')) {
-            log(`LLM Day ${day}: Attempting FALLBACK model: ${FALLBACK_MODEL_NAME}`, 'INFO', 'LLM');
-            try {
-                response = await fetchLLMWithRetry(
-                    FALLBACK_GEMINI_URL, // Use fallback URL
-                    {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
-                        body: JSON.stringify(payload)
-                    },
-                    log
-                );
-                log(`LLM Day ${day}: FALLBACK model ${FALLBACK_MODEL_NAME} succeeded.`, 'SUCCESS', 'LLM');
-
-            } catch (fallbackError) {
-                log(`LLM Day ${day}: FALLBACK model ${FALLBACK_MODEL_NAME} also failed: ${fallbackError.message}`, 'CRITICAL', 'LLM');
-                // Throw a new error combining both failures
-                throw new Error(`Plan generation failed for Day ${day}: Primary model (${PRIMARY_MODEL_NAME}) and Fallback model (${FALLBACK_MODEL_NAME}) both failed. Last error: ${fallbackError.message}`);
-            }
-        } else {
-            // Not a fetch error, but maybe a timeout or other issue. Re-throw.
-            log(`LLM Day ${day}: Re-throwing non-retryable primary error: ${primaryError.message}`, 'CRITICAL', 'LLM');
-            throw primaryError;
-        }
+    } catch (error) {
+        log(`LLM Day ${day}: Model ${PLAN_MODEL_NAME} failed after retries: ${error.message}`, 'CRITICAL', 'LLM');
+        // Throw a new, clearer error
+        throw new Error(`Plan generation failed for Day ${day}: The AI model (${PLAN_MODEL_NAME}) failed to respond. Last error: ${error.message}`);
     }
 
-    // --- Now, process the response (which could be from primary or fallback) ---
+    // --- Now, process the response (which can only be from the one model) ---
     try {
         const result = await response.json(); // Response should be JSON directly
 
         // --- Validate the direct JSON response ---
         const content = result.candidates?.[0]?.content;
         if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
-             // --- START MODIFICATION: Add check for MAX_TOKENS finishReason ---
              const finishReason = result.candidates?.[0]?.finishReason;
              if (finishReason === 'MAX_TOKENS') {
                  log(`LLM response missing content and finishReason was MAX_TOKENS.`, 'CRITICAL', 'LLM', result);
                  throw new Error("LLM response structure invalid: MAX_TOKENS reached before content could be generated.");
              }
-             // --- END MODIFICATION ---
              log("LLM response missing content or text part.", 'CRITICAL', 'LLM', result);
              throw new Error("LLM response structure invalid or empty.");
         }
