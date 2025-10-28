@@ -412,7 +412,9 @@ JSON Structure:
             temperature: 0.4, // Slightly lower temp for consistency
             topK: 32,
             topP: 0.9,
-            maxOutputTokens: 4096, // Allow sufficient tokens for a complex day
+            // --- START MODIFICATION: Increase maxOutputTokens ---
+            maxOutputTokens: 8192, // Increased from 4096
+            // --- END MODIFICATION ---
             responseMimeType: "application/json", // Enforce JSON output
         }
     };
@@ -469,6 +471,13 @@ JSON Structure:
         // --- Validate the direct JSON response ---
         const content = result.candidates?.[0]?.content;
         if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
+             // --- START MODIFICATION: Add check for MAX_TOKENS finishReason ---
+             const finishReason = result.candidates?.[0]?.finishReason;
+             if (finishReason === 'MAX_TOKENS') {
+                 log(`LLM response missing content and finishReason was MAX_TOKENS.`, 'CRITICAL', 'LLM', result);
+                 throw new Error("LLM response structure invalid: MAX_TOKENS reached before content could be generated.");
+             }
+             // --- END MODIFICATION ---
              log("LLM response missing content or text part.", 'CRITICAL', 'LLM', result);
              throw new Error("LLM response structure invalid or empty.");
         }
