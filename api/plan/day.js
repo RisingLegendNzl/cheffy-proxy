@@ -14,8 +14,15 @@ const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); /
 // --- CONFIGURATION ---
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const PLAN_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-2.5-flash-preview-09-2025'; // Use flash for plan generation
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
+
+// --- START MODIFICATION: Add Fallback Model Logic ---
+const PRIMARY_MODEL_NAME = process.env.CHEFFY_PLAN_MODEL || 'gemini-2.5-pro';
+// Define a fallback model. If the primary is 'pro', fall back to 'flash'. Otherwise, fall back to 'pro'.
+const FALLBACK_MODEL_NAME = PRIMARY_MODEL_NAME === 'gemini-2.5-pro' ? 'gemini-2.5-flash' : 'gemini-2.5-pro';
+const PRIMARY_GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PRIMARY_MODEL_NAME}:generateContent`;
+const FALLBACK_GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${FALLBACK_MODEL_NAME}:generateContent`;
+// --- END MODIFICATION ---
+
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
 const MAX_NUTRITION_CONCURRENCY = 5;
@@ -409,10 +416,13 @@ JSON Structure:
             responseMimeType: "application/json", // Enforce JSON output
         }
     };
-
+    
+    // --- START MODIFICATION: Replace single try/catch with fallback logic ---
+    let response;
     try {
-        const response = await fetchLLMWithRetry( // Use the specific LLM retry function
-            GEMINI_API_URL,
+        log(`LLM Day ${day}: Attempting PRIMARY model: ${PRIMARY_MODEL_NAME}`, 'INFO', 'LLM');
+        response = await fetchLLMWithRetry(
+            PRIMARY_GEMINI_URL,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
@@ -420,6 +430,40 @@ JSON Structure:
             },
             log
         );
+        log(`LLM Day ${day}: PRIMARY model ${PRIMARY_MODEL_NAME} succeeded.`, 'SUCCESS', 'LLM');
+
+    } catch (primaryError) {
+        log(`LLM Day ${day}: PRIMARY model ${PRIMARY_MODEL_NAME} failed: ${primaryError.message}`, 'WARN', 'LLM');
+        
+        // Check if it was a definitive fetch failure (which already retried 3 times)
+        if (primaryError.message.includes('failed after 3 attempts')) {
+            log(`LLM Day ${day}: Attempting FALLBACK model: ${FALLBACK_MODEL_NAME}`, 'INFO', 'LLM');
+            try {
+                response = await fetchLLMWithRetry(
+                    FALLBACK_GEMINI_URL, // Use fallback URL
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+                        body: JSON.stringify(payload)
+                    },
+                    log
+                );
+                log(`LLM Day ${day}: FALLBACK model ${FALLBACK_MODEL_NAME} succeeded.`, 'SUCCESS', 'LLM');
+
+            } catch (fallbackError) {
+                log(`LLM Day ${day}: FALLBACK model ${FALLBACK_MODEL_NAME} also failed: ${fallbackError.message}`, 'CRITICAL', 'LLM');
+                // Throw a new error combining both failures
+                throw new Error(`Plan generation failed for Day ${day}: Primary model (${PRIMARY_MODEL_NAME}) and Fallback model (${FALLBACK_MODEL_NAME}) both failed. Last error: ${fallbackError.message}`);
+            }
+        } else {
+            // Not a fetch error, but maybe a timeout or other issue. Re-throw.
+            log(`LLM Day ${day}: Re-throwing non-retryable primary error: ${primaryError.message}`, 'CRITICAL', 'LLM');
+            throw primaryError;
+        }
+    }
+
+    // --- Now, process the response (which could be from primary or fallback) ---
+    try {
         const result = await response.json(); // Response should be JSON directly
 
         // --- Validate the direct JSON response ---
@@ -462,11 +506,12 @@ JSON Structure:
             throw new Error(`Plan generation failed for Day ${day}: Invalid JSON response from AI. ${parseError.message}`);
         }
 
-    } catch (fetchError) {
-         log(`LLM call failed definitively for Day ${day}: ${fetchError.message}`, 'CRITICAL', 'LLM');
+    } catch (fetchOrParseError) {
+         log(`LLM call/parse failed definitively for Day ${day}: ${fetchOrParseError.message}`, 'CRITICAL', 'LLM');
          // Throw a specific error indicating plan failure for this day
-         throw new Error(`Plan generation failed for Day ${day}: Could not get response from AI. ${fetchError.message}`);
+         throw new Error(`Plan generation failed for Day ${day}: Could not get valid response from AI. ${fetchOrParseError.message}`);
     }
+    // --- END MODIFICATION ---
 }
 
 
@@ -1027,4 +1072,3 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
