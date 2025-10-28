@@ -15,10 +15,10 @@ const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); /
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// --- Using gemini-2.5-flash as the primary model, with 2.5-pro as fallback ---
-const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash-preview-09-2025';
-// --- MODIFICATION: Corrected the fallback model name ---
-const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro-preview-09-2025'; // Fallback model
+// --- Using gemini-2.5-flash as the primary model ---
+const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
+// --- MODIFICATION: Set fallback to gemini-2.5-pro as suggested ---
+const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro'; // Fallback model
 
 // --- MODIFIED: Create a function to get the URL ---
 const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
@@ -538,7 +538,7 @@ JSON Structure:
 
         try {
             // Try Fallback Model
-            // Note: The payload is identical and compatible with 1.5-flash
+            // Note: The payload is identical and compatible with the fallback
             parsedResult = await tryGenerateWithModel(PLAN_MODEL_NAME_FALLBACK, payload, log, day);
         } catch (fallbackError) {
             log(`LLM Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
