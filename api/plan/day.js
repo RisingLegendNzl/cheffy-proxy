@@ -15,9 +15,12 @@ const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); /
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// --- Using gemini-2.5-flash as the primary model ---
-const PLAN_MODEL_NAME = 'gemini-2.5-flash';
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
+// --- Using gemini-2.5-flash as the primary model, with 1.5-flash as fallback ---
+const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
+const PLAN_MODEL_NAME_FALLBACK = 'gemini-1.5-flash'; // Fallback model
+
+// --- MODIFIED: Create a function to get the URL ---
+const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
@@ -439,12 +442,15 @@ JSON Structure:
         }
     };
 
-    // --- Using only the primary model, no fallback ---
+    // --- START: MODIFICATION (Add fallback model logic) ---
     let response;
+    let modelUsed = PLAN_MODEL_NAME_PRIMARY;
+
     try {
-        log(`LLM Day ${day}: Attempting model: ${PLAN_MODEL_NAME}`, 'INFO', 'LLM');
+        log(`LLM Day ${day}: Attempting PRIMARY model: ${PLAN_MODEL_NAME_PRIMARY}`, 'INFO', 'LLM');
+        const primaryUrl = getGeminiApiUrl(PLAN_MODEL_NAME_PRIMARY); // Get URL for primary
         response = await fetchLLMWithRetry(
-            GEMINI_API_URL, // Use the single, hard-coded URL
+            primaryUrl,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
@@ -452,13 +458,38 @@ JSON Structure:
             },
             log
         );
-        log(`LLM Day ${day}: Model ${PLAN_MODEL_NAME} succeeded.`, 'SUCCESS', 'LLM');
+        log(`LLM Day ${day}: Model ${modelUsed} succeeded.`, 'SUCCESS', 'LLM');
 
-    } catch (error) {
-        log(`LLM Day ${day}: Model ${PLAN_MODEL_NAME} failed after retries: ${error.message}`, 'CRITICAL', 'LLM');
-        // Throw a new, clearer error
-        throw new Error(`Plan generation failed for Day ${day}: The AI model (${PLAN_MODEL_NAME}) failed to respond. Last error: ${error.message}`);
+    } catch (primaryError) {
+        log(`LLM Day ${day}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed after retries: ${primaryError.message}`, 'CRITICAL', 'LLM');
+        log(`LLM Day ${day}: Attempting FALLBACK model: ${PLAN_MODEL_NAME_FALLBACK}`, 'WARN', 'LLM');
+        
+        modelUsed = PLAN_MODEL_NAME_FALLBACK; // Update model name for logging
+        
+        // NOTE: gemini-1.5-flash supports all the same payload features (systemInstruction, responseMimeType)
+        // so the same payload can be re-used.
+
+        try {
+            const fallbackUrl = getGeminiApiUrl(PLAN_MODEL_NAME_FALLBACK); // Get URL for fallback
+            response = await fetchLLMWithRetry(
+                fallbackUrl, // Use fallback URL
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+                    body: JSON.stringify(payload)
+                },
+                log
+            );
+            log(`LLM Day ${day}: FALLBACK Model ${modelUsed} succeeded.`, 'SUCCESS', 'LLM');
+        
+        } catch (fallbackError) {
+            log(`LLM Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}`, 'CRITICAL', 'LLM');
+            // Throw a new, clearer error
+            throw new Error(`Plan generation failed for Day ${day}: Both primary (${PLAN_MODEL_NAME_PRIMARY}) and fallback (${PLAN_MODEL_NAME_FALLBACK}) AI models failed to respond. Last error: ${fallbackError.message}`);
+        }
     }
+    // --- END: MODIFICATION ---
+
 
     // --- Now, process the response ---
     try {
