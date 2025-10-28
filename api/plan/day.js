@@ -15,10 +15,9 @@ const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); /
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// --- START MODIFICATION: Hard-code gemini-2.5-flash and remove fallback ---
-const PLAN_MODEL_NAME = 'gemini-2.5-flash'; // Forcing flash model
+// --- Using gemini-2.5-flash as the primary model ---
+const PLAN_MODEL_NAME = 'gemini-2.5-flash';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${PLAN_MODEL_NAME}:generateContent`;
-// --- END MODIFICATION ---
 
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
@@ -350,6 +349,31 @@ function normalizeToGramsOrMl(item, log) {
     }
     return { value: grams, unit: 'g' };
 }
+
+// --- START MODIFICATION: Add synthesis functions ---
+function synthTight(ing, store) {
+  if (!ing || !store) return null;
+  const size = ing.targetSize?.value && ing.targetSize?.unit ? ` ${ing.targetSize.value}${ing.targetSize.unit}` : "";
+  // Ensure originalIngredient is a string before calling methods
+  const original = typeof ing.originalIngredient === 'string' ? ing.originalIngredient : '';
+  return `${store} ${original}${size}`.toLowerCase().trim();
+}
+
+function synthWide(ing, store) {
+  if (!ing || !store) return null;
+  // Ensure requiredWords exists and has at least one element, or fallback safely
+  const noun = (Array.isArray(ing.requiredWords) && ing.requiredWords.length > 0 && typeof ing.requiredWords[0] === 'string')
+    ? ing.requiredWords[0]
+    : (typeof ing.originalIngredient === 'string' ? ing.originalIngredient.split(" ")[0] : ''); // Fallback to first word or empty string
+
+  // Handle case where noun might still be undefined or empty
+  if (!noun) return null;
+
+  return `${store} ${noun}`.toLowerCase().trim();
+}
+// --- END MODIFICATION ---
+
+
 /// ===== HELPERS-END ===== ////
 
 
@@ -380,19 +404,20 @@ async function generateLLMDayPlan(day, formData, nutritionalTargets, log) {
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
-    // --- Simplified System Prompt for a SINGLE DAY ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. Generate plan for DAY ${day}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'tightQuery': Hyper-specific, STORE-PREFIXED. b. 'normalQuery': 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} c. 'wideQuery': 1-2 broad words, STORE-PREFIXED. 3. 'requiredWords': Array[1] SINGLE ESSENTIAL CORE NOUN ONLY, lowercase singular. NO adjectives, forms, plurals, or multiple words (e.g., for 'baby spinach leaves', use ['spinach']; for 'roma tomatoes', use ['tomato']). This word MUST exist in product names. 4. 'negativeKeywords': Array[1-5] lowercase words for INCORRECT product. Be thorough. Include common mismatches by type. 5. 'targetSize': Object {value: NUM, unit: "g"|"ml"}. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired': BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (MANDATORY): Provide precise, lowercase categories using this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) Specify clear portion sizes in 'description'. b) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). c) The sum of estimated calories from ALL 'items' across ALL meals for Day ${day} MUST be within 5% of the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) precisely. **SELF-CORRECT: Sum calories before output. Revise if >5% deviation from ${calories} kcal.** d) No single meal's 'items' should sum > **${mealMax} kcal**.
-Output ONLY the valid JSON object described below (with 'ingredients' and 'meals' keys). ABSOLUTELY NO PROSE OR MARKDOWN.
+    // --- START MODIFICATION: Updated System Prompt ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. Generate plan for DAY ${day}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) 'description' MUST BE BRIEF keyword summary (e.g., "Chicken, rice, broccoli"). NO full sentences or cooking instructions. b) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). c) The sum of estimated calories from ALL 'items' across ALL meals for Day ${day} MUST be within 5% of the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) precisely. **SELF-CORRECT: Sum calories before output. Revise if >5% deviation from ${calories} kcal.** d) No single meal's 'items' should sum > **${mealMax} kcal**.
+Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
 JSON Structure:
 {
-  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, /* Daily total */ "quantityUnits": "string", /* Daily total units */ "allowedCategories": ["string"] } /* ... ingredients used today ... */ ],
-  "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } /* ... items in this meal ... */ ] } /* ... meals for today ... */ ]
+  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] } ],
+  "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
 }
 `;
+    // --- END MODIFICATION ---
 
     // --- Simplified User Query for a SINGLE DAY ---
-    let userQuery = `Gen plan for Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
+    let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
     log(`LLM Prompt for Day ${day}`, 'INFO', 'LLM_PROMPT', {
         systemPromptStart: systemPrompt.substring(0, 200) + '...', // Log start only
@@ -406,15 +431,15 @@ JSON Structure:
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: {
-            temperature: 0.4, // Slightly lower temp for consistency
+            temperature: 0.3, // Slightly lower temp for more predictable optional field usage
             topK: 32,
             topP: 0.9,
-            maxOutputTokens: 8192, // Kept increased token limit
+            maxOutputTokens: 8192, // Keep increased token limit
             responseMimeType: "application/json", // Enforce JSON output
         }
     };
-    
-    // --- START MODIFICATION: Remove fallback logic, use only one model ---
+
+    // --- Using only the primary model, no fallback ---
     let response;
     try {
         log(`LLM Day ${day}: Attempting model: ${PLAN_MODEL_NAME}`, 'INFO', 'LLM');
@@ -435,7 +460,7 @@ JSON Structure:
         throw new Error(`Plan generation failed for Day ${day}: The AI model (${PLAN_MODEL_NAME}) failed to respond. Last error: ${error.message}`);
     }
 
-    // --- Now, process the response (which can only be from the one model) ---
+    // --- Now, process the response ---
     try {
         const result = await response.json(); // Response should be JSON directly
 
@@ -471,10 +496,14 @@ JSON Structure:
                  }
              }
              for(const ing of parsed.ingredients) {
+                 // Check required fields, allow null for tightQuery/wideQuery
                  if (!ing || !ing.originalIngredient || !ing.normalQuery || !Array.isArray(ing.requiredWords) || !Array.isArray(ing.negativeKeywords) || !Array.isArray(ing.allowedCategories) || ing.allowedCategories.length === 0 || typeof ing.totalGramsRequired !== 'number' || !ing.quantityUnits) {
-                       log(`Validation Error: Ingredient "${ing?.originalIngredient || 'unknown'}" missing fields or invalid types.`, 'WARN', 'LLM', ing); // Warn instead of critical fail immediately
-                       throw new Error(`Ingredient validation failed: "${ing?.originalIngredient || 'unknown'}"`);
+                       log(`Validation Error: Ingredient "${ing?.originalIngredient || 'unknown'}" missing required fields or invalid types.`, 'WARN', 'LLM', ing);
+                       throw new Error(`Ingredient validation failed (required fields): "${ing?.originalIngredient || 'unknown'}"`);
                  }
+                 // Check optional fields are either string or null
+                 if (ing.tightQuery !== null && typeof ing.tightQuery !== 'string') throw new Error(`Ingredient validation failed (tightQuery type): "${ing?.originalIngredient || 'unknown'}"`);
+                 if (ing.wideQuery !== null && typeof ing.wideQuery !== 'string') throw new Error(`Ingredient validation failed (wideQuery type): "${ing?.originalIngredient || 'unknown'}"`);
              }
 
             return parsed; // Return the successfully parsed and validated JSON object
@@ -489,7 +518,6 @@ JSON Structure:
          // Throw a specific error indicating plan failure for this day
          throw new Error(`Plan generation failed for Day ${day}: Could not get valid response from AI. ${fetchOrParseError.message}`);
     }
-    // --- END MODIFICATION ---
 }
 
 
@@ -565,29 +593,43 @@ module.exports = async (request, response) => {
         log("Phase 2: Market Run (Day " + day + ")...", 'INFO', 'PHASE');
 
         const processSingleIngredientOptimized = async (ingredient) => {
-             // This function is largely the same as in the original orchestrator
-             // but only runs for ingredients needed *today*.
              try {
                  if (!ingredient || !ingredient.originalIngredient) {
                      log(`Market Run: Skipping invalid ingredient data`, 'WARN', 'MARKET_RUN', { ingredient });
                      return { _error: true, itemKey: 'unknown_invalid', message: 'Invalid ingredient data' };
                  }
                 const ingredientKey = ingredient.originalIngredient;
+                 // Validation: normalQuery is essential now
                  if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories) || ingredient.allowedCategories.length === 0) {
-                     log(`[${ingredientKey}] Skipping: Missing critical fields (query/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
+                     log(`[${ingredientKey}] Skipping: Missing critical fields (normalQuery/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
                      return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
                  }
 
                 const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
                 let foundProduct = null;
-                const queriesToTry = [ { type: 'tight', query: ingredient.tightQuery }, { type: 'normal', query: ingredient.normalQuery }, { type: 'wide', query: ingredient.wideQuery } ];
+
+                // --- START MODIFICATION: Synthesize queries and build query list ---
+                const qn = ingredient.normalQuery; // Always required from LLM
+                // Synthesize tightQuery if LLM provided null or empty string
+                const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, store);
+                 // Synthesize wideQuery if LLM provided null or empty string
+                const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, store);
+
+                // Build the list of queries to try, filtering out any nulls/empty strings
+                const queriesToTry = [
+                    { type: 'tight', query: qt },
+                    { type: 'normal', query: qn },
+                    { type: 'wide', query: qw }
+                ].filter(q => q.query && q.query.trim()); // Only keep valid queries
+
+                // Log which queries are being used (AI vs synthesized)
+                log(`[${ingredientKey}] Queries: Tight (${qt ? (ingredient.tightQuery ? 'AI' : 'Synth') : 'N/A'}), Normal (AI), Wide (${qw ? (ingredient.wideQuery ? 'AI' : 'Synth') : 'N/A'})`, 'DEBUG', 'MARKET_RUN');
+                // --- END MODIFICATION ---
+
                 let acceptedQueryType = 'none';
 
                 for (const [index, { type, query }] of queriesToTry.entries()) {
-                     if (!query || query.toLowerCase() === 'null') {
-                         result.searchAttempts.push({ queryType: type, query: null, status: 'skipped'});
-                         continue;
-                    }
+                     // Query should already be valid here due to filter above
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
                     const currentAttemptLog = result.searchAttempts.at(-1);
@@ -642,7 +684,11 @@ module.exports = async (request, response) => {
                              }
                              // Optimization: If normal query has results, don't try wide
                              if (type === 'normal') {
-                                 break;
+                                 // Only break if wide query isn't the *only* remaining option
+                                 const remainingQueries = queriesToTry.slice(index + 1);
+                                 if (!remainingQueries.some(q => q.type === 'wide')) {
+                                      break;
+                                 }
                              }
                         } else {
                              currentAttemptLog.status = 'no_match_post_filter';
@@ -1050,3 +1096,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
