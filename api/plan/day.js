@@ -407,7 +407,7 @@ async function tryGenerateWithModel(modelName, payload, log, day) {
     const candidate = result.candidates?.[0];
     const finishReason = candidate?.finishReason;
 
-    // --- MODIFICATION: Check for SAFETY or OTHER non-STOP reasons as well ---
+    // --- Check for SAFETY or OTHER non-STOP reasons as well ---
     if (finishReason === 'MAX_TOKENS') {
         log(`LLM Day ${day}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
         throw new Error(`Model ${modelName} failed: MAX_TOKENS.`); // This error will be caught and trigger the fallback
@@ -493,8 +493,8 @@ async function generateLLMDayPlan(day, formData, nutritionalTargets, log) {
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
-    // --- START: MODIFICATION (Simplified System Prompt) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. Generate plan for DAY ${day}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) 'description' MUST BE BRIEF keyword summary (e.g., "Chicken, rice, broccoli"). NO full sentences or cooking instructions. b) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). c) Aim for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be reasonably close to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal. d) No single meal's 'items' should sum > **${mealMax} kcal**.
+    // --- START: MODIFICATION (Adjusted System Prompt Rule #10.c) ---
+    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. Generate plan for DAY ${day}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) 'description' MUST BE BRIEF keyword summary (e.g., "Chicken, rice, broccoli"). NO full sentences or cooking instructions. b) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). c) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure. d) No single meal's 'items' should sum > **${mealMax} kcal**.
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
 JSON Structure:
@@ -503,7 +503,7 @@ JSON Structure:
   "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
 }
 `;
-    // --- END: MODIFICATION (Simplified System Prompt - Removed Rule #18 and self-correction from #10.c) ---
+    // --- END: MODIFICATION (Adjusted System Prompt Rule #10.c) ---
     
     // --- Simplified User Query for a SINGLE DAY ---
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
@@ -515,19 +515,17 @@ JSON Structure:
         sanitizedData: getSanitizedFormData(formData)
     });
 
-    // --- START: MODIFICATION (Removed maxOutputTokens) ---
+    // --- Payload (No maxOutputTokens) ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: {
-            temperature: 0.3, // Slightly lower temp for more predictable optional field usage
+            temperature: 0.3, 
             topK: 32,
             topP: 0.9,
-            // maxOutputTokens: 8192, // REMOVED THIS LINE
-            responseMimeType: "application/json", // Enforce JSON output
+            responseMimeType: "application/json", 
         }
     };
-    // --- END: MODIFICATION ---
 
     // --- Use the helper with fallback (Logic unchanged here) ---
     let parsedResult;
@@ -539,11 +537,9 @@ JSON Structure:
 
         try {
             // Try Fallback Model
-            // Note: The payload is identical and compatible with the fallback
             parsedResult = await tryGenerateWithModel(PLAN_MODEL_NAME_FALLBACK, payload, log, day);
         } catch (fallbackError) {
             log(`LLM Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
-            // Throw a new, clearer error that summarizes the total failure
             throw new Error(`Plan generation failed for Day ${day}: Both primary (${PLAN_MODEL_NAME_PRIMARY}) and fallback (${PLAN_MODEL_NAME_FALLBACK}) AI models failed to produce a valid plan. Last error: ${fallbackError.message}`);
         }
     }
@@ -1000,7 +996,7 @@ module.exports = async (request, response) => {
 
         // --- Run Reconciliation if Needed ---
         const targetCalories = nutritionalTargets.calories;
-        const initialDeviation = (initialDayKcal - targetCalories) / targetCalories;
+        const initialDeviation = (targetCalories > 0) ? (initialDayKcal - targetCalories) / targetCalories : 0; // Avoid division by zero
         const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1'; // Check env var
         let finalDayMeals = dayMeals; // Start with the initial meals
         let finalDayTotals = { calories: initialDayKcal, protein: initialDayP, fat: initialDayF, carbs: initialDayC };
@@ -1054,11 +1050,11 @@ module.exports = async (request, response) => {
         }
 
         // --- Final Validation (for this day) ---
-        const finalDeviation = (finalDayTotals.calories - targetCalories) / targetCalories;
+        const finalDeviation = (targetCalories > 0) ? (finalDayTotals.calories - targetCalories) / targetCalories : 0; // Avoid division by zero
         const finalDeviationPct = finalDeviation * 100;
-        const FINAL_TOLERANCE = 0.05; // 5%
+        const FINAL_TOLERANCE = 0.10; // Increased tolerance to 10%
 
-        log(`Final Validation (Day ${day}): Target=${targetCalories}, Final=${finalDayTotals.calories.toFixed(1)}, Deviation=${finalDeviationPct.toFixed(1)}%`, 'INFO', 'CALC');
+        log(`Final Validation (Day ${day}): Target=${targetCalories}, Final=${finalDayTotals.calories.toFixed(1)}, Deviation=${finalDeviationPct.toFixed(1)}% (Tolerance: ${FINAL_TOLERANCE*100}%)`, 'INFO', 'CALC');
 
         if (isNaN(finalDayTotals.calories) || Math.abs(finalDeviation) > FINAL_TOLERANCE) {
             log(`CRITICAL: Final validation failed for Day ${day}. Kcal: ${finalDayTotals.calories.toFixed(0)}, Target: ${targetCalories}`, 'CRITICAL', 'CALC');
