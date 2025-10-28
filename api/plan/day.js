@@ -382,6 +382,92 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
+// --- START: MODIFICATION (Create new helper function) ---
+/**
+ * Tries to generate AND validate a plan from a single model.
+ * Throws an error if generation or validation fails, allowing fallback.
+ */
+async function tryGenerateWithModel(modelName, payload, log, day) {
+    log(`LLM Day ${day}: Attempting model: ${modelName}`, 'INFO', 'LLM');
+    const apiUrl = getGeminiApiUrl(modelName);
+    
+    // 1. Fetch (with retries for network/5xx errors)
+    const response = await fetchLLMWithRetry(
+        apiUrl,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+            body: JSON.stringify(payload)
+        },
+        log
+    );
+
+    // 2. Parse response body
+    const result = await response.json();
+
+    // 3. Validate candidate and finishReason
+    const candidate = result.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+
+    if (finishReason === 'MAX_TOKENS') {
+        log(`LLM Day ${day}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
+        throw new Error(`Model ${modelName} failed: MAX_TOKENS.`); // This error will be caught and trigger the fallback
+    }
+
+    if (finishReason !== 'STOP') {
+         log(`LLM Day ${day}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
+         throw new Error(`Model ${modelName} failed: Non-STOP finishReason (${finishReason}).`);
+    }
+
+    // 4. Validate content
+    const content = candidate?.content;
+    if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
+        log(`LLM Day ${day}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
+        throw new Error(`Model ${modelName} failed: Response missing content.`);
+    }
+
+    // 5. Validate JSON parsing
+    const jsonText = content.parts[0].text;
+    log("LLM Raw JSON Text (Day " + day + ")", 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
+
+    try {
+        const parsed = JSON.parse(jsonText);
+        log("Parsed LLM JSON (Day " + day + ")", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, meals: parsed.meals?.length || 0 });
+
+        // --- Basic Validation ---
+        if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
+        if (!parsed.ingredients || !Array.isArray(parsed.ingredients)) throw new Error("'ingredients' missing or not an array.");
+        if (!parsed.meals || !Array.isArray(parsed.meals) || parsed.meals.length === 0) throw new Error("'meals' missing, empty, or not an array.");
+
+        // --- Detailed Validation (Essential Fields) ---
+         for(const meal of parsed.meals) {
+             if (!meal || !meal.type || !meal.name || !meal.description || !Array.isArray(meal.items)) throw new Error(`Meal invalid: Missing fields in ${meal?.name || 'Unnamed Meal'}.`);
+             for(const item of meal.items) {
+                 if (!item || !item.key || typeof item.qty !== 'number' || !item.unit) throw new Error(`Meal item invalid in ${meal.name}: Missing key, qty, or unit.`);
+             }
+         }
+         for(const ing of parsed.ingredients) {
+             // Check required fields, allow null for tightQuery/wideQuery
+             if (!ing || !ing.originalIngredient || !ing.normalQuery || !Array.isArray(ing.requiredWords) || !Array.isArray(ing.negativeKeywords) || !Array.isArray(ing.allowedCategories) || ing.allowedCategories.length === 0 || typeof ing.totalGramsRequired !== 'number' || !ing.quantityUnits) {
+                   log(`Validation Error: Ingredient "${ing?.originalIngredient || 'unknown'}" missing required fields or invalid types.`, 'WARN', 'LLM', ing);
+                   throw new Error(`Ingredient validation failed (required fields): "${ing?.originalIngredient || 'unknown'}"`);
+             }
+             // Check optional fields are either string or null
+             if (ing.tightQuery !== null && typeof ing.tightQuery !== 'string') throw new Error(`Ingredient validation failed (tightQuery type): "${ing?.originalIngredient || 'unknown'}"`);
+             if (ing.wideQuery !== null && typeof ing.wideQuery !== 'string') throw new Error(`Ingredient validation failed (wideQuery type): "${ing?.originalIngredient || 'unknown'}"`);
+         }
+
+        log(`LLM Day ${day}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
+        return parsed; // Return the fully parsed and validated data
+
+    } catch (parseError) {
+        log(`Failed to parse/validate LLM JSON for Day ${day} from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
+        throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
+    }
+}
+// --- END: MODIFICATION ---
+
+
 async function generateLLMDayPlan(day, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets; // Use pre-calculated targets
@@ -407,7 +493,7 @@ async function generateLLMDayPlan(day, formData, nutritionalTargets, log) {
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
-    // --- START MODIFICATION: Updated System Prompt ---
+    // --- System Prompt (Unchanged) ---
     const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. Generate plan for DAY ${day}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) 'description' MUST BE BRIEF keyword summary (e.g., "Chicken, rice, broccoli"). NO full sentences or cooking instructions. b) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). c) The sum of estimated calories from ALL 'items' across ALL meals for Day ${day} MUST be within 5% of the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) precisely. **SELF-CORRECT: Sum calories before output. Revise if >5% deviation from ${calories} kcal.** d) No single meal's 'items' should sum > **${mealMax} kcal**.
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
@@ -417,8 +503,7 @@ JSON Structure:
   "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
 }
 `;
-    // --- END MODIFICATION ---
-
+    
     // --- Simplified User Query for a SINGLE DAY ---
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
@@ -442,113 +527,28 @@ JSON Structure:
         }
     };
 
-    // --- START: MODIFICATION (Add fallback model logic) ---
-    let response;
-    let modelUsed = PLAN_MODEL_NAME_PRIMARY;
-
+    // --- START: MODIFICATION (Use the new helper with fallback) ---
+    let parsedResult;
     try {
-        log(`LLM Day ${day}: Attempting PRIMARY model: ${PLAN_MODEL_NAME_PRIMARY}`, 'INFO', 'LLM');
-        const primaryUrl = getGeminiApiUrl(PLAN_MODEL_NAME_PRIMARY); // Get URL for primary
-        response = await fetchLLMWithRetry(
-            primaryUrl,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
-                body: JSON.stringify(payload)
-            },
-            log
-        );
-        log(`LLM Day ${day}: Model ${modelUsed} succeeded.`, 'SUCCESS', 'LLM');
-
+        // Try Primary Model
+        parsedResult = await tryGenerateWithModel(PLAN_MODEL_NAME_PRIMARY, payload, log, day);
     } catch (primaryError) {
-        log(`LLM Day ${day}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed after retries: ${primaryError.message}`, 'CRITICAL', 'LLM');
-        log(`LLM Day ${day}: Attempting FALLBACK model: ${PLAN_MODEL_NAME_FALLBACK}`, 'WARN', 'LLM');
-        
-        modelUsed = PLAN_MODEL_NAME_FALLBACK; // Update model name for logging
-        
-        // NOTE: gemini-1.5-flash supports all the same payload features (systemInstruction, responseMimeType)
-        // so the same payload can be re-used.
+        log(`LLM Day ${day}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM');
 
         try {
-            const fallbackUrl = getGeminiApiUrl(PLAN_MODEL_NAME_FALLBACK); // Get URL for fallback
-            response = await fetchLLMWithRetry(
-                fallbackUrl, // Use fallback URL
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
-                    body: JSON.stringify(payload)
-                },
-                log
-            );
-            log(`LLM Day ${day}: FALLBACK Model ${modelUsed} succeeded.`, 'SUCCESS', 'LLM');
-        
+            // Try Fallback Model
+            // Note: The payload is identical and compatible with 1.5-flash
+            parsedResult = await tryGenerateWithModel(PLAN_MODEL_NAME_FALLBACK, payload, log, day);
         } catch (fallbackError) {
-            log(`LLM Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}`, 'CRITICAL', 'LLM');
-            // Throw a new, clearer error
-            throw new Error(`Plan generation failed for Day ${day}: Both primary (${PLAN_MODEL_NAME_PRIMARY}) and fallback (${PLAN_MODEL_NAME_FALLBACK}) AI models failed to respond. Last error: ${fallbackError.message}`);
+            log(`LLM Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
+            // Throw a new, clearer error that summarizes the total failure
+            throw new Error(`Plan generation failed for Day ${day}: Both primary (${PLAN_MODEL_NAME_PRIMARY}) and fallback (${PLAN_MODEL_NAME_FALLBACK}) AI models failed to produce a valid plan. Last error: ${fallbackError.message}`);
         }
     }
+
+    // If we're here, parsedResult is valid JSON
+    return parsedResult;
     // --- END: MODIFICATION ---
-
-
-    // --- Now, process the response ---
-    try {
-        const result = await response.json(); // Response should be JSON directly
-
-        // --- Validate the direct JSON response ---
-        const content = result.candidates?.[0]?.content;
-        if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
-             const finishReason = result.candidates?.[0]?.finishReason;
-             if (finishReason === 'MAX_TOKENS') {
-                 log(`LLM response missing content and finishReason was MAX_TOKENS.`, 'CRITICAL', 'LLM', result);
-                 throw new Error("LLM response structure invalid: MAX_TOKENS reached before content could be generated.");
-             }
-             log("LLM response missing content or text part.", 'CRITICAL', 'LLM', result);
-             throw new Error("LLM response structure invalid or empty.");
-        }
-
-        const jsonText = content.parts[0].text;
-        log("LLM Raw JSON Text (Day " + day + ")", 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
-
-        try {
-            const parsed = JSON.parse(jsonText); // Parse the text part
-            log("Parsed LLM JSON (Day " + day + ")", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, meals: parsed.meals?.length || 0 });
-
-            // --- Basic Validation ---
-            if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
-            if (!parsed.ingredients || !Array.isArray(parsed.ingredients)) throw new Error("'ingredients' missing or not an array.");
-            if (!parsed.meals || !Array.isArray(parsed.meals) || parsed.meals.length === 0) throw new Error("'meals' missing, empty, or not an array.");
-
-            // --- Detailed Validation (Essential Fields) ---
-             for(const meal of parsed.meals) {
-                 if (!meal || !meal.type || !meal.name || !meal.description || !Array.isArray(meal.items)) throw new Error(`Meal invalid: Missing fields in ${meal?.name || 'Unnamed Meal'}.`);
-                 for(const item of meal.items) {
-                     if (!item || !item.key || typeof item.qty !== 'number' || !item.unit) throw new Error(`Meal item invalid in ${meal.name}: Missing key, qty, or unit.`);
-                 }
-             }
-             for(const ing of parsed.ingredients) {
-                 // Check required fields, allow null for tightQuery/wideQuery
-                 if (!ing || !ing.originalIngredient || !ing.normalQuery || !Array.isArray(ing.requiredWords) || !Array.isArray(ing.negativeKeywords) || !Array.isArray(ing.allowedCategories) || ing.allowedCategories.length === 0 || typeof ing.totalGramsRequired !== 'number' || !ing.quantityUnits) {
-                       log(`Validation Error: Ingredient "${ing?.originalIngredient || 'unknown'}" missing required fields or invalid types.`, 'WARN', 'LLM', ing);
-                       throw new Error(`Ingredient validation failed (required fields): "${ing?.originalIngredient || 'unknown'}"`);
-                 }
-                 // Check optional fields are either string or null
-                 if (ing.tightQuery !== null && typeof ing.tightQuery !== 'string') throw new Error(`Ingredient validation failed (tightQuery type): "${ing?.originalIngredient || 'unknown'}"`);
-                 if (ing.wideQuery !== null && typeof ing.wideQuery !== 'string') throw new Error(`Ingredient validation failed (wideQuery type): "${ing?.originalIngredient || 'unknown'}"`);
-             }
-
-            return parsed; // Return the successfully parsed and validated JSON object
-
-        } catch (parseError) {
-            log(`Failed to parse/validate LLM JSON for Day ${day}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
-            throw new Error(`Plan generation failed for Day ${day}: Invalid JSON response from AI. ${parseError.message}`);
-        }
-
-    } catch (fetchOrParseError) {
-         log(`LLM call/parse failed definitively for Day ${day}: ${fetchOrParseError.message}`, 'CRITICAL', 'LLM');
-         // Throw a specific error indicating plan failure for this day
-         throw new Error(`Plan generation failed for Day ${day}: Could not get valid response from AI. ${fetchOrParseError.message}`);
-    }
 }
 
 
@@ -602,11 +602,13 @@ module.exports = async (request, response) => {
 
         // --- Phase 1: Generate Day Plan using LLM ---
         log("Phase 1: Generating Day Plan (LLM)...", 'INFO', 'PHASE');
+        // generateLLMDayPlan now handles its own retries/fallbacks and validation
         const llmResult = await generateLLMDayPlan(day, formData, nutritionalTargets, log);
         const { ingredients: rawDayIngredients = [], meals: dayMeals = [] } = llmResult;
 
         if (rawDayIngredients.length === 0 || dayMeals.length === 0) {
-            log("LLM generation failed: Empty ingredients or meals.", 'CRITICAL', 'LLM');
+            // This check might be redundant if tryGenerateWithModel validation is thorough, but good as a safeguard.
+            log("LLM generation failed: Empty ingredients or meals returned after validation.", 'CRITICAL', 'LLM');
             throw new Error(`Plan generation failed for Day ${day}: AI returned empty meals or ingredients.`);
         }
 
@@ -1127,4 +1129,5 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
 
