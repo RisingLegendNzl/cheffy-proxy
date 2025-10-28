@@ -17,7 +17,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // --- Using gemini-2.5-flash as the primary model, with 1.5-flash as fallback ---
 const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
-const PLAN_MODEL_NAME_FALLBACK = 'gemini-1.5-flash'; // Fallback model
+// --- MODIFICATION: Corrected the fallback model name ---
+const PLAN_MODEL_NAME_FALLBACK = 'gemini-1.5-flash-latest'; // Fallback model
 
 // --- MODIFIED: Create a function to get the URL ---
 const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
