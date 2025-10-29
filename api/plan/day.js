@@ -1,11 +1,15 @@
 // --- Cheffy API: /api/plan/day.js ---
-// Implements a "Two-Agent" AI system:
-// 1. "Dietitian" AI: Generates the macro-perfect meal plan and shopping list.
-// 2. "Chef" AI: Generates descriptions and cooking instructions for each meal.
+// [MODIFIED] Implements a "Four-Agent" AI system:
+// 1. "Meal Planner" AI: Generates the meal plan for the day. (Phase 1a)
+// 2. "Grocery Optimizer" AI: Generates search queries for ingredients. (Phase 1b)
+// 3. "Chef" AI: Generates recipes for each meal. (Phase 1.5, in parallel)
+// (Phase 2-5: Market Run, Nutrition, Reconciliation, Response)
 
 /// ===== IMPORTS-START ===== \\\\
 const fetch = require('node-fetch');
-const crypto = require('crypto'); // For run_id
+const crypto = require('crypto'); // For run_id and hashing
+// --- [NEW] Import Vercel KV client ---
+const { createClient } = require('@vercel/kv');
 // Import cache-wrapped microservices
 const { fetchPriceData } = require('../price-search.js'); // Relative path
 const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path
@@ -23,16 +27,24 @@ const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
 const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro'; // Fallback model
 
 // --- Create a function to get the URL ---
-const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+const getGeminiApiUrl = (modelName) => `https://generativelace.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
+// --- [NEW] Vercel KV Client ---
+const kv = createClient({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+const CACHE_PREFIX = 'cheffy:plan:v1';
+const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
 const BANNED_KEYWORDS = [
-    'cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 
-    'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 
-    'folder', 'stationery', 'lighter', 'shampoo', 'conditioner', 'soap', 'lotion', 
+    'cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy',
+    'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder',
+    'folder', 'stationery', 'lighter', 'shampoo', 'conditioner', 'soap', 'lotion',
     'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'
 ];
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Keep for market run optimization
@@ -59,6 +71,33 @@ const MOCK_RECIPE_FALLBACK = {
 
 
 /// ===== HELPERS-START ===== \\\\
+
+// --- [NEW] Cache Helpers ---
+async function cacheGet(key, log) {
+  if (!kvReady) return null;
+  try {
+    const hit = await kv.get(key);
+    if (hit) log(`Cache HIT for key: ${key.split(':').pop()}`, 'DEBUG', 'CACHE');
+    return hit;
+  } catch (e) {
+    log(`Cache GET Error: ${e.message}`, 'ERROR', 'CACHE');
+    return null;
+  }
+}
+async function cacheSet(key, val, ttl, log) {
+  if (!kvReady) return;
+  try {
+    await kv.set(key, val, { px: ttl });
+    log(`Cache SET for key: ${key.split(':').pop()}`, 'DEBUG', 'CACHE');
+  } catch (e) {
+    log(`Cache SET Error: ${e.message}`, 'ERROR', 'CACHE');
+  }
+}
+function hashString(str) {
+  return crypto.createHash('sha256').update(str).digest('hex').substring(0, 16);
+}
+// --- [NEW] End Cache Helpers ---
+
 
 // --- Logger (Copied and Simplified) ---
 function createLogger(run_id, day) {
@@ -397,35 +436,97 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
-// --- AGENT 1: "DIETITIAN" SYSTEM PROMPT ---
-// --- START: MODIFICATION (Pass 'day' as argument) ---
-const DIETITIAN_SYSTEM_PROMPT = (store, weight, calories, mealMax, australianTermNote, day) => `
-Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). b) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure. c) No single meal's 'items' should sum > **${mealMax} kcal**.
+// --- [NEW] AGENT 1a: "MEAL PLANNER" SYSTEM PROMPT ---
+const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
+You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
+RULES:
+1.  Generate meals ('meals') & items ('items') used TODAY.
+2.  **CRITICAL PROTEIN CAP: Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).** Aim for the protein target, but do not exceed this cap.
+3.  MEAL PORTIONS: For each meal in 'meals':
+    a) MUST populate 'items' array with 'key' (generic ingredient name), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg').
+    b) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure.
+    c) No single meal's 'items' should sum > **${mealMax} kcal**.
+4.  Adhere to all constraints.
+5.  'meals' array is MANDATORY (only for today).
+6.  Do NOT include an 'ingredients' array.
+
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
 JSON Structure:
 {
-  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] } ],
-  "meals": [ { "type": "string", "name": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
+  "meals": [
+    {
+      "type": "string",
+      "name": "string",
+      "items": [
+        { "key": "string", "qty": number, "unit": "string" }
+      ]
+    }
+  ]
 }
 `;
-// --- END: MODIFICATION ---
+// --- [NEW] END: MEAL PLANNER PROMPT ---
+
+
+// --- [NEW] AGENT 1b: "GROCERY OPTIMIZER" SYSTEM PROMPT ---
+const GROCERY_OPTIMIZER_SYSTEM_PROMPT = (store, australianTermNote) => `
+You are an expert grocery query optimizer for store: ${store}.
+Your SOLE task is to take a JSON array of ingredient names and generate the full query/validation JSON for each.
+RULES:
+1.  'originalIngredient' MUST match the input ingredient name exactly.
+2.  'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote}
+3.  'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient.
+4.  'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient.
+5.  'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names.
+6.  'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise.
+7.  'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes.
+8.  'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY. **Since you only have the ingredient list, estimate a common portion (e.g., 200g for a meal protein, 100g for carbs).** This is a rough estimate.
+9.  'quantityUnits' (REQUIRED): A string describing the common purchase unit (e.g., "1kg Bag", "250g Punnet", "500ml Bottle").
+10. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"].
+
+Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
+
+JSON Structure:
+{
+  "ingredients": [
+    {
+      "originalIngredient": "string",
+      "category": "string",
+      "tightQuery": "string|null",
+      "normalQuery": "string",
+      "wideQuery": "string|null",
+      "requiredWords": ["string"],
+      "negativeKeywords": ["string"],
+      "targetSize": { "value": number, "unit": "g"|"ml" }|null,
+      "totalGramsRequired": number,
+      "quantityUnits": "string",
+      "allowedCategories": ["string"]
+    }
+  ]
+}
+`;
+// --- [NEW] END: GROCERY OPTIMIZER PROMPT ---
 
 
 /**
- * Tries to generate AND validate a plan from a single model.
+ * [NEW] Generic, refactored function to try generating a plan from an LLM.
  * Throws an error if generation or validation fails, allowing fallback.
+ * @param {string} modelName - The name of the Gemini model.
+ * @param {object} payload - The full request payload for the API.
+ * @param {object} log - The logger instance.
+ * @param {string} logPrefix - A prefix for log messages (e.g., "MealPlannerDay1").
+ * @param {object} expectedJsonShape - A simple object to check for top-level keys (e.g., { "meals": [] }).
  */
-async function tryGenerateDietitianPlan(modelName, payload, log, day) {
-    log(`Dietitian AI Day ${day}: Attempting model: ${modelName}`, 'INFO', 'LLM');
+async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
+    log(`${logPrefix}: Attempting model: ${modelName}`, 'INFO', 'LLM');
     const apiUrl = getGeminiApiUrl(modelName);
-    
+
     // 1. Fetch (with retries for network/5xx errors)
     const response = await fetchLLMWithRetry(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
         body: JSON.stringify(payload)
-    }, log, `DietitianDay${day}`);
+    }, log, logPrefix);
 
     // 2. Parse response body
     const result = await response.json();
@@ -435,62 +536,55 @@ async function tryGenerateDietitianPlan(modelName, payload, log, day) {
     const finishReason = candidate?.finishReason;
 
     if (finishReason === 'MAX_TOKENS') {
-        log(`Dietitian AI Day ${day}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
+        log(`${logPrefix}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
         throw new Error(`Model ${modelName} failed: MAX_TOKENS.`);
     }
     if (finishReason !== 'STOP') {
-         log(`Dietitian AI Day ${day}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
+         log(`${logPrefix}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
          throw new Error(`Model ${modelName} failed: FinishReason was ${finishReason}.`);
     }
 
     // 4. Validate content
     const content = candidate?.content;
     if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
-        log(`Dietitian AI Day ${day}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
+        log(`${logPrefix}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
         throw new Error(`Model ${modelName} failed: Response missing content.`);
     }
 
     // 5. Validate JSON parsing
     const jsonText = content.parts[0].text;
-    log("Dietitian AI Raw JSON Text (Day " + day + ")", 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
+    log(`${logPrefix} Raw JSON Text`, 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
 
     try {
         const parsed = JSON.parse(jsonText);
-        log("Parsed Dietitian AI JSON (Day " + day + ")", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, meals: parsed.meals?.length || 0 });
 
         // --- Basic Validation ---
         if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
-        if (!parsed.ingredients || !Array.isArray(parsed.ingredients)) throw new Error("'ingredients' missing or not an array.");
-        if (!parsed.meals || !Array.isArray(parsed.meals) || parsed.meals.length === 0) throw new Error("'meals' missing, empty, or not an array.");
 
-        // --- Detailed Validation (Essential Fields) ---
-         for(const meal of parsed.meals) {
-             // 'description' is NO LONGER required from this AI
-             if (!meal || !meal.type || !meal.name || !Array.isArray(meal.items)) throw new Error(`Meal invalid: Missing fields in ${meal?.name || 'Unnamed Meal'}.`);
-             for(const item of meal.items) {
-                 if (!item || !item.key || typeof item.qty !== 'number' || !item.unit) throw new Error(`Meal item invalid in ${meal.name}: Missing key, qty, or unit.`);
-             }
-         }
-         for(const ing of parsed.ingredients) {
-             if (!ing || !ing.originalIngredient || !ing.normalQuery || !Array.isArray(ing.requiredWords) || !Array.isArray(ing.negativeKeywords) || !Array.isArray(ing.allowedCategories) || ing.allowedCategories.length === 0 || typeof ing.totalGramsRequired !== 'number' || !ing.quantityUnits) {
-                   log(`Validation Error: Ingredient "${ing?.originalIngredient || 'unknown'}" missing required fields or invalid types.`, 'WARN', 'LLM', ing);
-                   throw new Error(`Ingredient validation failed (required fields): "${ing?.originalIngredient || 'unknown'}"`);
-             }
-             if (ing.tightQuery !== null && typeof ing.tightQuery !== 'string') throw new Error(`Ingredient validation failed (tightQuery type): "${ing?.originalIngredient || 'unknown'}"`);
-             if (ing.wideQuery !== null && typeof ing.wideQuery !== 'string') throw new Error(`Ingredient validation failed (wideQuery type): "${ing?.originalIngredient || 'unknown'}"`);
-         }
+        // --- [NEW] Shape Validation ---
+        for (const key in expectedJsonShape) {
+            if (!parsed.hasOwnProperty(key)) {
+                throw new Error(`Parsed JSON missing required top-level key: '${key}'.`);
+            }
+            if (Array.isArray(expectedJsonShape[key]) && !Array.isArray(parsed[key])) {
+                throw new Error(`Parsed JSON key '${key}' was not an array.`);
+            }
+        }
 
-        log(`Dietitian AI Day ${day}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
+        log(`${logPrefix}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
         return parsed; // Return the fully parsed and validated data
 
     } catch (parseError) {
-        log(`Failed to parse/validate Dietitian AI JSON for Day ${day} from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
+        log(`Failed to parse/validate ${logPrefix} JSON from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
         throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
     }
 }
 
 
-async function generateDietitianPlan(day, formData, nutritionalTargets, log) {
+/**
+ * [NEW] Phase 1a: Generates only the meal plan.
+ */
+async function generateMealPlan(day, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets; // Use pre-calculated targets
 
@@ -502,56 +596,135 @@ async function generateDietitianPlan(day, formData, nutritionalTargets, log) {
         throw new Error("Invalid or missing 'nutritionalTargets' provided.");
     }
 
+    // --- [NEW] Caching ---
+    const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
+    const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
+    const cached = await cacheGet(cacheKey, log);
+    if (cached) return cached;
+    log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
+    // --- End Caching ---
+
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']};
     const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
-    const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus: ${cuisine}.` : 'Neutral.';
-    const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
-    const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion', 'capsicum')." : "";
 
     const numMeals = parseInt(eatingOccasions, 10) || 3;
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
-    // --- Get the specific system prompt for the Dietitian AI ---
-    // --- START: MODIFICATION (Pass 'day' correctly) ---
-    const systemPrompt = DIETITIAN_SYSTEM_PROMPT(store, weight, calories, mealMax, australianTermNote, day);
-    // --- END: MODIFICATION ---
-    
+    // --- [NEW] Use MEAL_PLANNER_SYSTEM_PROMPT ---
+    const systemPrompt = MEAL_PLANNER_SYSTEM_PROMPT(weight, calories, mealMax, day);
+
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
-    log(`Dietitian AI Prompt for Day ${day}`, 'INFO', 'LLM_PROMPT', {
+    const logPrefix = `MealPlannerDay${day}`;
+    log(`Meal Planner AI Prompt for Day ${day}`, 'INFO', 'LLM_PROMPT', {
         systemPromptStart: systemPrompt.substring(0, 200) + '...', // Log start only
         userQuery: userQuery,
         targets: nutritionalTargets,
-        sanitizedData: getSanitizedFormData(formData)
     });
 
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         generationConfig: {
-            temperature: 0.3, 
+            temperature: 0.3,
             topK: 32,
             topP: 0.9,
-            responseMimeType: "application/json", 
+            responseMimeType: "application/json",
+        }
+    };
+    
+    const expectedShape = { "meals": [] };
+
+    let parsedResult;
+    try {
+        parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix, expectedShape);
+    } catch (primaryError) {
+        log(`${logPrefix}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM');
+        try {
+            parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix, expectedShape);
+        } catch (fallbackError) {
+            log(`${logPrefix}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
+            throw new Error(`Meal Plan generation failed for Day ${day}: Both AI models failed. Last error: ${fallbackError.message}`);
+        }
+    }
+    
+    // --- [NEW] Cache on success ---
+    if (parsedResult && parsedResult.meals && parsedResult.meals.length > 0) {
+        await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
+    }
+    
+    return parsedResult;
+}
+
+
+/**
+ * [NEW] Phase 1b: Generates only the grocery query plan.
+ * @param {Array<string>} uniqueIngredientKeys - An array of unique ingredient names (e.g., ["Chicken Breast", "Broccoli"]).
+ * @param {string} store - The store name.
+ * @param {object} log - The logger instance.
+ */
+async function generateGroceryQueries(uniqueIngredientKeys, store, log) {
+    if (!uniqueIngredientKeys || uniqueIngredientKeys.length === 0) {
+        log("generateGroceryQueries called with no ingredients. Returning empty.", 'WARN', 'LLM');
+        return { ingredients: [] };
+    }
+
+    // --- [NEW] Caching ---
+    const keysHash = hashString(JSON.stringify(uniqueIngredientKeys));
+    const cacheKey = `${CACHE_PREFIX}:queries:${store}:${keysHash}`;
+    const cached = await cacheGet(cacheKey, log);
+    if (cached) return cached;
+    log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
+    // --- End Caching ---
+    
+    const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
+    const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion', 'capsicum')." : "";
+
+    // --- [NEW] Use GROCERY_OPTIMIZER_SYSTEM_PROMPT ---
+    const systemPrompt = GROCERY_OPTIMIZER_SYSTEM_PROMPT(store, australianTermNote);
+
+    // The user query is just the list of ingredients
+    let userQuery = `Generate query JSON for the following ingredients:\n${JSON.stringify(uniqueIngredientKeys)}`;
+
+    const logPrefix = `GroceryOptimizerDay`; // Generic prefix, as it's not day-specific
+    log(`Grocery Optimizer AI Prompt`, 'INFO', 'LLM_PROMPT', {
+        systemPromptStart: systemPrompt.substring(0, 200) + '...', // Log start only
+        userQuery: userQuery,
+    });
+
+    const payload = {
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+            temperature: 0.1, // Low temp for technical, precise output
+            topK: 32,
+            topP: 0.9,
+            responseMimeType: "application/json",
         }
     };
 
-    // --- Use the helper with fallback (Logic unchanged here) ---
+    const expectedShape = { "ingredients": [] };
+
     let parsedResult;
     try {
-        parsedResult = await tryGenerateDietitianPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, day);
+        parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix, expectedShape);
     } catch (primaryError) {
-        log(`Dietitian AI Day ${day}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM');
-
+        log(`${logPrefix}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM');
         try {
-            parsedResult = await tryGenerateDietitianPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, day);
+            parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix, expectedShape);
         } catch (fallbackError) {
-            log(`Dietitian AI Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
-            throw new Error(`Plan generation failed for Day ${day}: Both primary (${PLAN_MODEL_NAME_PRIMARY}) and fallback (${PLAN_MODEL_NAME_FALLBACK}) AI models failed to produce a valid plan. Last error: ${fallbackError.message}`);
+            log(`${logPrefix}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
+            throw new Error(`Grocery Query generation failed: Both AI models failed. Last error: ${fallbackError.message}`);
         }
     }
+
+    // --- [NEW] Cache on success ---
+    if (parsedResult && parsedResult.ingredients && parsedResult.ingredients.length > 0) {
+        await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
+    }
+    
     return parsedResult;
 }
 
@@ -633,6 +806,14 @@ async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
 async function generateChefInstructions(meal, store, log) {
     const mealName = meal.name || 'Unnamed Meal';
     try {
+        // --- [NEW] Caching for Chef AI ---
+        const mealHash = hashString(JSON.stringify(meal.items || []));
+        const cacheKey = `${CACHE_PREFIX}:recipe:${mealHash}`;
+        const cached = await cacheGet(cacheKey, log);
+        if (cached) return cached;
+        log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
+        // --- End Caching ---
+
         const systemPrompt = CHEF_SYSTEM_PROMPT(store);
 
         // Format ingredients for the query
@@ -655,22 +836,53 @@ async function generateChefInstructions(meal, store, log) {
             }
         };
 
+        let recipeResult;
         // --- Try Primary, then Fallback ---
         try {
-            return await tryGenerateChefRecipe(PLAN_MODEL_NAME_PRIMARY, payload, mealName, log);
+            recipeResult = await tryGenerateChefRecipe(PLAN_MODEL_NAME_PRIMARY, payload, mealName, log);
         } catch (primaryError) {
             log(`Chef AI [${mealName}]: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM_CHEF');
             try {
-                return await tryGenerateChefRecipe(PLAN_MODEL_NAME_FALLBACK, payload, mealName, log);
+                recipeResult = await tryGenerateChefRecipe(PLAN_MODEL_NAME_FALLBACK, payload, mealName, log);
             } catch (fallbackError) {
                 log(`Chef AI [${mealName}]: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM_CHEF');
                 throw new Error(`Recipe generation failed for [${mealName}]: Both AI models failed. Last error: ${fallbackError.message}`);
             }
         }
+        
+        // --- [NEW] Cache recipe on success ---
+        if (recipeResult && recipeResult.description) {
+            await cacheSet(cacheKey, recipeResult, TTL_PLAN_MS, log);
+        }
+        
+        return recipeResult;
+
     } catch (error) {
         log(`CRITICAL Error in generateChefInstructions for [${mealName}]: ${error.message}`, 'CRITICAL', 'LLM_CHEF');
         return MOCK_RECIPE_FALLBACK; // Return fallback on unhandled error
     }
+}
+
+
+/**
+ * [NEW] Extracts unique ingredient keys from a list of meals.
+ * @param {Array<object>} meals - The array of meal objects.
+ * @returns {Array<string>} - A sorted array of unique ingredient keys.
+ */
+function extractUniqueIngredientKeys(meals) {
+    const keys = new Set();
+    if (Array.isArray(meals)) {
+        for (const meal of meals) {
+            if (meal && Array.isArray(meal.items)) {
+                for (const item of meal.items) {
+                    if (item && item.key) {
+                        keys.add(item.key);
+                    }
+                }
+            }
+        }
+    }
+    return Array.from(keys).sort(); // Sort for consistent hashing
 }
 
 
@@ -722,32 +934,47 @@ module.exports = async (request, response) => {
         if (!store) throw new Error("'store' missing in formData.");
 
 
-        // --- Phase 1: Generate Day Plan (DIETITIAN AI) ---
-        log("Phase 1: Generating Day Plan (Dietitian AI)...", 'INFO', 'PHASE');
-        const llmResult = await generateDietitianPlan(day, formData, nutritionalTargets, log);
-        const { ingredients: rawDayIngredients = [], meals: dayMeals = [] } = llmResult; // 'dayMeals' now lacks descriptions
+        // --- [NEW] Phase 1a: Generate Day Plan (MEAL PLANNER AI) ---
+        log("Phase 1: Generating Day Plan (Meal Planner AI)...", 'INFO', 'PHASE');
+        const mealPlanResult = await generateMealPlan(day, formData, nutritionalTargets, log);
+        const { meals: dayMeals = [] } = mealPlanResult;
 
-        if (rawDayIngredients.length === 0 || dayMeals.length === 0) {
-            log("Dietitian AI failed: Empty ingredients or meals returned after validation.", 'CRITICAL', 'LLM');
-            throw new Error(`Plan generation failed for Day ${day}: Dietitian AI returned empty meals or ingredients.`);
+        if (dayMeals.length === 0) {
+            log("Meal Planner AI failed: Empty meals returned after validation.", 'CRITICAL', 'LLM');
+            throw new Error(`Plan generation failed for Day ${day}: Meal Planner AI returned empty meals.`);
         }
-        log(`Dietitian AI success for Day ${day}: ${rawDayIngredients.length} ingredients, ${dayMeals.length} meals.`, 'SUCCESS', 'PHASE');
+        log(`Meal Planner AI success for Day ${day}: ${dayMeals.length} meals.`, 'SUCCESS', 'PHASE');
 
         
-        // --- Phase 1.5: Generate Recipes (CHEF AI) ---
-        log("Phase 1.5: Generating Recipes (Chef AI)...", 'INFO', 'PHASE');
+        // --- [NEW] Phase 1.5: Generate Recipes (CHEF) and Queries (GROCERY) in parallel ---
+        log("Phase 1.5: Generating Recipes (Chef) and Queries (Grocery) in parallel...", 'INFO', 'PHASE');
         
-        // Create an array of promises, one for each meal
-        const mealPromises = dayMeals.map(meal => 
-            generateChefInstructions(meal, store, log)
+        // 1. Extract keys needed for Grocery Optimizer
+        const mealKeys = extractUniqueIngredientKeys(dayMeals);
+
+        // 2. Start Chef AI calls
+        const recipePromise = Promise.allSettled(
+            dayMeals.map(meal => generateChefInstructions(meal, store, log))
         );
+        
+        // 3. Start Grocery Optimizer AI call
+        const groceryPromise = generateGroceryQueries(mealKeys, store, log);
 
-        // Run all "Chef AI" calls in parallel
-        const settledResults = await Promise.allSettled(mealPromises);
+        // 4. Await both parallel tasks
+        const [recipeSettledResults, groceryResult] = await Promise.all([recipePromise, groceryPromise]);
 
-        // Merge recipes back into the meal plan
+        // --- Process Grocery Optimizer Results ---
+        const { ingredients: rawDayIngredients = [] } = groceryResult;
+        if (rawDayIngredients.length === 0) {
+             log("Grocery Optimizer AI failed: Empty ingredients returned.", 'CRITICAL', 'LLM');
+             throw new Error(`Plan generation failed for Day ${day}: Grocery Optimizer AI returned empty ingredients.`);
+        }
+        log(`Grocery Optimizer AI success: ${rawDayIngredients.length} ingredients.`, 'SUCCESS', 'PHASE');
+
+
+        // --- Process Chef AI Results (Merge recipes back into the meal plan) ---
         const finalDayMeals = dayMeals.map((meal, index) => {
-            const result = settledResults[index];
+            const result = recipeSettledResults[index];
             if (result.status === 'fulfilled' && result.value) {
                 // Success: Merge the description and instructions
                 return { ...meal, ...result.value }; // result.value is { description, instructions }
@@ -757,8 +984,9 @@ module.exports = async (request, response) => {
                 return { ...meal, ...MOCK_RECIPE_FALLBACK };
             }
         });
-
         log(`Chef AI complete for Day ${day}.`, 'SUCCESS', 'PHASE');
+        // --- [NEW] END: Phase 1/1.5 ---
+
 
         // --- Normalize Ingredient Keys ---
         const dayIngredientsPlan = rawDayIngredients.map(ing => ({
