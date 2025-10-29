@@ -44,14 +44,16 @@ async function cacheSet(key, val, ttl) {
 }
 
 // ---------- Utilities ----------
-const normalizeKey = (s = '') => s.toString().toLowerCase().trim().replace(/\s+/g, '_');
+// --- START: MODIFICATION (Updated normalizeKey to remove special chars) ---
+const normalizeKey = (s = '') => s.toString().toLowerCase().trim().replace(/[\s()]+/g, '_').replace(/_+$/, ''); // remove trailing underscore
+// --- END: MODIFICATION ---
 const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
 function withTimeout(promise, ms) { return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); }
 function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
 
 // ---------- Canonical (last-resort, per 100 g) ----------
-// --- START: MODIFICATION (Added failed items) ---
+// --- START: MODIFICATION (Fixed invalid key) ---
 const CANON = {
   banana_fresh:               { calories: 89,  protein: 1.1,  fat: 0.3,  carbs: 22.8 },
   broccoli_fresh:             { calories: 34,  protein: 2.8,  fat: 0.4,  carbs: 7.0  },
@@ -64,14 +66,14 @@ const CANON = {
   bread_white:                { calories: 265, protein: 9,    fat: 3.2, carbs: 49   },
   // --- ADDITIONS from log review ---
   chia_seeds:                 { calories: 486, protein: 17,   fat: 31,  carbs: 42   },
-  wholemeal_wrap:             { calories: 300, protein: 9.5,  fat: 5.5, carbs: 50   }, // Note: 'wrap' is also a banned keyword, must fix
+  wholemeal_wrap:             { calories: 300, protein: 9.5,  fat: 5.5, carbs: 50   },
   light_mayonnaise:           { calories: 260, protein: 0.5,  fat: 25,  carbs: 8    },
   salmon_fillet:              { calories: 208, protein: 20,   fat: 13,  carbs: 0    },
   lettuce:                    { calories: 15,  protein: 1.4,  fat: 0.2, carbs: 2.9  },
   oats:                       { calories: 389, protein: 16.9, fat: 6.9,  carbs: 66.3 }, // Alias for rolled_oats_dry
   whey_protein_isolate:       { calories: 370, protein: 85,   fat: 1,   carbs: 5    },
   skim_milk:                  { calories: 35,  protein: 3.4,  fat: 0.1, carbs: 5    },
-  mixed_berries_(frozen):     { calories: 50,  protein: 0.8,  fat: 0.2, carbs: 12   },
+  mixed_berries_frozen:       { calories: 50,  protein: 0.8,  fat: 0.2, carbs: 12   }, // <-- FIXED KEY
   chicken_breast:             { calories: 165, protein: 31,   fat: 3.6, carbs: 0    },
   tomato:                     { calories: 18,  protein: 0.9,  fat: 0.2, carbs: 3.9  },
   cucumber:                   { calories: 15,  protein: 0.7,  fat: 0.1, carbs: 3.6  },
@@ -205,7 +207,7 @@ async function offByQuery(q) {
     const items = json?.products || [];
     for (const p of items) {
       const nutr = p.nutriments || {};
-      const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
+      const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_1D.1:200g'] / KJ_TO_KCAL : null);
       const out = {
         status: 'found', source: 'openfoodfacts', servingUnit: '100g', usda_link: null,
         calories: toNumber(kcal),
@@ -325,4 +327,5 @@ module.exports = async (req, res) => {
 
 module.exports.fetchNutritionData = fetchNutritionData;
 /// ========= NUTRITION-SEARCH-END ========= \\\\
+
 
