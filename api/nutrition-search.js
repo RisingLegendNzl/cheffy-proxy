@@ -51,6 +51,7 @@ function withTimeout(promise, ms) { return Promise.race([promise, new Promise((_
 function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
 
 // ---------- Canonical (last-resort, per 100 g) ----------
+// --- START: MODIFICATION (Added failed items) ---
 const CANON = {
   banana_fresh:               { calories: 89,  protein: 1.1,  fat: 0.3,  carbs: 22.8 },
   broccoli_fresh:             { calories: 34,  protein: 2.8,  fat: 0.4,  carbs: 7.0  },
@@ -60,14 +61,34 @@ const CANON = {
   olive_oil:                  { calories: 884, protein: 0,    fat: 100, carbs: 0    },
   lean_beef_mince_5_star:     { calories: 137, protein: 21,   fat: 5,   carbs: 0    },
   canned_tuna_in_water:       { calories: 110, protein: 25,   fat: 1.0, carbs: 0    },
-  bread_white:                { calories: 265, protein: 9,    fat: 3.2, carbs: 49   }
+  bread_white:                { calories: 265, protein: 9,    fat: 3.2, carbs: 49   },
+  // --- ADDITIONS from log review ---
+  chia_seeds:                 { calories: 486, protein: 17,   fat: 31,  carbs: 42   },
+  wholemeal_wrap:             { calories: 300, protein: 9.5,  fat: 5.5, carbs: 50   }, // Note: 'wrap' is also a banned keyword, must fix
+  light_mayonnaise:           { calories: 260, protein: 0.5,  fat: 25,  carbs: 8    },
+  salmon_fillet:              { calories: 208, protein: 20,   fat: 13,  carbs: 0    },
+  lettuce:                    { calories: 15,  protein: 1.4,  fat: 0.2, carbs: 2.9  },
+  oats:                       { calories: 389, protein: 16.9, fat: 6.9,  carbs: 66.3 }, // Alias for rolled_oats_dry
+  whey_protein_isolate:       { calories: 370, protein: 85,   fat: 1,   carbs: 5    },
+  skim_milk:                  { calories: 35,  protein: 3.4,  fat: 0.1, carbs: 5    },
+  mixed_berries_(frozen):     { calories: 50,  protein: 0.8,  fat: 0.2, carbs: 12   },
+  chicken_breast:             { calories: 165, protein: 31,   fat: 3.6, carbs: 0    },
+  tomato:                     { calories: 18,  protein: 0.9,  fat: 0.2, carbs: 3.9  },
+  cucumber:                   { calories: 15,  protein: 0.7,  fat: 0.1, carbs: 3.6  },
+  carrot:                     { calories: 41,  protein: 0.9,  fat: 0.2, carbs: 10   },
+  sweet_potato:               { calories: 86,  protein: 1.6,  fat: 0.1, carbs: 20   },
+  green_beans:                { calories: 31,  protein: 1.8,  fat: 0.1, carbs: 7    },
+  lemon:                      { calories: 29,  protein: 1.1,  fat: 0.3, carbs: 9    }
 };
+// --- END: MODIFICATION ---
+
 function canonical(query) {
   if (!query) return null;
   const k = normalizeKey(query);
   const c = CANON[k];
   if (!c) return null;
-  return { status: 'found', source: 'canonical', servingUnit: '100g', usda_link: null, ...c };
+  // --- MODIFICATION: Add internal source name ---
+  return { status: 'found', source: 'nutrition-search-internal', servingUnit: '100g', usda_link: null, ...c };
 }
 
 // ---------- USDA link helpers ----------
@@ -304,3 +325,4 @@ module.exports = async (req, res) => {
 
 module.exports.fetchNutritionData = fetchNutritionData;
 /// ========= NUTRITION-SEARCH-END ========= \\\\
+
