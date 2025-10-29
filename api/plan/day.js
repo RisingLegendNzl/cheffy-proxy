@@ -27,7 +27,14 @@ const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.co
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
-const BANNED_KEYWORDS = ['cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 'folder', 'stationery', 'lighter', 'gift', 'bag', 'wrap', 'battery', 'filter', 'paper', 'tip', 'shampoo', 'conditioner', 'soap', 'lotion', 'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'];
+// --- START: MODIFICATION (Removed problematic keywords) ---
+const BANNED_KEYWORDS = [
+    'cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 
+    'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 
+    'folder', 'stationery', 'lighter', 'shampoo', 'conditioner', 'soap', 'lotion', 
+    'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'
+];
+// --- END: MODIFICATION (Removed 'wrap', 'gift', 'bag', 'filter', 'paper', 'tip') ---
 // const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // (Keep if needed for future scoring logic)
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Keep for market run optimization
 const PRICE_OUTLIER_Z_SCORE = 2.0; // Keep for market run guardrail
@@ -834,7 +841,7 @@ module.exports = async (request, response) => {
              const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
              if (!hasNutri && (result.source === 'failed' || result.source === 'error')) {
                  const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log); // Use imported func
-                 if (canonicalNutrition?.status === 'found' && canonicalNutrition.source?.startsWith('canonical')) {
+                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source?.startsWith('canonical') || canonicalNutrition.source === 'nutrition-search-internal')) { // --- MODIFICATION: Allow internal canonical ---
                      log(`[${result.originalIngredient}] Using CANONICAL fallback (Day ${day}).`, 'DEBUG', 'CALC');
                      nutritionDataMap.set(normalizedKey, canonicalNutrition);
                      canonicalHitsToday++;
@@ -859,10 +866,16 @@ module.exports = async (request, response) => {
              const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
 
              // Quantity Sanity Check (Crucial Guardrail)
-             if (!Number.isFinite(gramsOrMl) || gramsOrMl <= 0 || gramsOrMl > 5000) { // Increased upper limit slightly
+             if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0 || gramsOrMl > 5000) { // --- MODIFICATION: Allow 0 temporarily ---
                  log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${item.key}' (Day ${day}).`, 'CRITICAL', 'CALC', { item, gramsOrMl });
                  throw new Error(`Plan generation failed for Day ${day}: Invalid quantity (${item.qty} ${item.unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${item.key}"`);
              }
+              // --- MODIFICATION: Handle 0 quantity explicitly ---
+             if (gramsOrMl === 0) {
+                 // This can happen post-reconciliation if an item is removed. Return 0 for all macros.
+                 return { p: 0, f: 0, c: 0, kcal: 0, key: item.key, densityHeuristicUsed: false };
+             }
+
 
              const nutritionData = nutritionDataMap.get(normalizedKey);
              let grams = gramsOrMl;
@@ -1126,5 +1139,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
