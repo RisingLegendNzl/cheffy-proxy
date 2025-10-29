@@ -1,5 +1,7 @@
 // --- Cheffy API: /api/plan/day.js ---
-// Generates the meal plan, ingredient list, and product results for a SINGLE day.
+// Implements a "Two-Agent" AI system:
+// 1. "Dietitian" AI: Generates the macro-perfect meal plan and shopping list.
+// 2. "Chef" AI: Generates descriptions and cooking instructions for each meal.
 
 /// ===== IMPORTS-START ===== \\\\
 const fetch = require('node-fetch');
@@ -27,15 +29,12 @@ const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.co
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
-// --- START: MODIFICATION (Removed problematic keywords) ---
 const BANNED_KEYWORDS = [
     'cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy', 
     'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder', 
     'folder', 'stationery', 'lighter', 'shampoo', 'conditioner', 'soap', 'lotion', 
     'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'
 ];
-// --- END: MODIFICATION (Removed 'wrap', 'gift', 'bag', 'filter', 'paper', 'tip') ---
-// const REQUIRED_WORD_SCORE_THRESHOLD = 0.60; // (Keep if needed for future scoring logic)
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0; // Keep for market run optimization
 const PRICE_OUTLIER_Z_SCORE = 2.0; // Keep for market run guardrail
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
@@ -52,6 +51,10 @@ const DENSITY_MAP = {
 
 /// ===== MOCK-START ===== \\\\
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (Not Found)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
+const MOCK_RECIPE_FALLBACK = {
+    description: "Meal description could not be generated.",
+    instructions: ["Cooking instructions could not be generated for this meal. Please rely on standard cooking methods for the ingredients listed."]
+};
 /// ===== MOCK-END ===== ////
 
 
@@ -130,16 +133,15 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 }
 
 // --- fetchWithRetry specifically for LLM calls (Adjusted Timeout) ---
-async function fetchLLMWithRetry(url, options, log) {
-    // Shorter timeout per attempt now that it's a smaller request
-    const LLM_REQUEST_TIMEOUT_MS = 75000; // 75 seconds, reduced from 90
+async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
+    const LLM_REQUEST_TIMEOUT_MS = 75000; // 75 seconds
 
     for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
 
         try {
-            log(`LLM Attempt ${attempt}: Fetching from ${url} (Timeout: ${LLM_REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
+            log(`${attemptPrefix} Attempt ${attempt}: Fetching from ${url} (Timeout: ${LLM_REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
             const response = await fetch(url, { ...options, signal: controller.signal });
             clearTimeout(timeout);
 
@@ -147,18 +149,18 @@ async function fetchLLMWithRetry(url, options, log) {
 
             // Handle specific status codes
             if (response.status === 429 || response.status >= 500) {
-                log(`LLM Attempt ${attempt}: Received retryable error ${response.status}. Retrying...`, 'WARN', 'HTTP');
+                log(`${attemptPrefix} Attempt ${attempt}: Received retryable error ${response.status}. Retrying...`, 'WARN', 'HTTP');
             } else {
                 const errorBody = await response.text();
-                log(`LLM Attempt ${attempt}: Non-retryable error ${response.status}.`, 'CRITICAL', 'HTTP', { body: errorBody });
-                throw new Error(`LLM call failed with status ${response.status}. Body: ${errorBody}`);
+                log(`${attemptPrefix} Attempt ${attempt}: Non-retryable error ${response.status}.`, 'CRITICAL', 'HTTP', { body: errorBody });
+                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody}`);
             }
         } catch (error) {
              clearTimeout(timeout);
              if (error.name === 'AbortError') {
-                 log(`LLM Attempt ${attempt}: Fetch timed out after ${LLM_REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
-             } else if (!error.message?.startsWith('LLM call failed with status')) {
-                log(`LLM Attempt ${attempt}: Fetch failed: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+                 log(`${attemptPrefix} Attempt ${attempt}: Fetch timed out after ${LLM_REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
+             } else if (!error.message?.startsWith(`${attemptPrefix} call failed with status`)) {
+                log(`${attemptPrefix} Attempt ${attempt}: Fetch failed: ${error.message}. Retrying...`, 'WARN', 'HTTP');
              } else {
                  throw error; // Rethrow non-retryable or final attempt errors
              }
@@ -167,12 +169,12 @@ async function fetchLLMWithRetry(url, options, log) {
         if (attempt < MAX_LLM_RETRIES) {
             // Exponential backoff with jitter
             const delayTime = Math.pow(2, attempt -1) * 3000 + Math.random() * 1000;
-            log(`Waiting ${delayTime.toFixed(0)}ms before LLM retry...`, 'DEBUG', 'HTTP');
+            log(`Waiting ${delayTime.toFixed(0)}ms before ${attemptPrefix} retry...`, 'DEBUG', 'HTTP');
             await delay(delayTime);
         }
     }
-    log(`LLM call failed definitively after ${MAX_LLM_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
-    throw new Error(`LLM call to ${url} failed after ${MAX_LLM_RETRIES} attempts.`);
+    log(`${attemptPrefix} call failed definitively after ${MAX_LLM_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
+    throw new Error(`${attemptPrefix} call to ${url} failed after ${MAX_LLM_RETRIES} attempts.`);
 }
 
 
@@ -388,24 +390,33 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
+// --- AGENT 1: "DIETITIAN" SYSTEM PROMPT ---
+const DIETITIAN_SYSTEM_PROMPT = (store, weight, calories, mealMax, australianTermNote) => `
+Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). b) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure. c) No single meal's 'items' should sum > **${mealMax} kcal**.
+Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
+
+JSON Structure:
+{
+  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] } ],
+  "meals": [ { "type": "string", "name": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
+}
+`;
+
+
 /**
  * Tries to generate AND validate a plan from a single model.
  * Throws an error if generation or validation fails, allowing fallback.
  */
-async function tryGenerateWithModel(modelName, payload, log, day) {
-    log(`LLM Day ${day}: Attempting model: ${modelName}`, 'INFO', 'LLM');
+async function tryGenerateDietitianPlan(modelName, payload, log, day) {
+    log(`Dietitian AI Day ${day}: Attempting model: ${modelName}`, 'INFO', 'LLM');
     const apiUrl = getGeminiApiUrl(modelName);
     
     // 1. Fetch (with retries for network/5xx errors)
-    const response = await fetchLLMWithRetry(
-        apiUrl,
-        {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
-            body: JSON.stringify(payload)
-        },
-        log
-    );
+    const response = await fetchLLMWithRetry(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify(payload)
+    }, log, `DietitianDay${day}`);
 
     // 2. Parse response body
     const result = await response.json();
@@ -414,33 +425,29 @@ async function tryGenerateWithModel(modelName, payload, log, day) {
     const candidate = result.candidates?.[0];
     const finishReason = candidate?.finishReason;
 
-    // --- Check for SAFETY or OTHER non-STOP reasons as well ---
     if (finishReason === 'MAX_TOKENS') {
-        log(`LLM Day ${day}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
-        throw new Error(`Model ${modelName} failed: MAX_TOKENS.`); // This error will be caught and trigger the fallback
+        log(`Dietitian AI Day ${day}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
+        throw new Error(`Model ${modelName} failed: MAX_TOKENS.`);
     }
-
     if (finishReason !== 'STOP') {
-         log(`LLM Day ${day}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
-         // Throw a more specific error for safety/other issues
+         log(`Dietitian AI Day ${day}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
          throw new Error(`Model ${modelName} failed: FinishReason was ${finishReason}.`);
     }
-    // --- END MODIFICATION ---
 
     // 4. Validate content
     const content = candidate?.content;
     if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
-        log(`LLM Day ${day}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
+        log(`Dietitian AI Day ${day}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
         throw new Error(`Model ${modelName} failed: Response missing content.`);
     }
 
     // 5. Validate JSON parsing
     const jsonText = content.parts[0].text;
-    log("LLM Raw JSON Text (Day " + day + ")", 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
+    log("Dietitian AI Raw JSON Text (Day " + day + ")", 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
 
     try {
         const parsed = JSON.parse(jsonText);
-        log("Parsed LLM JSON (Day " + day + ")", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, meals: parsed.meals?.length || 0 });
+        log("Parsed Dietitian AI JSON (Day " + day + ")", 'INFO', 'DATA', { ingreds: parsed.ingredients?.length || 0, meals: parsed.meals?.length || 0 });
 
         // --- Basic Validation ---
         if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
@@ -449,33 +456,32 @@ async function tryGenerateWithModel(modelName, payload, log, day) {
 
         // --- Detailed Validation (Essential Fields) ---
          for(const meal of parsed.meals) {
-             if (!meal || !meal.type || !meal.name || !meal.description || !Array.isArray(meal.items)) throw new Error(`Meal invalid: Missing fields in ${meal?.name || 'Unnamed Meal'}.`);
+             // 'description' is NO LONGER required from this AI
+             if (!meal || !meal.type || !meal.name || !Array.isArray(meal.items)) throw new Error(`Meal invalid: Missing fields in ${meal?.name || 'Unnamed Meal'}.`);
              for(const item of meal.items) {
                  if (!item || !item.key || typeof item.qty !== 'number' || !item.unit) throw new Error(`Meal item invalid in ${meal.name}: Missing key, qty, or unit.`);
              }
          }
          for(const ing of parsed.ingredients) {
-             // Check required fields, allow null for tightQuery/wideQuery
              if (!ing || !ing.originalIngredient || !ing.normalQuery || !Array.isArray(ing.requiredWords) || !Array.isArray(ing.negativeKeywords) || !Array.isArray(ing.allowedCategories) || ing.allowedCategories.length === 0 || typeof ing.totalGramsRequired !== 'number' || !ing.quantityUnits) {
                    log(`Validation Error: Ingredient "${ing?.originalIngredient || 'unknown'}" missing required fields or invalid types.`, 'WARN', 'LLM', ing);
                    throw new Error(`Ingredient validation failed (required fields): "${ing?.originalIngredient || 'unknown'}"`);
              }
-             // Check optional fields are either string or null
              if (ing.tightQuery !== null && typeof ing.tightQuery !== 'string') throw new Error(`Ingredient validation failed (tightQuery type): "${ing?.originalIngredient || 'unknown'}"`);
              if (ing.wideQuery !== null && typeof ing.wideQuery !== 'string') throw new Error(`Ingredient validation failed (wideQuery type): "${ing?.originalIngredient || 'unknown'}"`);
          }
 
-        log(`LLM Day ${day}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
+        log(`Dietitian AI Day ${day}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
         return parsed; // Return the fully parsed and validated data
 
     } catch (parseError) {
-        log(`Failed to parse/validate LLM JSON for Day ${day} from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
+        log(`Failed to parse/validate Dietitian AI JSON for Day ${day} from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
         throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
     }
 }
 
 
-async function generateLLMDayPlan(day, formData, nutritionalTargets, log) {
+async function generateDietitianPlan(day, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets; // Use pre-calculated targets
 
@@ -490,39 +496,26 @@ async function generateLLMDayPlan(day, formData, nutritionalTargets, log) {
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']};
     const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const costInstruction = {'Extreme Budget':"STRICTLY lowest cost...",'Quality Focus':"Premium quality...",'Best Value':"Balance cost/quality..."}[costPriority]||"Balance cost/quality...";
-    // mealVariety rules are harder to enforce per-day, focus on calorie/macro targets
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus: ${cuisine}.` : 'Neutral.';
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion', 'capsicum')." : "";
 
-    // Calculate per-meal calorie cap based on daily target
     const numMeals = parseInt(eatingOccasions, 10) || 3;
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
-    // --- START: MODIFICATION (Adjusted System Prompt Rule #10.c) ---
-    const systemPrompt = `Expert dietitian/chef/query optimizer for store: ${store}. Generate plan for DAY ${day}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${formData.weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) 'description' MUST BE BRIEF keyword summary (e.g., "Chicken, rice, broccoli"). NO full sentences or cooking instructions. b) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). c) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure. d) No single meal's 'items' should sum > **${mealMax} kcal**.
-Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
-
-JSON Structure:
-{
-  "ingredients": [ { "originalIngredient": "string", "category": "string", "tightQuery": "string|null", "normalQuery": "string", "wideQuery": "string|null", "requiredWords": ["string"], "negativeKeywords": ["string"], "targetSize": { "value": number, "unit": "g"|"ml" }|null, "totalGramsRequired": number, "quantityUnits": "string", "allowedCategories": ["string"] } ],
-  "meals": [ { "type": "string", "name": "string", "description": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
-}
-`;
-    // --- END: MODIFICATION (Adjusted System Prompt Rule #10.c) ---
+    // --- Get the specific system prompt for the Dietitian AI ---
+    const systemPrompt = DIETITIAN_SYSTEM_PROMPT(store, weight, calories, mealMax, australianTermNote);
     
-    // --- Simplified User Query for a SINGLE DAY ---
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
-    log(`LLM Prompt for Day ${day}`, 'INFO', 'LLM_PROMPT', {
+    log(`Dietitian AI Prompt for Day ${day}`, 'INFO', 'LLM_PROMPT', {
         systemPromptStart: systemPrompt.substring(0, 200) + '...', // Log start only
         userQuery: userQuery,
         targets: nutritionalTargets,
         sanitizedData: getSanitizedFormData(formData)
     });
 
-    // --- Payload (No maxOutputTokens) ---
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -537,22 +530,136 @@ JSON Structure:
     // --- Use the helper with fallback (Logic unchanged here) ---
     let parsedResult;
     try {
-        // Try Primary Model
-        parsedResult = await tryGenerateWithModel(PLAN_MODEL_NAME_PRIMARY, payload, log, day);
+        parsedResult = await tryGenerateDietitianPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, day);
     } catch (primaryError) {
-        log(`LLM Day ${day}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM');
+        log(`Dietitian AI Day ${day}: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM');
 
         try {
-            // Try Fallback Model
-            parsedResult = await tryGenerateWithModel(PLAN_MODEL_NAME_FALLBACK, payload, log, day);
+            parsedResult = await tryGenerateDietitianPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, day);
         } catch (fallbackError) {
-            log(`LLM Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
+            log(`Dietitian AI Day ${day}: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM');
             throw new Error(`Plan generation failed for Day ${day}: Both primary (${PLAN_MODEL_NAME_PRIMARY}) and fallback (${PLAN_MODEL_NAME_FALLBACK}) AI models failed to produce a valid plan. Last error: ${fallbackError.message}`);
         }
     }
-
-    // If we're here, parsedResult is valid JSON
     return parsedResult;
+}
+
+
+// --- AGENT 2: "CHEF" AI ---
+
+const CHEF_SYSTEM_PROMPT = (store) => `
+You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
+RULES:
+1.  You will be given a meal name and a list of ingredients with quantities.
+2.  Your job is to generate an appetizing 1-sentence 'description' for the meal.
+3.  You MUST also generate a 'instructions' array, with each element being one step.
+4.  Instructions MUST be safe, clear, and logical.
+5.  **FOOD SAFETY IS CRITICAL:**
+    * ALWAYS include a step to "cook chicken/pork thoroughly until no longer pink and juices run clear."
+    * ALWAYS include a step to "wash all produce (vegetables/fruit) thoroughly."
+6.  Be concise. Aim for 4-7 steps.
+7.  Do NOT add any ingredients not in the provided list, except for "salt, pepper, and water" which are assumed.
+
+Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
+
+JSON Structure:
+{
+  "description": "string",
+  "instructions": ["string"]
+}
+`;
+
+/**
+ * Tries to generate AND validate a recipe from a single model.
+ */
+async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
+    log(`Chef AI [${mealName}]: Attempting model: ${modelName}`, 'INFO', 'LLM_CHEF');
+    const apiUrl = getGeminiApiUrl(modelName);
+
+    const response = await fetchLLMWithRetry(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify(payload)
+    }, log, `Chef-${mealName}`);
+
+    const result = await response.json();
+    const candidate = result.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+
+    if (finishReason !== 'STOP') {
+        log(`Chef AI [${mealName}]: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM_CHEF', { result });
+        throw new Error(`Model ${modelName} failed: FinishReason was ${finishReason}.`);
+    }
+
+    const content = candidate?.content;
+    if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
+        log(`Chef AI [${mealName}]: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM_CHEF', { result });
+        throw new Error(`Model ${modelName} failed: Response missing content.`);
+    }
+
+    const jsonText = content.parts[0].text;
+    try {
+        const parsed = JSON.parse(jsonText);
+        
+        // --- Validation ---
+        if (!parsed || typeof parsed.description !== 'string' || !Array.isArray(parsed.instructions) || parsed.instructions.length === 0) {
+             throw new Error("Invalid JSON structure: 'description' (string) or 'instructions' (array) missing/empty.");
+        }
+        
+        log(`Chef AI [${mealName}]: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM_CHEF');
+        return parsed; // { description, instructions }
+    
+    } catch (parseError) {
+        log(`Failed to parse/validate Chef AI JSON for [${mealName}] from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM_CHEF', { jsonText: jsonText.substring(0, 300) });
+        throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
+    }
+}
+
+
+/**
+ * Generates cooking instructions for a single meal by calling the "Chef" AI.
+ */
+async function generateChefInstructions(meal, store, log) {
+    const mealName = meal.name || 'Unnamed Meal';
+    try {
+        const systemPrompt = CHEF_SYSTEM_PROMPT(store);
+
+        // Format ingredients for the query
+        const ingredientList = meal.items.map(item => `- ${item.qty}${item.unit} ${item.key}`).join('\n');
+        const userQuery = `Generate a recipe for "${meal.name}" using only these ingredients:\n${ingredientList}`;
+        
+        log(`Chef AI Prompt for [${mealName}]`, 'INFO', 'LLM_PROMPT', {
+            systemPromptStart: systemPrompt.substring(0, 200) + '...',
+            userQuery: userQuery
+        });
+
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+                temperature: 0.4, // Slightly more creative for cooking
+                topK: 32,
+                topP: 0.9,
+                responseMimeType: "application/json", 
+            }
+        };
+
+        // --- Try Primary, then Fallback ---
+        try {
+            return await tryGenerateChefRecipe(PLAN_MODEL_NAME_PRIMARY, payload, mealName, log);
+        } catch (primaryError) {
+            log(`Chef AI [${mealName}]: PRIMARY Model ${PLAN_MODEL_NAME_PRIMARY} failed: ${primaryError.message}. Attempting FALLBACK.`, 'WARN', 'LLM_CHEF');
+            try {
+                return await tryGenerateChefRecipe(PLAN_MODEL_NAME_FALLBACK, payload, mealName, log);
+            } catch (fallbackError) {
+                log(`Chef AI [${mealName}]: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM_CHEF');
+                throw new Error(`Recipe generation failed for [${mealName}]: Both AI models failed. Last error: ${fallbackError.message}`);
+            }
+        }
+    } catch (error) {
+        log(`CRITICAL Error in generateChefInstructions for [${mealName}]: ${error.message}`, 'CRITICAL', 'LLM_CHEF');
+        return MOCK_RECIPE_FALLBACK; // Return fallback on unhandled error
+    }
 }
 
 
@@ -604,26 +711,49 @@ module.exports = async (request, response) => {
         if (!store) throw new Error("'store' missing in formData.");
 
 
-        // --- Phase 1: Generate Day Plan using LLM ---
-        log("Phase 1: Generating Day Plan (LLM)...", 'INFO', 'PHASE');
-        // generateLLMDayPlan now handles its own retries/fallbacks and validation
-        const llmResult = await generateLLMDayPlan(day, formData, nutritionalTargets, log);
-        const { ingredients: rawDayIngredients = [], meals: dayMeals = [] } = llmResult;
+        // --- Phase 1: Generate Day Plan (DIETITIAN AI) ---
+        log("Phase 1: Generating Day Plan (Dietitian AI)...", 'INFO', 'PHASE');
+        const llmResult = await generateDietitianPlan(day, formData, nutritionalTargets, log);
+        const { ingredients: rawDayIngredients = [], meals: dayMeals = [] } = llmResult; // 'dayMeals' now lacks descriptions
 
         if (rawDayIngredients.length === 0 || dayMeals.length === 0) {
-            // This check might be redundant if tryGenerateWithModel validation is thorough, but good as a safeguard.
-            log("LLM generation failed: Empty ingredients or meals returned after validation.", 'CRITICAL', 'LLM');
-            throw new Error(`Plan generation failed for Day ${day}: AI returned empty meals or ingredients.`);
+            log("Dietitian AI failed: Empty ingredients or meals returned after validation.", 'CRITICAL', 'LLM');
+            throw new Error(`Plan generation failed for Day ${day}: Dietitian AI returned empty meals or ingredients.`);
         }
+        log(`Dietitian AI success for Day ${day}: ${rawDayIngredients.length} ingredients, ${dayMeals.length} meals.`, 'SUCCESS', 'PHASE');
+
+        
+        // --- Phase 1.5: Generate Recipes (CHEF AI) ---
+        log("Phase 1.5: Generating Recipes (Chef AI)...", 'INFO', 'PHASE');
+        
+        // Create an array of promises, one for each meal
+        const mealPromises = dayMeals.map(meal => 
+            generateChefInstructions(meal, store, log)
+        );
+
+        // Run all "Chef AI" calls in parallel
+        const settledResults = await Promise.allSettled(mealPromises);
+
+        // Merge recipes back into the meal plan
+        const finalDayMeals = dayMeals.map((meal, index) => {
+            const result = settledResults[index];
+            if (result.status === 'fulfilled' && result.value) {
+                // Success: Merge the description and instructions
+                return { ...meal, ...result.value }; // result.value is { description, instructions }
+            } else {
+                // Failure: Log the error and use a fallback
+                log(`Chef AI failed for meal "${meal.name}": ${result.reason?.message || 'Unknown error'}`, 'ERROR', 'LLM_CHEF');
+                return { ...meal, ...MOCK_RECIPE_FALLBACK };
+            }
+        });
+
+        log(`Chef AI complete for Day ${day}.`, 'SUCCESS', 'PHASE');
 
         // --- Normalize Ingredient Keys ---
         const dayIngredientsPlan = rawDayIngredients.map(ing => ({
             ...ing,
             normalizedKey: normalizeKey(ing.originalIngredient)
         }));
-
-
-        log(`LLM success for Day ${day}: ${dayIngredientsPlan.length} ingredients, ${dayMeals.length} meals.`, 'SUCCESS', 'PHASE');
 
 
         // --- Phase 2: Market Run (for this day's ingredients) ---
@@ -645,28 +775,21 @@ module.exports = async (request, response) => {
                 const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
                 let foundProduct = null;
 
-                // --- START MODIFICATION: Synthesize queries and build query list ---
                 const qn = ingredient.normalQuery; // Always required from LLM
-                // Synthesize tightQuery if LLM provided null or empty string
                 const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, store);
-                 // Synthesize wideQuery if LLM provided null or empty string
                 const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, store);
 
-                // Build the list of queries to try, filtering out any nulls/empty strings
                 const queriesToTry = [
                     { type: 'tight', query: qt },
                     { type: 'normal', query: qn },
                     { type: 'wide', query: qw }
                 ].filter(q => q.query && q.query.trim()); // Only keep valid queries
 
-                // Log which queries are being used (AI vs synthesized)
                 log(`[${ingredientKey}] Queries: Tight (${qt ? (ingredient.tightQuery ? 'AI' : 'Synth') : 'N/A'}), Normal (AI), Wide (${qw ? (ingredient.wideQuery ? 'AI' : 'Synth') : 'N/A'})`, 'DEBUG', 'MARKET_RUN');
-                // --- END MODIFICATION ---
-
+                
                 let acceptedQueryType = 'none';
 
                 for (const [index, { type, query }] of queriesToTry.entries()) {
-                     // Query should already be valid here due to filter above
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
                     const currentAttemptLog = result.searchAttempts.at(-1);
@@ -704,7 +827,6 @@ module.exports = async (request, response) => {
                         const currentUrls = new Set(result.allProducts.map(p => p.url));
                         filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); } });
 
-                        // Select cheapest from *all* found so far
                         if (result.allProducts.length > 0) {
                              foundProduct = result.allProducts.reduce((best, current) =>
                                  (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best,
@@ -714,14 +836,11 @@ module.exports = async (request, response) => {
                              currentAttemptLog.status = 'success';
                              acceptedQueryType = type;
 
-                             // If tight query worked well, skip wider queries
                              if (type === 'tight' && currentAttemptLog.bestScore >= SKIP_HEURISTIC_SCORE_THRESHOLD) {
                                 log(`[${ingredientKey}] Skip heuristic hit (Tight query OK).`, 'INFO', 'MARKET_RUN');
-                                break; // Stop trying wider queries
+                                break;
                              }
-                             // Optimization: If normal query has results, don't try wide
                              if (type === 'normal') {
-                                 // Only break if wide query isn't the *only* remaining option
                                  const remainingQueries = queriesToTry.slice(index + 1);
                                  if (!remainingQueries.some(q => q.type === 'wide')) {
                                       break;
@@ -803,7 +922,6 @@ module.exports = async (request, response) => {
             log(`Fetching nutrition for ${itemsToFetchNutrition.length} items (Day ${day})...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, async (item) => {
                  try {
-                     // Use imported function
                      const nut = (item.barcode || item.query) ? await fetchNutritionData(item.barcode, item.query, log) : { status: 'not_found', source: 'no_query' };
                      return { ...item, nut };
                  } catch (err) {
@@ -816,7 +934,6 @@ module.exports = async (request, response) => {
             nutritionResults.forEach(item => {
                  if (item && item.normalizedKey && item.nut) {
                     nutritionDataMap.set(item.normalizedKey, item.nut); // Store by normalized key
-                    // Optionally attach nutrition to the result object if needed downstream
                      const result = dayResultsMap.get(item.normalizedKey);
                      if (result && result.source === 'discovery' && Array.isArray(result.allProducts)) {
                          let productToAttach = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
@@ -834,18 +951,15 @@ module.exports = async (request, response) => {
         // --- Phase 4: Validation & Reconciliation (for this day) ---
         log("Phase 4: Validation & Reconciliation (Day " + day + ")...", 'INFO', 'PHASE');
 
-        // --- Pre-cache Canonical Fallbacks ---
-        // (Similar logic as before, but only for today's ingredients)
          let canonicalHitsToday = 0;
          for (const [normalizedKey, result] of dayResultsMap.entries()) {
              const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
              if (!hasNutri && (result.source === 'failed' || result.source === 'error')) {
                  const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log); // Use imported func
-                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source?.startsWith('canonical') || canonicalNutrition.source === 'nutrition-search-internal')) { // --- MODIFICATION: Allow internal canonical ---
+                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source?.startsWith('canonical') || canonicalNutrition.source === 'nutrition-search-internal')) {
                      log(`[${result.originalIngredient}] Using CANONICAL fallback (Day ${day}).`, 'DEBUG', 'CALC');
                      nutritionDataMap.set(normalizedKey, canonicalNutrition);
                      canonicalHitsToday++;
-                     // Update the result source for clarity
                      const finalResult = dayResultsMap.get(normalizedKey);
                      if(finalResult) finalResult.source = 'canonical_fallback';
                  }
@@ -855,7 +969,6 @@ module.exports = async (request, response) => {
 
         // --- Define getItemMacros specific to this day's context ---
         const computeItemMacros = (item) => {
-             // Basic validation
              if (!item || !item.key || typeof item.qty !== 'number' || !item.unit) {
                 log(`[computeItemMacros] Invalid item structure received (Day ${day}).`, 'ERROR', 'CALC', item);
                 throw new Error(`Plan generation failed for Day ${day}: Invalid item structure during calculation for "${item?.key || 'unknown'}".`);
@@ -865,17 +978,13 @@ module.exports = async (request, response) => {
 
              const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
 
-             // Quantity Sanity Check (Crucial Guardrail)
-             if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0 || gramsOrMl > 5000) { // --- MODIFICATION: Allow 0 temporarily ---
+             if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0 || gramsOrMl > 5000) {
                  log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${item.key}' (Day ${day}).`, 'CRITICAL', 'CALC', { item, gramsOrMl });
                  throw new Error(`Plan generation failed for Day ${day}: Invalid quantity (${item.qty} ${item.unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${item.key}"`);
              }
-              // --- MODIFICATION: Handle 0 quantity explicitly ---
              if (gramsOrMl === 0) {
-                 // This can happen post-reconciliation if an item is removed. Return 0 for all macros.
                  return { p: 0, f: 0, c: 0, kcal: 0, key: item.key, densityHeuristicUsed: false };
              }
-
 
              const nutritionData = nutritionDataMap.get(normalizedKey);
              let grams = gramsOrMl;
@@ -889,28 +998,22 @@ module.exports = async (request, response) => {
                  if (foundDensityKey) {
                      density = DENSITY_MAP[foundDensityKey];
                  } else {
-                      densityHeuristicUsed = true; // Track heuristic use
+                      densityHeuristicUsed = true;
                  }
                  grams = gramsOrMl * density;
-                 // Optionally log density usage
-                 // log(`Density for ${item.key}: ${density.toFixed(2)} (${densityHeuristicUsed ? 'heuristic' : 'match'})`, 'DEBUG', 'CALC');
              }
 
              if (nutritionData && nutritionData.status === 'found') {
-                 // Ensure nutrition values are numbers, default to 0 if not
                  const proteinPer100 = Number(nutritionData.protein) || 0;
                  const fatPer100 = Number(nutritionData.fat) || 0;
                  const carbsPer100 = Number(nutritionData.carbs) || 0;
-
                  p = (proteinPer100 / 100) * grams;
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
-                 // Calculate kcal from macros for consistency
                  kcal = (p * 4) + (f * 9) + (c * 4);
              } else {
                   log(`[computeItemMacros] No valid nutrition found for '${item.key}' (Day ${day}). Macros set to 0.`, 'WARN', 'CALC', { normalizedKey });
              }
-
              return { p, f, c, kcal, key: item.key, densityHeuristicUsed };
          };
 
@@ -923,11 +1026,10 @@ module.exports = async (request, response) => {
         let mealHasInvalidItems = false;
         let densityHeuristicsToday = 0;
 
-        // Add normalizedKey to meal items *before* calculation/reconciliation
-         dayMeals.forEach(meal => {
+         finalDayMeals.forEach(meal => { // Use finalDayMeals (with recipes)
              if (meal && Array.isArray(meal.items)) {
                  meal.items.forEach(item => {
-                     if(item && item.key) { // Basic check
+                     if(item && item.key) {
                          item.normalizedKey = normalizeKey(item.key);
                      }
                  });
@@ -935,28 +1037,27 @@ module.exports = async (request, response) => {
          });
 
 
-        for (const meal of dayMeals) {
+        for (const meal of finalDayMeals) { // Use finalDayMeals
             if (!meal || !Array.isArray(meal.items) || meal.items.length === 0) {
                  log(`Validation Error: Meal "${meal?.name || 'Unnamed'}" has no items (Day ${day}).`, 'CRITICAL', 'CALC');
-                 mealHasInvalidItems = true; // Mark as invalid but continue calculation if possible
-                 meal.subtotal_kcal = 0; // Mark invalid meal in output
-                 continue; // Skip calculating this meal
+                 mealHasInvalidItems = true;
+                 meal.subtotal_kcal = 0;
+                 continue;
             }
-             // Merge duplicate items within a meal before calculation
              const mergedItemsMap = new Map();
              for(const item of meal.items) {
-                 if (!item || !item.normalizedKey || !item.key) { // Check required fields
+                 if (!item || !item.normalizedKey || !item.key) {
                      log(`Validation Error: Invalid item structure in meal "${meal.name}" (Day ${day}).`, 'ERROR', 'CALC', item);
-                     mealHasInvalidItems = true; continue; // Skip this item
+                     mealHasInvalidItems = true; continue;
                  }
                  const existing = mergedItemsMap.get(item.normalizedKey);
                  if (existing) {
-                     existing.qty += (item.qty || 0); // Sum quantities
+                     existing.qty += (item.qty || 0);
                  } else {
-                     mergedItemsMap.set(item.normalizedKey, { ...item }); // Add new item
+                     mergedItemsMap.set(item.normalizedKey, { ...item });
                  }
              }
-             meal.items = Array.from(mergedItemsMap.values()); // Replace items with merged ones
+             meal.items = Array.from(mergedItemsMap.values());
 
 
             let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
@@ -970,37 +1071,32 @@ module.exports = async (request, response) => {
                      if (macros.densityHeuristicUsed) densityHeuristicsToday++;
                  } catch (itemError) {
                       log(`Error calculating macros for item "${item.key}" in meal "${meal.name}" (Day ${day}): ${itemError.message}`, 'CRITICAL', 'CALC');
-                      mealHasInvalidItems = true; // Mark day as potentially invalid
-                      // Assign NaN or 0 to indicate failure, prevent script crash
+                      mealHasInvalidItems = true;
                       mealKcal = NaN; mealP = NaN; mealF = NaN; mealC = NaN;
-                      break; // Stop calculating macros for this meal
+                      break;
                  }
             }
 
-            // Assign subtotals (even if NaN on error)
             meal.subtotal_kcal = mealKcal;
             meal.subtotal_protein = mealP;
             meal.subtotal_fat = mealF;
             meal.subtotal_carbs = mealC;
 
-            // Accumulate day totals only if meal calculation succeeded
             if (!isNaN(mealKcal)) {
                  initialDayKcal += mealKcal;
                  initialDayP += mealP;
                  initialDayF += mealF;
                  initialDayC += mealC;
             } else {
-                 mealHasInvalidItems = true; // Ensure flag is set if any meal failed
+                 mealHasInvalidItems = true;
             }
 
-             // Meal Guard: Check for zero/negative calorie meals after calculation
              if (!isNaN(mealKcal) && mealKcal <= 0) {
                   log(`Validation Error: Meal "${meal.name}" has zero or negative calculated calories (Day ${day}).`, 'CRITICAL', 'CALC', { meal });
                   mealHasInvalidItems = true;
              }
         } // End meal loop
 
-        // Meal Guard: If any meal failed item processing or was zero cal, throw error
         if (mealHasInvalidItems) {
              throw new Error(`Plan generation failed for Day ${day}: One or more meals contain invalid items or calculate to zero/negative calories.`);
         }
@@ -1009,42 +1105,40 @@ module.exports = async (request, response) => {
 
         // --- Run Reconciliation if Needed ---
         const targetCalories = nutritionalTargets.calories;
-        const initialDeviation = (targetCalories > 0) ? (initialDayKcal - targetCalories) / targetCalories : 0; // Avoid division by zero
-        const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1'; // Check env var
-        let finalDayMeals = dayMeals; // Start with the initial meals
+        const initialDeviation = (targetCalories > 0) ? (initialDayKcal - targetCalories) / targetCalories : 0;
+        const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1';
+        let reconciledMeals = finalDayMeals; // Use the meals that already have recipes
         let finalDayTotals = { calories: initialDayKcal, protein: initialDayP, fat: initialDayF, carbs: initialDayC };
 
         if (RECONCILE_FLAG && Math.abs(initialDeviation) > 0.05) { // 5% tolerance
             log(`[RECON Day ${day}] Deviation ${(initialDeviation * 100).toFixed(1)}% > 5%. Attempting reconciliation.`, 'WARN', 'CALC');
 
             const { adjusted, factor, meals: scaledMeals } = reconcileNonProtein({
-                meals: dayMeals, // Pass the original meals for this day
+                meals: finalDayMeals, // Pass the meals *with* recipe data
                 targetKcal: targetCalories,
-                getItemMacros: computeItemMacros, // Pass the helper function
+                getItemMacros: computeItemMacros,
                 tolPct: 5
             });
 
             if (adjusted) {
-                finalDayMeals = scaledMeals; // Use the scaled meals
-                scaleFactor = factor; // Store scale factor for telemetry
+                reconciledMeals = scaledMeals; // Use the scaled meals
+                scaleFactor = factor;
 
-                // Recalculate totals *after* scaling
                 let scaledKcal = 0, scaledP = 0, scaledF = 0, scaledC = 0;
-                 // Recalculate subtotals and totals for the scaled meals
-                 for (const meal of finalDayMeals) {
+                 for (const meal of reconciledMeals) {
                      let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
-                      if (!meal || !Array.isArray(meal.items)) continue; // Skip invalid meals
+                      if (!meal || !Array.isArray(meal.items)) continue;
                      for (const item of meal.items) {
                           try {
-                             const macros = computeItemMacros(item); // Recalculate with new qty
+                             const macros = computeItemMacros(item);
                              mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                           } catch (reconItemError) {
                               log(`Error recalculating macros post-reconciliation for "${item.key}" (Day ${day}): ${reconItemError.message}`, 'CRITICAL', 'CALC');
-                              scaledKcal=NaN; break; // Mark day total as invalid
+                              scaledKcal=NaN; break;
                           }
                      }
                      meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC;
-                     if(isNaN(scaledKcal)) break; // Stop if item calculation failed
+                     if(isNaN(scaledKcal)) break;
                      scaledKcal += mealKcal; scaledP += mealP; scaledF += mealF; scaledC += mealC;
                  }
 
@@ -1063,7 +1157,7 @@ module.exports = async (request, response) => {
         }
 
         // --- Final Validation (for this day) ---
-        const finalDeviation = (targetCalories > 0) ? (finalDayTotals.calories - targetCalories) / targetCalories : 0; // Avoid division by zero
+        const finalDeviation = (targetCalories > 0) ? (finalDayTotals.calories - targetCalories) / targetCalories : 0;
         const finalDeviationPct = finalDeviation * 100;
         const FINAL_TOLERANCE = 0.10; // Increased tolerance to 10%
 
@@ -1075,13 +1169,12 @@ module.exports = async (request, response) => {
         }
 
         // --- Round final values for the day ---
-        finalDayMeals.forEach(meal => {
-            if (meal) { // Check meal exists
+        reconciledMeals.forEach(meal => {
+            if (meal) {
                 meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
                 meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
                 meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
                 meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
-                 // Remove temporary normalizedKey before sending response
                  if(Array.isArray(meal.items)){
                      meal.items.forEach(item => { if(item) delete item.normalizedKey; });
                  }
@@ -1092,7 +1185,6 @@ module.exports = async (request, response) => {
         // --- Phase 5: Assemble Day Response ---
         log("Phase 5: Assembling Response (Day " + day + ")...", 'INFO', 'PHASE');
 
-         // Add telemetry for this day
          log("Day Telemetry:", 'INFO', 'SYSTEM', {
             canonical_hits: canonicalHitsToday,
             density_heuristics: densityHeuristicsToday,
@@ -1100,18 +1192,14 @@ module.exports = async (request, response) => {
             final_deviation_pct: parseFloat(finalDeviationPct.toFixed(1)),
         });
 
-        // Structure the response
         const responseData = {
             message: `Successfully generated plan for Day ${day}.`,
             day: day,
-            mealPlanForDay: { // The plan object just for this day
+            mealPlanForDay: {
                 day: day,
-                meals: finalDayMeals // Use the potentially scaled meals
+                meals: reconciledMeals // Send the final meals *with* descriptions and instructions
             },
-            // Convert Map back to object for JSON response
             dayResults: Object.fromEntries(dayResultsMap.entries()),
-             // List of unique ingredients *used this day*
-             // Remove temporary normalizedKey before sending response
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
             logs: getLogs()
         };
@@ -1123,20 +1211,20 @@ module.exports = async (request, response) => {
         log(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
         console.error(`DAY ${day} UNHANDLED ERROR:`, error);
 
-        // Determine appropriate status code
         const isPlanError = error.message.startsWith('Plan generation failed');
-        const statusCode = isPlanError ? 422 : 500; // 422 for plan logic errors, 500 for server errors
+        const statusCode = isPlanError ? 422 : 500;
         const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
 
         return response.status(statusCode).json({
             message: error.message || "An internal server error occurred.",
             day: day,
             code: errorCode,
-            error: error.message, // Include error message
-            logs: getLogs() // Always include logs
+            error: error.message,
+            logs: getLogs()
         });
     }
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
 
