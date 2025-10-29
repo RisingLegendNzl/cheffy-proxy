@@ -27,7 +27,8 @@ const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
 const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro'; // Fallback model
 
 // --- Create a function to get the URL ---
-const getGeminiApiUrl = (modelName) => `https://generativelace.googleapis.com/v1beta/models/${modelName}:generateContent`;
+const getGeminiApiUrl = (modelName) => `https://generativelanguage
+.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
 // --- [NEW] Vercel KV Client ---
 const kv = createClient({
