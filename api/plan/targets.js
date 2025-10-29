@@ -1,11 +1,12 @@
 // --- Cheffy API: /api/plan/targets.js ---
 // Calculates nutritional targets based on user profile.
+// [MODIFIED] Now uses LBM-based protein calculation.
 
 const crypto = require('crypto'); // For run_id
 
-// --- START: Copied Helper Functions from generate-full-plan.js ---
+// --- START: Helper Functions ---
 
-// Basic logging function similar to the original orchestrator
+// Basic logging function
 function createLogger(run_id) {
     const logs = [];
     const log = (message, level = 'INFO', tag = 'CALC', data = null) => {
@@ -16,7 +17,7 @@ function createLogger(run_id) {
                 level: level.toUpperCase(),
                 tag: tag.toUpperCase(),
                 message,
-                // Simple data serialization, avoid large objects
+                // Simple data serialization
                 data: data ? JSON.parse(JSON.stringify(data, (key, value) =>
                     (typeof value === 'string' && value.length > 200) ? value.substring(0, 200) + '...' : value
                 )) : null
@@ -24,7 +25,7 @@ function createLogger(run_id) {
             logs.push(logEntry);
             const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
             console.log(`${time} [${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
-            if (data && level !== 'DEBUG') { // Log data for non-debug
+            if (data && level !== 'DEBUG') { 
                  console.log("  Data:", JSON.stringify(data, null, 2).substring(0, 500) + '...');
             }
             return logEntry;
@@ -53,7 +54,7 @@ function getSanitizedFormData(formData) {
 }
 
 
-// Calculates the target daily calorie intake
+// Calculates the target daily calorie intake (Unchanged)
 function calculateCalorieTarget(formData, log) {
     if (!formData) {
         log("Missing formData for calorie calculation.", 'WARN', 'CALC');
@@ -94,73 +95,96 @@ function calculateCalorieTarget(formData, log) {
     return Math.max(1200, Math.round(tdee + adjustment));
 }
 
-// Calculates macronutrient targets based on calories and goal
-function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
-     if (isNaN(calorieTarget) || calorieTarget <= 0) {
+// --- [REFACTORED] calculateMacroTargets ---
+// This function now implements the LBM-based protein calculation.
+function calculateMacroTargets(calorieTarget, formData, log) {
+    const { weight, bodyFat, goal, activityLevel } = formData;
+    
+    if (isNaN(calorieTarget) || calorieTarget <= 0) {
         log("Invalid calorieTarget for macro calculation.", 'WARN', 'CALC');
-        return { proteinGrams: 0, fatGrams: 0, carbGrams: 0 }; // Default
+        return { protein: 0, fat: 0, carbs: 0 }; // Default
     }
-    const macroSplits = {
-        'cut_aggressive': { pPct: 0.35, fPct: 0.25, cPct: 0.40 },
-        'cut_moderate':   { pPct: 0.35, fPct: 0.25, cPct: 0.40 },
-        'maintain':       { pPct: 0.30, fPct: 0.30, cPct: 0.40 },
-        'bulk_lean':      { pPct: 0.25, fPct: 0.25, cPct: 0.50 },
-        'bulk_aggressive':{ pPct: 0.20, fPct: 0.25, cPct: 0.55 }
+
+    const weightKg = parseFloat(weight);
+    if (isNaN(weightKg) || weightKg <= 0) {
+         log("Invalid weightKg for macro calculation.", 'WARN', 'CALC');
+         return { protein: 0, fat: 0, carbs: 0 };
+    }
+
+    // --- 1. Estimate Lean Mass (LBM) ---
+    const bodyFatDecimal = parseFloat(bodyFat) / 100;
+    let lbmKg;
+    if (bodyFatDecimal > 0 && bodyFatDecimal < 1) {
+        lbmKg = weightKg * (1 - bodyFatDecimal);
+        log(`Using provided BF% (${bodyFat}%) to estimate LBM: ${lbmKg.toFixed(1)}kg`, 'INFO', 'CALC');
+    } else {
+        lbmKg = weightKg * 0.85; // Fallback estimation
+        log(`No valid BF% provided. Using fallback estimation (85%) for LBM: ${lbmKg.toFixed(1)}kg`, 'INFO', 'CALC');
+    }
+
+    // --- 2. Assign Protein Multiplier ---
+    const proteinMultipliers = {
+        maintain:         { sedentary: 1.4, light: 1.6, moderate: 1.8, active: 2.0, veryActive: 2.1 },
+        cut_moderate:     { sedentary: 1.7, light: 1.9, moderate: 2.1, active: 2.2, veryActive: 2.3 },
+        cut_aggressive:   { sedentary: 1.9, light: 2.1, moderate: 2.2, active: 2.3, veryActive: 2.4 },
+        bulk_lean:        { sedentary: 1.8, light: 2.0, moderate: 2.2, active: 2.3, veryActive: 2.4 },
+        bulk_aggressive:  { sedentary: 2.0, light: 2.2, moderate: 2.4, active: 2.5, veryActive: 2.5 }
     };
-    const split = macroSplits[goal] || macroSplits['maintain'];
-    if (!macroSplits[goal]) {
-        log(`Invalid goal "${goal}" for macro split, using 'maintain' defaults.`, 'WARN', 'CALC');
+
+    const goalRow = proteinMultipliers[goal] || proteinMultipliers['maintain'];
+    const multiplier = goalRow[activityLevel] || goalRow['moderate'];
+
+    if (!proteinMultipliers[goal]) log(`Invalid goal "${goal}" for protein, using 'maintain'.`, 'WARN', 'CALC');
+    if (!goalRow[activityLevel]) log(`Invalid activity "${activityLevel}" for protein, using 'moderate'.`, 'WARN', 'CALC');
+    
+    log(`LBM Protein Calc: Goal=${goal}, Activity=${activityLevel}, Multiplier=${multiplier}`, 'INFO', 'CALC');
+
+    // --- 3. Compute Protein ---
+    let proteinGrams = lbmKg * multiplier;
+
+    // --- 4. Hard Cap ---
+    const hardCap = 2.5 * weightKg;
+    if (proteinGrams > hardCap) {
+        log(`Protein RECAP: Initial protein ${proteinGrams.toFixed(0)}g exceeded cap (${hardCap.toFixed(0)}g). Capping.`, 'WARN', 'CALC');
+        proteinGrams = hardCap;
     }
 
-    let proteinGrams = (calorieTarget * split.pPct) / 4;
-    let fatGrams = (calorieTarget * split.fPct) / 9;
-    let carbGrams = (calorieTarget * split.cPct) / 4;
+    // --- 5. Round to nearest 5g ---
+    const finalProteinGrams = Math.round(proteinGrams / 5) * 5;
+    const proteinCalories = finalProteinGrams * 4;
+    log(`Protein Target: ${finalProteinGrams}g (${(finalProteinGrams / weightKg).toFixed(1)}g/kg)`, 'INFO', 'CALC');
 
-    // Use a default weight if invalid
-    const validWeightKg = (typeof weightKg === 'number' && weightKg > 0) ? weightKg : 75;
-    let proteinPerKg = proteinGrams / validWeightKg;
-    let fatPercent = (fatGrams * 9) / calorieTarget;
-    let carbsNeedRecalc = false;
 
-    // Protein Cap
-    const PROTEIN_MAX_G_PER_KG = 3.0;
-    if (proteinPerKg > PROTEIN_MAX_G_PER_KG) {
-        log(`ADJUSTMENT: Initial protein ${proteinPerKg.toFixed(1)}g/kg > ${PROTEIN_MAX_G_PER_KG}g/kg. Capping protein and recalculating carbs.`, 'WARN', 'CALC');
-        proteinGrams = PROTEIN_MAX_G_PER_KG * validWeightKg;
-        carbsNeedRecalc = true;
-    }
-
-    // Fat Cap (Optional, but kept from original logic)
+    // --- 6. Calculate Fat (Using percentage of total calories) ---
+    // This logic is retained from the previous version for simplicity, as only protein was specified.
+    const fatSplits = {
+        'cut_aggressive': 0.25,
+        'cut_moderate':   0.25,
+        'maintain':       0.30,
+        'bulk_lean':      0.25,
+        'bulk_aggressive':0.25
+    };
+    const fatPct = fatSplits[goal] || 0.30;
+    let fatGrams = (calorieTarget * fatPct) / 9;
+    let fatCalories = fatGrams * 9;
+    
+    // Fat Cap (from original logic, good to keep)
     const FAT_MAX_PERCENT = 0.35;
-    if (fatPercent > FAT_MAX_PERCENT) {
-        log(`ADJUSTMENT: Initial fat ${(fatPercent * 100).toFixed(1)}% > ${FAT_MAX_PERCENT*100}%. Capping fat and recalculating carbs.`, 'WARN', 'CALC');
-        fatGrams = (calorieTarget * FAT_MAX_PERCENT) / 9;
-        carbsNeedRecalc = true;
+    if (fatCalories / calorieTarget > FAT_MAX_PERCENT) {
+        log(`ADJUSTMENT: Initial fat ${(fatCalories / calorieTarget * 100).toFixed(1)}% > 35%. Capping fat.`, 'WARN', 'CALC');
+        fatCalories = calorieTarget * FAT_MAX_PERCENT;
+        fatGrams = fatCalories / 9;
     }
 
-    // Recalculate Carbs if necessary
-    if (carbsNeedRecalc) {
-        const proteinCalories = proteinGrams * 4;
-        const fatCalories = fatGrams * 9;
-        const carbCalories = Math.max(0, calorieTarget - proteinCalories - fatCalories);
-        carbGrams = carbCalories / 4;
-        log(`RECALC: New Carb Target: ${carbGrams.toFixed(0)}g`, 'INFO', 'CALC');
-    }
+    // --- 7. Calculate Carbs (As Remainder) ---
+    const carbCalories = Math.max(0, calorieTarget - proteinCalories - fatCalories);
+    const carbGrams = carbCalories / 4;
 
-    // Add info logs for guidelines (optional, kept from original)
-    const PROTEIN_MIN_G_PER_KG = 1.6;
-    proteinPerKg = proteinGrams / validWeightKg; // Recalculate proteinPerKg after potential capping
-    if (proteinPerKg < PROTEIN_MIN_G_PER_KG) {
-        log(`GUIDELINE: Protein target ${proteinPerKg.toFixed(1)}g/kg is below the optimal ${PROTEIN_MIN_G_PER_KG}g/kg range.`, 'INFO', 'CALC');
-    }
-    // ... other guideline logs if needed ...
-
-    // Round final values
-    const finalProteinGrams = Math.round(proteinGrams);
+    // --- 8. Final Rounding & Return ---
     const finalFatGrams = Math.round(fatGrams);
     const finalCarbGrams = Math.round(carbGrams);
 
-    log(`Calculated Macro Targets (Goal: ${goal}, Cals: ${calorieTarget}, Weight: ${validWeightKg}kg): P ${finalProteinGrams}g, F ${finalFatGrams}g, C ${finalCarbGrams}g`, 'INFO', 'CALC');
+    log(`Calculated Macro Targets: P ${finalProteinGrams}g, F ${finalFatGrams}g, C ${finalCarbGrams}g`, 'INFO', 'CALC');
 
     return {
         calories: Math.round(calorieTarget), // Return rounded calorie target as well
@@ -170,7 +194,7 @@ function calculateMacroTargets(calorieTarget, goal, weightKg, log) {
      };
 }
 
-// --- END: Copied Helper Functions ---
+// --- END: Refactored Functions ---
 
 
 // --- Main API Handler ---
@@ -221,7 +245,11 @@ module.exports = async (request, response) => {
 
         // --- Calculate Targets ---
         const calorieTarget = calculateCalorieTarget(formData, log);
-        const macroTargets = calculateMacroTargets(calorieTarget, formData.goal, parseFloat(formData.weight), log);
+        
+        // --- [MODIFIED] Updated function call ---
+        // Pass the entire formData object to the new macro calculator
+        const macroTargets = calculateMacroTargets(calorieTarget, formData, log);
+        // --- End Modification ---
 
         log("Nutritional targets calculation complete.", 'SUCCESS', 'SYSTEM');
 
