@@ -4,6 +4,8 @@
 // 2. "Grocery Optimizer" AI: Generates search queries for ingredients. (Phase 1b)
 // 3. "Chef" AI: Generates recipes for each meal. (Phase 1.5, in parallel)
 // (Phase 2-5: Market Run, Nutrition, Reconciliation, Response)
+// [MODIFIED] This endpoint is now a Server-Sent Events (SSE) stream
+// to send live logs and final data.
 
 /// ===== IMPORTS-START ===== \\\\
 const fetch = require('node-fetch');
@@ -73,6 +75,54 @@ const MOCK_RECIPE_FALLBACK = {
 
 /// ===== HELPERS-START ===== \\\\
 
+// --- [NEW] SSE Helper Functions ---
+/**
+ * Sends a formatted Server-Sent Event (SSE) message to the client.
+ * @param {object} response - The Vercel Serverless Response object.
+ * @param {string} event - The event name (e.g., "message", "finalData", "error").
+ * @param {object} data - The JSON-serializable data payload.
+ */
+function sendSseMessage(response, event, data) {
+    if (!response || response.writableEnded) return; // Check if stream is still open
+    try {
+        const dataString = JSON.stringify(data);
+        response.write(`event: ${event}\n`);
+        response.write(`data: ${dataString}\n\n`);
+    } catch (e) {
+        console.error("SSE: Failed to stringify or write message.", e);
+    }
+}
+
+/**
+ * Sends a structured error event over the SSE stream.
+ * @param {object} response - The Vercel Serverless Response object.
+ * @param {function} logFunction - The logger function to log the error.
+ * @param {Error} error - The error object.
+ * @param {string|number} day - The day context for the error.
+ */
+function sendSseError(response, logFunction, error, day) {
+    const isPlanError = error.message.startsWith('Plan generation failed');
+    const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
+    
+    const errorPayload = {
+        message: error.message || "An internal server error occurred.",
+        day: day,
+        code: errorCode,
+        error: error.message,
+    };
+    
+    // Log the critical error *before* sending, in case send fails
+    if(logFunction) {
+        logFunction(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
+    } else {
+        console.error(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, { stack: error.stack?.substring(0, 500) });
+    }
+
+    sendSseMessage(response, 'error', errorPayload);
+}
+
+// --- [NEW] End SSE Helper Functions ---
+
 // --- [NEW] Cache Helpers ---
 async function cacheGet(key, log) {
   if (!kvReady) return null;
@@ -101,8 +151,15 @@ function hashString(str) {
 
 
 // --- Logger (Copied and Simplified) ---
-function createLogger(run_id, day) {
-    const logs = [];
+/**
+ * [MODIFIED] Creates a logger that streams logs over SSE.
+ * @param {string} run_id - The unique ID for this run.
+ * @param {string|number} day - The day context.
+ * @param {object} response - The Vercel Serverless Response object.
+ * @param {function} clientDidClose - A function that returns true if the client disconnected.
+ */
+function createLogger(run_id, day, response, clientDidClose) {
+    // const logs = []; // [MODIFIED] Removed log array
     const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
         try {
             const logEntry = {
@@ -116,7 +173,17 @@ function createLogger(run_id, day) {
                     (typeof value === 'string' && value.length > 300) ? value.substring(0, 300) + '...' : value
                 )) : null
             };
-            logs.push(logEntry);
+            
+            // --- [MODIFIED] Stream the log entry ---
+            // 1. Check if client is still connected
+            if (clientDidClose()) {
+                 console.log(`[SSE] Client closed, skipping log: ${message}`);
+                 return logEntry; // Return entry but don't send
+            }
+            // 2. Send log to client via SSE
+            sendSseMessage(response, 'message', logEntry);
+            // --- [MODIFIED] End ---
+            
              const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
              console.log(`Day ${day} ${time} [${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
              if (data && (level !== 'DEBUG' || ['ERROR', 'CRITICAL', 'WARN'].includes(level))) {
@@ -128,12 +195,16 @@ function createLogger(run_id, day) {
             return logEntry;
         } catch (error) {
              const fallbackEntry = { timestamp: new Date().toISOString(), run_id: run_id, day:day, level: 'ERROR', tag: 'LOGGING', message: `Log serialization failed: ${message}`, data: { error: error.message }}
-             logs.push(fallbackEntry);
+             // logs.push(fallbackEntry); // [MODIFIED] Removed
              console.error(JSON.stringify(fallbackEntry));
+             // [MODIFIED] Try to send the serialization error to the client
+             if (!clientDidClose()) {
+                 sendSseMessage(response, 'message', fallbackEntry);
+             }
              return fallbackEntry;
         }
     };
-    return { log, getLogs: () => logs };
+    return { log }; // [MODIFIED] Removed getLogs
 }
 
 // --- Other Helpers (Copied from generate-full-plan.js) ---
@@ -889,34 +960,14 @@ function extractUniqueIngredientKeys(meals) {
 
 /// ===== API-CALLERS-END ===== ////
 
-/// ===== MAIN-HANDLER-START ===== \\\\
 
-module.exports = async (request, response) => {
-    const run_id = crypto.randomUUID(); // Unique ID for this specific day's run
-    const day = request.query.day ? parseInt(request.query.day, 10) : null;
-    const { log, getLogs } = createLogger(run_id, day || 'unknown'); // Pass day to logger
-
-    // Set CORS headers
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-    // Handle OPTIONS
-    if (request.method === 'OPTIONS') {
-        log("Handling OPTIONS pre-flight.", 'INFO', 'HTTP');
-        return response.status(200).end();
-    }
-
-    // Handle non-POST methods
-    if (request.method !== 'POST') {
-        log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
-        response.setHeader('Allow', 'POST, OPTIONS');
-        return response.status(405).json({ message: `Method ${request.method} Not Allowed.`, code: "METHOD_NOT_ALLOWED", logs: getLogs() });
-    }
-
-    // --- Main Logic ---
+/**
+ * [MODIFIED] This function contains the core generation logic.
+ * It is now called by the main SSE handler.
+ */
+async function runGeneration(request, response, day, log, clientDidClose) {
     let scaleFactor = null; // For reconciliation telemetry
-
+    
     try {
         log(`Generating plan for Day ${day}...`, 'INFO', 'SYSTEM');
 
@@ -1445,28 +1496,88 @@ module.exports = async (request, response) => {
             dayResults: Object.fromEntries(dayResultsMap.entries()),
             // --- End Modification ---
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
-            logs: getLogs()
+            // logs: getLogs() // [MODIFIED] Removed logs, they were streamed
         };
 
         log(`Successfully completed generation for Day ${day}.`, 'SUCCESS', 'SYSTEM');
-        return response.status(200).json(responseData);
+        
+        // --- [MODIFIED] Send final data event ---
+        if (clientDidClose()) return; // Don't send if client left
+        sendSseMessage(response, 'finalData', responseData);
+        // --- [MODIFIED] End ---
 
     } catch (error) {
-        log(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
-        console.error(`DAY ${day} UNHANDLED ERROR:`, error);
-
-        const isPlanError = error.message.startsWith('Plan generation failed');
-        const statusCode = isPlanError ? 422 : 500;
-        const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
-
-        return response.status(statusCode).json({
-            message: error.message || "An internal server error occurred.",
-            day: day,
-            code: errorCode,
-            error: error.message,
-            logs: getLogs()
-        });
+        // [MODIFIED] Send error over SSE stream
+        console.error(`DAY ${day} UNHANDLED ERROR in runGeneration:`, error);
+        if (clientDidClose()) return; // Don't send error if client left
+        
+        // The log function is already called by sendSseError
+        sendSseError(response, log, error, day);
     }
+}
+
+
+/// ===== MAIN-HANDLER-START ===== \\\\
+
+// [MODIFIED] Main handler is now a non-async function that sets up the SSE stream.
+module.exports = (request, response) => {
+    const run_id = crypto.randomUUID(); // Unique ID for this specific day's run
+    const day = request.query.day ? parseInt(request.query.day, 10) : null;
+    
+    // Set CORS headers
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept'); // Added Accept for SSE
+
+    // Handle OPTIONS
+    if (request.method === 'OPTIONS') {
+        console.log(`[SSE] Handling OPTIONS pre-flight for Day ${day || 'unknown'}.`);
+        return response.status(200).end();
+    }
+
+    // Set SSE headers
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.flushHeaders(); // Send headers immediately
+
+    // --- [NEW] Handle client disconnect ---
+    let clientClosed = false;
+    const clientDidClose = () => clientClosed;
+    request.on('close', () => {
+        clientClosed = true;
+        console.log(`[SSE] Client disconnected for run ${run_id}, Day ${day}.`);
+        response.end(); // Ensure response is ended when client disconnects
+    });
+    // --- [NEW] End ---
+
+    // --- [NEW] Create logger with response object ---
+    const { log } = createLogger(run_id, day || 'unknown', response, clientDidClose);
+
+    // Handle non-POST methods
+    if (request.method !== 'POST') {
+        sendSseError(response, log, new Error(`Method Not Allowed: ${request.method}`), day);
+        return response.end();
+    }
+    
+    // --- [NEW] Call the async generation logic ---
+    runGeneration(request, response, day, log, clientDidClose)
+        .then(() => {
+            // After runGeneration finishes (success or caught error), end the stream
+            if (!clientClosed) {
+                log("Generation complete, closing stream.", 'DEBUG', 'SSE');
+                response.end();
+            }
+        })
+        .catch((e) => {
+            // This catch is a fallback for *unexpected* promise rejections
+            // in runGeneration that weren't handled by its own try/catch.
+            console.error(`[SSE] UNHANDLED runGeneration rejection: ${e.message}`, e);
+            if (!clientClosed) {
+                sendSseError(response, log, e, day);
+                response.end();
+            }
+        });
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
