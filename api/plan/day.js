@@ -209,16 +209,21 @@ function parseSize(sizeString) {
     return null;
 }
 
+// --- [MODIFIED] passRequiredWords ---
+// Updated to handle simple plurals (adding 's')
 function passRequiredWords(title = '', required = []) {
   if (!required || required.length === 0) return true;
   const t = title.toLowerCase();
   return required.every(w => {
-    if (!w) return true;
-    const base = w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const rx = new RegExp(`\\b${base}`, 'i');
+    if (!w) return true; // Ignore empty strings in requiredWords
+    const base = w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Escape regex special chars
+    // Create a regex that matches the base word with an optional 's' at the end,
+    // ensuring it's a whole word boundary (\b) at the start.
+    const rx = new RegExp(`\\b${base}s?\\b`, 'i'); // Added s? and \b at the end
     return rx.test(t);
   });
 }
+// --- END: passRequiredWords Modification ---
 
 const mean = (arr) => arr.length > 0 ? arr.reduce((acc, val) => acc + val, 0) / arr.length : 0;
 const stdev = (arr) => {
@@ -296,10 +301,12 @@ function runSmarterChecklist(product, ingredientData, log) {
             return { pass: false, score: 0 };
         }
     }
+    // --- Uses the [MODIFIED] passRequiredWords function ---
     if (!passRequiredWords(productNameLower, requiredWords ?? [])) {
         log(`${checkLogPrefix}: FAIL (Required words missing: [${(requiredWords ?? []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
         return { pass: false, score: 0 };
     }
+    // --- End Modification Check ---
     if (!passCategory(product, allowedCategories)) {
          log(`${checkLogPrefix}: FAIL (Category Mismatch: "${product.product_category}" not in [${(allowedCategories || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
          return { pass: false, score: 0 };
@@ -887,14 +894,15 @@ module.exports = async (request, response) => {
              }
              const ingredientKey = Object.keys(currentResult)[0];
              const resultData = currentResult[ingredientKey];
-             const normalizedKey = normalizeKey(ingredientKey);
+             const normalizedKey = normalizeKey(ingredientKey); // Use helper for consistency
              const planItem = dayIngredientsPlan.find(i => i.normalizedKey === normalizedKey);
              if (!planItem) {
                  log(`Market run key "${ingredientKey}" (norm: "${normalizedKey}") not found in day plan. Skipping.`, 'ERROR', 'SYSTEM');
                  return;
              }
              if (resultData && typeof resultData === 'object') {
-                 dayResultsMap.set(normalizedKey, { ...planItem, ...resultData }); // Merge plan defaults + market results
+                 // Ensure normalizedKey from plan is preserved during merge
+                 dayResultsMap.set(normalizedKey, { ...planItem, ...resultData, normalizedKey: planItem.normalizedKey });
              } else {
                   log(`Invalid market result structure for "${ingredientKey}"`, 'ERROR', 'SYSTEM', { resultData });
                   dayResultsMap.set(normalizedKey, { ...planItem, source: 'error', error: 'Invalid market result structure', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
@@ -1204,7 +1212,9 @@ module.exports = async (request, response) => {
                 day: day,
                 meals: reconciledMeals // Send the final meals *with* descriptions and instructions
             },
+            // --- [MODIFIED] Convert Map back to Object for JSON response ---
             dayResults: Object.fromEntries(dayResultsMap.entries()),
+            // --- End Modification ---
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
             logs: getLogs()
         };
@@ -1231,5 +1241,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
