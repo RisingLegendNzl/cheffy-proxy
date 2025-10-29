@@ -62,11 +62,23 @@ function reconcileNonProtein({ meals, targetKcal, getItemMacros, tolPct = 5 }) {
         return it; // Lock protein-dominant items, return as-is
       }
       
-      // Scale non-protein items
-      const q = Math.max((it.qty || 0) * factor, 0);
+      // --- START: MODIFICATION (Robust Quantity Scaling) ---
+      const originalQty = it.qty || 0;
+      let newQty = originalQty * factor;
       
       // Round 'g' to nearest whole number, 'ml' to nearest 5
-      const newQty = it.unit === 'ml' ? Math.round(q / 5) * 5 : Math.round(q);
+      if (it.unit === 'ml') {
+        newQty = Math.round(newQty / 5) * 5;
+      } else {
+        newQty = Math.round(newQty);
+      }
+      
+      // CRITICAL: Enforce a minimum quantity of 1 for any item that isn't 0 to begin with.
+      // This prevents the qty: 0 crash.
+      if (originalQty > 0 && newQty < 1) {
+        newQty = 1;
+      }
+      // --- END: MODIFICATION ---
       
       return { ...it, qty: newQty };
     })
