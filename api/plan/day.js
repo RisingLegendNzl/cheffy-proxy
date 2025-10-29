@@ -391,7 +391,8 @@ function synthWide(ing, store) {
 /// ===== API-CALLERS-START ===== \\\\
 
 // --- AGENT 1: "DIETITIAN" SYSTEM PROMPT ---
-const DIETITIAN_SYSTEM_PROMPT = (store, weight, calories, mealMax, australianTermNote) => `
+// --- START: MODIFICATION (Pass 'day' as argument) ---
+const DIETITIAN_SYSTEM_PROMPT = (store, weight, calories, mealMax, australianTermNote, day) => `
 Expert dietitian/chef/query optimizer for store: ${store}. RULES: 1. Generate meals ('meals') & ingredients used TODAY ('ingredients'). **Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).** 2. QUERIES: For each NEW ingredient TODAY: a. 'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote} b. 'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. c. 'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient. 3. 'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names. 4. 'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise. 5. 'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes. 6. 'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY ONLY. MUST accurately reflect sum of meal portions for Day ${day}. 7. Adhere to constraints. 8. 'ingredients' MANDATORY (only those used today). 'meals' MANDATORY (only for today). 9. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"]. 10. MEAL PORTIONS: For each meal in 'meals': a) MUST populate 'items' array with 'key' (matching 'originalIngredient'), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg'). b) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure. c) No single meal's 'items' should sum > **${mealMax} kcal**.
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
@@ -401,6 +402,7 @@ JSON Structure:
   "meals": [ { "type": "string", "name": "string", "items": [ { "key": "string", "qty": number, "unit": "string" } ] } ]
 }
 `;
+// --- END: MODIFICATION ---
 
 
 /**
@@ -505,7 +507,9 @@ async function generateDietitianPlan(day, formData, nutritionalTargets, log) {
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
     // --- Get the specific system prompt for the Dietitian AI ---
-    const systemPrompt = DIETITIAN_SYSTEM_PROMPT(store, weight, calories, mealMax, australianTermNote);
+    // --- START: MODIFICATION (Pass 'day' correctly) ---
+    const systemPrompt = DIETITIAN_SYSTEM_PROMPT(store, weight, calories, mealMax, australianTermNote, day);
+    // --- END: MODIFICATION ---
     
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
@@ -983,6 +987,7 @@ module.exports = async (request, response) => {
                  throw new Error(`Plan generation failed for Day ${day}: Invalid quantity (${item.qty} ${item.unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${item.key}"`);
              }
              if (gramsOrMl === 0) {
+                 // Return 0 if the quantity resulted in 0 grams/ml
                  return { p: 0, f: 0, c: 0, kcal: 0, key: item.key, densityHeuristicUsed: false };
              }
 
