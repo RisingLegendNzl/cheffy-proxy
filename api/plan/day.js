@@ -1,11 +1,9 @@
 // --- Cheffy API: /api/plan/day.js ---
-// [MODIFIED] Implements a "Four-Agent" AI system:
-// 1. "Meal Planner" AI: Generates the meal plan for the day. (Phase 1a)
+// [MODIFIED V12] Implements a "Four-Agent" AI system + Deterministic Calorie Calculation
+// 1. "Meal Planner" AI: Generates meal plan with stateHint/methodHint. (Phase 1a)
 // 2. "Grocery Optimizer" AI: Generates search queries for ingredients. (Phase 1b)
 // 3. "Chef" AI: Generates recipes for each meal. (Phase 1.5, in parallel)
-// (Phase 2-5: Market Run, Nutrition, Reconciliation, Response)
-// [MODIFIED] This endpoint is now a Server-Sent Events (SSE) stream
-// to send live logs and final data.
+// (Phase 2-5: Market Run, Nutrition, Transform/Calculation, Reconciliation, Response)
 
 /// ===== IMPORTS-START ===== \\\\
 const fetch = require('node-fetch');
@@ -17,11 +15,15 @@ const { fetchPriceData } = require('../price-search.js'); // Relative path
 const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path
 // Import the reconciler utility
 const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); // Relative path
+// --- [NEW V12] Import the cooking transform logic ---
+const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION } = require('../../utils/transforms.js');
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// [MODIFIED V12] Add Transform version to config
+const TRANSFORM_CONFIG_VERSION = TRANSFORM_VERSION || 'v12.0';
 
 // --- Using gemini-2.5-flash as the primary model ---
 const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
@@ -38,10 +40,13 @@ const kv = createClient({
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
-const CACHE_PREFIX = 'cheffy:plan:v1';
+// [MODIFIED V12] Bump cache version to account for new transforms
+const CACHE_PREFIX = `cheffy:plan:v2:t:${TRANSFORM_CONFIG_VERSION}`;
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
+// [MODIFIED V12] Increased timeout to 90s to handle API slowness
+const LLM_REQUEST_TIMEOUT_MS = 90000; // 90 seconds
 const MAX_NUTRITION_CONCURRENCY = 5;
 const MAX_MARKET_RUN_CONCURRENCY = 5;
 const BANNED_KEYWORDS = [
@@ -56,11 +61,11 @@ const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments"
 
 // --- V11 Unit Normalization Maps (Copied) ---
 const CANONICAL_UNIT_WEIGHTS_G = {
-    'egg': 50, 'slice': 35, 'piece': 150, 'banana': 120, 'potato': 200
+    'egg': 50, 'slice': 35, 'piece': 150, 'banana': 120, 'potato': 200, 'medium pancake': 60, 'large tortilla': 60, 'bun': 55, 'medium': 150, 'large': 200 // [V12] Added heuristic units
 };
 const DENSITY_MAP = {
     'milk': 1.03, 'cream': 1.01, 'oil': 0.92, 'sauce': 1.05, 'water': 1.0,
-    'juice': 1.04, 'yogurt': 1.05, 'wine': 0.98, 'beer': 1.01
+    'juice': 1.04, 'yogurt': 1.05, 'wine': 0.98, 'beer': 1.01, 'syrup': 1.33
 };
 /// ===== CONFIG-END ===== ////
 
@@ -74,54 +79,6 @@ const MOCK_RECIPE_FALLBACK = {
 
 
 /// ===== HELPERS-START ===== \\\\
-
-// --- [NEW] SSE Helper Functions ---
-/**
- * Sends a formatted Server-Sent Event (SSE) message to the client.
- * @param {object} response - The Vercel Serverless Response object.
- * @param {string} event - The event name (e.g., "message", "finalData", "error").
- * @param {object} data - The JSON-serializable data payload.
- */
-function sendSseMessage(response, event, data) {
-    if (!response || response.writableEnded) return; // Check if stream is still open
-    try {
-        const dataString = JSON.stringify(data);
-        response.write(`event: ${event}\n`);
-        response.write(`data: ${dataString}\n\n`);
-    } catch (e) {
-        console.error("SSE: Failed to stringify or write message.", e);
-    }
-}
-
-/**
- * Sends a structured error event over the SSE stream.
- * @param {object} response - The Vercel Serverless Response object.
- * @param {function} logFunction - The logger function to log the error.
- * @param {Error} error - The error object.
- * @param {string|number} day - The day context for the error.
- */
-function sendSseError(response, logFunction, error, day) {
-    const isPlanError = error.message.startsWith('Plan generation failed');
-    const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
-    
-    const errorPayload = {
-        message: error.message || "An internal server error occurred.",
-        day: day,
-        code: errorCode,
-        error: error.message,
-    };
-    
-    // Log the critical error *before* sending, in case send fails
-    if(logFunction) {
-        logFunction(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
-    } else {
-        console.error(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, { stack: error.stack?.substring(0, 500) });
-    }
-
-    sendSseMessage(response, 'error', errorPayload);
-}
-
-// --- [NEW] End SSE Helper Functions ---
 
 // --- [NEW] Cache Helpers ---
 async function cacheGet(key, log) {
@@ -150,19 +107,33 @@ function hashString(str) {
 // --- [NEW] End Cache Helpers ---
 
 
-// --- Logger (Copied and Simplified) ---
-/**
- * [MODIFIED] Creates a logger that streams logs over SSE.
- * @param {string} run_id - The unique ID for this run.
- * @param {string|number} day - The day context.
- * @param {object} response - The Vercel Serverless Response object.
- * @param {function} clientDidClose - A function that returns true if the client disconnected.
- */
-function createLogger(run_id, day, response, clientDidClose) {
-    // const logs = []; // [MODIFIED] Removed log array
-    const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
+// --- [MODIFIED V12] Logger (SSE Aware) ---
+function createLogger(run_id, day, responseStream = null) {
+    const logs = [];
+    
+    /**
+     * Writes a Server-Sent Event (SSE) to the response stream.
+     * @param {string} eventType - The event type (e.g., 'message', 'finalData').
+     * @param {object} data - The JSON-serializable data payload.
+     */
+    const writeSseEvent = (eventType, data) => {
+        if (!responseStream || responseStream.writableEnded) {
+            return; // Can't write to a closed or non-existent stream
+        }
         try {
-            const logEntry = {
+            const dataString = JSON.stringify(data);
+            responseStream.write(`event: ${eventType}\n`);
+            responseStream.write(`data: ${dataString}\n\n`);
+        } catch (e) {
+            // This might fail if the client disconnected
+            console.error(`[SSE] Failed to write event ${eventType} to stream: ${e.message}`);
+        }
+    };
+
+    const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
+        let logEntry;
+        try {
+            logEntry = {
                 timestamp: new Date().toISOString(),
                 run_id: run_id, // Add run_id
                 day: day,       // Add day context
@@ -173,17 +144,12 @@ function createLogger(run_id, day, response, clientDidClose) {
                     (typeof value === 'string' && value.length > 300) ? value.substring(0, 300) + '...' : value
                 )) : null
             };
+            logs.push(logEntry);
             
-            // --- [MODIFIED] Stream the log entry ---
-            // 1. Check if client is still connected
-            if (clientDidClose()) {
-                 console.log(`[SSE] Client closed, skipping log: ${message}`);
-                 return logEntry; // Return entry but don't send
-            }
-            // 2. Send log to client via SSE
-            sendSseMessage(response, 'message', logEntry);
-            // --- [MODIFIED] End ---
-            
+            // --- [NEW] Write to stream immediately ---
+            writeSseEvent('message', logEntry);
+
+            // Also log to console for server visibility
              const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
              console.log(`Day ${day} ${time} [${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
              if (data && (level !== 'DEBUG' || ['ERROR', 'CRITICAL', 'WARN'].includes(level))) {
@@ -195,17 +161,41 @@ function createLogger(run_id, day, response, clientDidClose) {
             return logEntry;
         } catch (error) {
              const fallbackEntry = { timestamp: new Date().toISOString(), run_id: run_id, day:day, level: 'ERROR', tag: 'LOGGING', message: `Log serialization failed: ${message}`, data: { error: error.message }}
-             // logs.push(fallbackEntry); // [MODIFIED] Removed
+             logs.push(fallbackEntry);
              console.error(JSON.stringify(fallbackEntry));
-             // [MODIFIED] Try to send the serialization error to the client
-             if (!clientDidClose()) {
-                 sendSseMessage(response, 'message', fallbackEntry);
-             }
+             
+             // --- [NEW] Try to send serialization error to stream ---
+             writeSseEvent('message', fallbackEntry);
+
              return fallbackEntry;
         }
     };
-    return { log }; // [MODIFIED] Removed getLogs
+
+    // --- [NEW] Function to send a structured error event ---
+    const logErrorAndClose = (errorMessage, errorCode = "SERVER_FAULT_DAY") => {
+        log(errorMessage, 'CRITICAL', 'SYSTEM'); // Log it normally first
+        writeSseEvent('error', {
+            message: errorMessage,
+            code: errorCode
+        });
+        if (responseStream && !responseStream.writableEnded) {
+            responseStream.end();
+        }
+    };
+    
+    // --- [NEW] Function to send the final successful data ---
+    const sendFinalDataAndClose = (data) => {
+        writeSseEvent('finalData', data);
+        if (responseStream && !responseStream.writableEnded) {
+            log(`Generation complete, closing stream.`, 'DEBUG', 'SSE');
+            responseStream.end();
+        }
+    };
+
+    return { log, getLogs: () => logs, logErrorAndClose, sendFinalDataAndClose, writeSseEvent };
 }
+// --- [MODIFIED V12] End Logger ---
+
 
 // --- Other Helpers (Copied from generate-full-plan.js) ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -245,8 +235,8 @@ async function concurrentlyMap(array, limit, asyncMapper) {
 
 // --- fetchWithRetry specifically for LLM calls (Adjusted Timeout) ---
 async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
-    const LLM_REQUEST_TIMEOUT_MS = 75000; // 75 seconds
-
+    // [MODIFIED V12] Using configured 90s timeout
+    
     for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
@@ -434,13 +424,14 @@ function runSmarterChecklist(product, ingredientData, log) {
     return { pass: true, score: 1.0 }; // Simplified score for now
 }
 
-// --- V11 Unit Normalization (Copied) ---
+// --- [MODIFIED V12] Unit Normalization ---
 function normalizeToGramsOrMl(item, log) {
     if (!item || typeof item !== 'object') {
         log(`[Unit Conversion] Invalid item received: ${item}`, 'ERROR', 'CALC');
         return { value: 0, unit: 'g' }; // Default to 0g on error
     }
-    let { qty, unit, key } = item;
+    // [MODIFIED V12] Use qty_value from new prompt
+    let { qty_value: qty, qty_unit: unit, key } = item;
      // Basic validation
      if (typeof qty !== 'number' || isNaN(qty) || typeof unit !== 'string' || typeof key !== 'string') {
         log(`[Unit Conversion] Invalid fields in item:`, 'ERROR', 'CALC', item);
@@ -453,6 +444,17 @@ function normalizeToGramsOrMl(item, log) {
     if (unit === 'g' || unit === 'ml') return { value: qty, unit: unit };
     if (unit === 'kg') return { value: qty * 1000, unit: 'g' };
     if (unit === 'l') return { value: qty * 1000, unit: 'ml' };
+    
+    // [MODIFIED V12] Use density map for ml conversion first
+    if (unit === 'ml') {
+        let density = 1.0;
+        const foundDensityKey = Object.keys(DENSITY_MAP).find(k => key.includes(k));
+        if (foundDensityKey) {
+            density = DENSITY_MAP[foundDensityKey];
+        }
+        log(`[Unit Conversion] Converting ${qty}ml of '${key}' to ${qty * density}g using density ${density}.`, 'DEBUG', 'CALC');
+        return { value: qty * density, unit: 'g' }; // Convert ml to g for calculation
+    }
 
     let weightPerUnit = CANONICAL_UNIT_WEIGHTS_G[unit];
     let usedHeuristic = true;
@@ -478,8 +480,10 @@ function normalizeToGramsOrMl(item, log) {
     if (!['g', 'ml', 'kg', 'l'].includes(unit)) { // Log only non-standard conversions
         log(`[Unit Conversion] Converting ${qty} ${unit} of '${key}' to ${grams}g using ${weightPerUnit}g/unit.`, 'DEBUG', 'CALC', { key, fromUnit: unit, qty, toGrams: grams, heuristic: usedHeuristic });
     }
-    return { value: grams, unit: 'g' };
+    return { value: grams, unit: 'g' }; // Always return 'g' after heuristic conversion
 }
+// --- [MODIFIED V12] End Unit Normalization ---
+
 
 // --- Add synthesis functions ---
 function synthTight(ing, store) {
@@ -508,19 +512,22 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
-// --- [NEW] AGENT 1a: "MEAL PLANNER" SYSTEM PROMPT ---
+// --- [MODIFIED V12] AGENT 1a: "MEAL PLANNER" SYSTEM PROMPT ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
 RULES:
 1.  Generate meals ('meals') & items ('items') used TODAY.
-2.  **CRITICAL PROTEIN CAP: Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).** Aim for the protein target, but do not exceed this cap.
-3.  MEAL PORTIONS: For each meal in 'meals':
-    a) MUST populate 'items' array with 'key' (generic ingredient name), 'qty', and 'unit' ('g', 'ml', 'slice', 'egg').
-    b) **STRONGLY AIM** for the sum of estimated calories from ALL 'items' across ALL meals for Day ${day} to be **close (ideally within +/- 15%)** to the **${calories} kcal** target. Adjust 'qty' values (esp. carbs/fats) generally towards this goal, but prioritize generating the correct meal structure.
-    c) No single meal's 'items' should sum > **${mealMax} kcal**.
-4.  Adhere to all constraints.
-5.  'meals' array is MANDATORY (only for today).
-6.  Do NOT include an 'ingredients' array.
+2.  **CRITICAL PROTEIN CAP: Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).**
+3.  MEAL PORTIONS: For each meal, populate 'items' with:
+    a) 'key': (string) The generic ingredient name.
+    b) 'qty_value': (number) The portion size for the user.
+    c) 'qty_unit': (string) e.g., 'g', 'ml', 'slice', 'egg', 'medium', 'large'.
+    d) 'stateHint': (string) MANDATORY. The state of the ingredient. Must be one of: "dry", "raw", "cooked", "as_pack".
+    e) 'methodHint': (string | null) MANDATORY. Cooking method if state is "cooked". Must be one of: "boiled", "pan_fried", "grilled", "baked", "steamed", or null.
+4.  TARGETS: Aim for the protein target. The code will calculate calories based on your plan; you do NOT need to estimate them.
+5.  Adhere to all user constraints.
+6.  'meals' array is MANDATORY. Do NOT include 'ingredients' array.
+7.  Do NOT include calorie estimates in your response.
 
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
@@ -531,13 +538,19 @@ JSON Structure:
       "type": "string",
       "name": "string",
       "items": [
-        { "key": "string", "qty": number, "unit": "string" }
+        {
+          "key": "string",
+          "qty_value": number,
+          "qty_unit": "string",
+          "stateHint": "string",
+          "methodHint": "string|null"
+        }
       ]
     }
   ]
 }
 `;
-// --- [NEW] END: MEAL PLANNER PROMPT ---
+// --- [MODIFIED V12] END: MEAL PLANNER PROMPT ---
 
 
 // --- [NEW] AGENT 1b: "GROCERY OPTIMIZER" SYSTEM PROMPT ---
@@ -684,7 +697,7 @@ async function generateMealPlan(day, formData, nutritionalTargets, log) {
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5); // 50% variance allowed per meal
 
-    // --- [NEW] Use MEAL_PLANNER_SYSTEM_PROMPT ---
+    // --- [MODIFIED V12] Use MEAL_PLANNER_SYSTEM_PROMPT ---
     const systemPrompt = MEAL_PLANNER_SYSTEM_PROMPT(weight, calories, mealMax, day);
 
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
@@ -888,8 +901,8 @@ async function generateChefInstructions(meal, store, log) {
 
         const systemPrompt = CHEF_SYSTEM_PROMPT(store);
 
-        // Format ingredients for the query
-        const ingredientList = meal.items.map(item => `- ${item.qty}${item.unit} ${item.key}`).join('\n');
+        // [MODIFIED V12] Format ingredients for the query using new keys
+        const ingredientList = meal.items.map(item => `- ${item.qty_value}${item.qty_unit} ${item.key}`).join('\n');
         const userQuery = `Generate a recipe for "${meal.name}" using only these ingredients:\n${ingredientList}`;
         
         log(`Chef AI Prompt for [${mealName}]`, 'INFO', 'LLM_PROMPT', {
@@ -960,14 +973,47 @@ function extractUniqueIngredientKeys(meals) {
 
 /// ===== API-CALLERS-END ===== ////
 
+/// ===== MAIN-HANDLER-START ===== \\\\
 
-/**
- * [MODIFIED] This function contains the core generation logic.
- * It is now called by the main SSE handler.
- */
-async function runGeneration(request, response, day, log, clientDidClose) {
-    let scaleFactor = null; // For reconciliation telemetry
+// [MODIFIED V12] Use Vercel Edge runtime for streaming
+// export const config = {
+//   runtime: 'edge', // Use this if you switch to native streaming
+// };
+
+module.exports = async (request, response) => {
+    const run_id = crypto.randomUUID(); // Unique ID for this specific day's run
+    const day = request.query.day ? parseInt(request.query.day, 10) : null;
+
+    // --- [MODIFIED V12] Setup SSE Stream ---
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.setHeader('Access-Control-Allow-Origin', '*');
     
+    // Pass the response stream to the logger
+    const { log, getLogs, logErrorAndClose, sendFinalDataAndClose } = createLogger(run_id, day || 'unknown', response);
+    // --- End SSE Setup ---
+
+
+    // Handle OPTIONS
+    if (request.method === 'OPTIONS') {
+        log("Handling OPTIONS pre-flight.", 'INFO', 'HTTP');
+        response.status(200).end(); // End immediately, headers already set
+        return;
+    }
+
+    // Handle non-POST methods
+    if (request.method !== 'POST') {
+        log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
+        response.setHeader('Allow', 'POST, OPTIONS');
+        // [MODIFIED V12] Use logger to send error
+        logErrorAndClose(`Method ${request.method} Not Allowed.`, "METHOD_NOT_ALLOWED");
+        return;
+    }
+
+    // --- Main Logic ---
+    let scaleFactor = null; // For reconciliation telemetry
+
     try {
         log(`Generating plan for Day ${day}...`, 'INFO', 'SYSTEM');
 
@@ -1029,7 +1075,8 @@ async function runGeneration(request, response, day, log, clientDidClose) {
             const result = recipeSettledResults[index];
             if (result.status === 'fulfilled' && result.value) {
                 // Success: Merge the description and instructions
-                return { ...meal, ...result.value }; // result.value is { description, instructions }
+                // [MODIFIED V12] Also merge the AI's items array
+                return { ...meal, ...result.value };
             } else {
                 // Failure: Log the error and use a fallback
                 log(`Chef AI failed for meal "${meal.name}": ${result.reason?.message || 'Unknown error'}`, 'ERROR', 'LLM_CHEF');
@@ -1259,43 +1306,72 @@ async function runGeneration(request, response, day, log, clientDidClose) {
          }
          if (canonicalHitsToday > 0) log(`Used ${canonicalHitsToday} canonical fallbacks for Day ${day}.`, 'INFO', 'CALC');
 
-        // --- Define getItemMacros specific to this day's context ---
-        const computeItemMacros = (item) => {
-             if (!item || !item.key || typeof item.qty !== 'number' || !item.unit) {
+        
+        // --- [MODIFIED V12] Define computeItemMacros ---
+        // This function now uses the V12 transform logic
+        /**
+         * @typedef {object} MealItem
+         * @property {string} key
+         * @property {number} qty_value
+         * @property {string} qty_unit
+         * @property {string} stateHint
+         * @property {string|null} methodHint
+         * @property {string} [normalizedKey]
+         */
+         
+        /**
+         * Calculates macros for a single item using V12 transform logic.
+         * @param {MealItem} item - The meal item object.
+         * @param {Array<MealItem>} mealItems - All items in the same meal (for oil calculation).
+         * @returns {{p: number, f: number, c: number, kcal: number, key: string, densityHeuristicUsed: boolean}}
+         */
+        const computeItemMacros = (item, mealItems) => {
+             if (!item || !item.key || typeof item.qty_value !== 'number' || !item.qty_unit) {
                 log(`[computeItemMacros] Invalid item structure received (Day ${day}).`, 'ERROR', 'CALC', item);
                 throw new Error(`Plan generation failed for Day ${day}: Invalid item structure during calculation for "${item?.key || 'unknown'}".`);
              }
              const normalizedKey = item.normalizedKey || normalizeKey(item.key);
              item.normalizedKey = normalizedKey; // Ensure it's attached
 
+             // 1. Normalize user-facing quantity to g/ml
              const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
 
              if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0 || gramsOrMl > 5000) {
                  log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${item.key}' (Day ${day}).`, 'CRITICAL', 'CALC', { item, gramsOrMl });
-                 throw new Error(`Plan generation failed for Day ${day}: Invalid quantity (${item.qty} ${item.unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${item.key}"`);
+                 throw new Error(`Plan generation failed for Day ${day}: Invalid quantity (${item.qty_value} ${item.qty_unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${item.key}"`);
              }
              if (gramsOrMl === 0) {
-                 // Return 0 if the quantity resulted in 0 grams/ml
                  return { p: 0, f: 0, c: 0, kcal: 0, key: item.key, densityHeuristicUsed: false };
              }
-
+             
+             // 2. [V12] Convert g/ml (cooked) to "as_sold" (dry/raw)
+             const { grams_as_sold, log_msg: transform_log, inferredState, inferredMethod } = toAsSold(item, gramsOrMl, log);
+             
+             // 3. Get 'as_sold' nutrition data
              const nutritionData = nutritionDataMap.get(normalizedKey);
-             let grams = gramsOrMl;
+             let grams = grams_as_sold; // Use the "as_sold" grams for calculation
              let p = 0, f = 0, c = 0, kcal = 0;
              let densityHeuristicUsed = false;
 
-             if (normalizedUnit === 'ml') {
+             // 4. [V12] Handle density for liquids (applies to as_pack items)
+             //    This logic is now handled in normalizeToGramsOrMl, which returns 'g'
+             if (inferredState === 'as_pack' && normalizedUnit === 'ml') {
                  let density = 1.0;
                  const keyLower = item.key.toLowerCase();
                  const foundDensityKey = Object.keys(DENSITY_MAP).find(k => keyLower.includes(k));
                  if (foundDensityKey) {
                      density = DENSITY_MAP[foundDensityKey];
+                     // We re-calculate 'grams' only if it's an 'as_pack' 'ml' item
+                     // because normalizeToGramsOrMl converted *all* ml to g, which we don't want for 'as_sold' items.
+                     // We want the 'as_sold' grams, which for a liquid is ml * density.
+                     grams = gramsOrMl * density; // gramsOrMl is the original ml value
                  } else {
-                      densityHeuristicUsed = true;
+                     grams = gramsOrMl; // 1:1 density fallback
+                     densityHeuristicUsed = true;
                  }
-                 grams = gramsOrMl * density;
              }
 
+             // 5. Calculate base macros from 'as_sold' grams
              if (nutritionData && nutritionData.status === 'found') {
                  const proteinPer100 = Number(nutritionData.protein) || 0;
                  const fatPer100 = Number(nutritionData.fat) || 0;
@@ -1303,12 +1379,35 @@ async function runGeneration(request, response, day, log, clientDidClose) {
                  p = (proteinPer100 / 100) * grams;
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
-                 kcal = (p * 4) + (f * 9) + (c * 4);
              } else {
-                  log(`[computeItemMacros] No valid nutrition found for '${item.key}' (Day ${day}). Macros set to 0.`, 'WARN', 'CALC', { normalizedKey });
+                  log(`[computeItemMacros] No valid nutrition found for '${item.key}' (Day ${day}). Base macros set to 0.`, 'WARN', 'CALC', { normalizedKey });
              }
+             
+             // 6. [V12] Calculate and add absorbed oil
+             const { absorbed_oil_g, log_msg: oil_log_msg } = getAbsorbedOil(item, inferredMethod, mealItems, log);
+             if (absorbed_oil_g > 0) {
+                 f += absorbed_oil_g;
+             }
+             
+             // 7. Final calorie calculation
+             kcal = (p * 4) + (f * 9) + (c * 4);
+             
+             // [MODIFIED V12] Log the transform
+             log(`[computeItemMacros] ${item.key}: ${transform_log} | ${oil_log_msg} | Final: ${kcal.toFixed(0)}kcal`, 'DEBUG', 'CALC', {
+                 item,
+                 gramsOrMl_user: gramsOrMl,
+                 grams_as_sold: grams_as_sold,
+                 abs_oil_g: absorbed_oil_g,
+                 final_p: p,
+                 final_f: f,
+                 final_c: c,
+                 final_kcal: kcal
+             });
+
              return { p, f, c, kcal, key: item.key, densityHeuristicUsed };
          };
+        // --- [MODIFIED V12] End computeItemMacros ---
+
 
         // --- Calculate Initial Totals for the Day ---
         log(`Calculating initial totals for Day ${day}...`, 'INFO', 'CALC');
@@ -1337,6 +1436,10 @@ async function runGeneration(request, response, day, log, clientDidClose) {
                  meal.subtotal_kcal = 0;
                  continue;
             }
+            
+            // [MODIFIED V12] Create a new getItemMacros specific to this meal's context
+            const mealSpecificGetItemMacros = (item) => computeItemMacros(item, meal.items);
+            
              const mergedItemsMap = new Map();
              for(const item of meal.items) {
                  if (!item || !item.normalizedKey || !item.key) {
@@ -1345,7 +1448,8 @@ async function runGeneration(request, response, day, log, clientDidClose) {
                  }
                  const existing = mergedItemsMap.get(item.normalizedKey);
                  if (existing) {
-                     existing.qty += (item.qty || 0);
+                     // [MODIFIED V12] Use qty_value
+                     existing.qty_value += (item.qty_value || 0);
                  } else {
                      mergedItemsMap.set(item.normalizedKey, { ...item });
                  }
@@ -1356,7 +1460,8 @@ async function runGeneration(request, response, day, log, clientDidClose) {
             let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
             for (const item of meal.items) {
                  try {
-                     const macros = computeItemMacros(item);
+                     // [MODIFIED V12] Pass meal.items for oil context
+                     const macros = computeItemMacros(item, meal.items);
                      mealKcal += macros.kcal;
                      mealP += macros.p;
                      mealF += macros.f;
@@ -1388,6 +1493,10 @@ async function runGeneration(request, response, day, log, clientDidClose) {
                   log(`Validation Error: Meal "${meal.name}" has zero or negative calculated calories (Day ${day}).`, 'CRITICAL', 'CALC', { meal });
                   mealHasInvalidItems = true;
              }
+             
+             // [MODIFIED V12] Attach meal-specific macro getter for reconciliation
+             meal.getItemMacros = mealSpecificGetItemMacros;
+             
         } // End meal loop
 
         if (mealHasInvalidItems) {
@@ -1403,18 +1512,52 @@ async function runGeneration(request, response, day, log, clientDidClose) {
         let reconciledMeals = finalDayMeals; // Use the meals that already have recipes
         let finalDayTotals = { calories: initialDayKcal, protein: initialDayP, fat: initialDayF, carbs: initialDayC };
 
+        // [MODIFIED V12] Create a new getItemMacros for the *reconciler*
+        // This wrapper function finds the correct meal's macro getter
+        const reconcilerGetItemMacros = (item) => {
+            // Find the meal this item belongs to
+            const meal = finalDayMeals.find(m => m.items.some(i => i.key === item.key && i.qty_value === item.qty_value && i.stateHint === item.stateHint));
+            if (meal && meal.getItemMacros) {
+                return meal.getItemMacros(item);
+            }
+            // Fallback (should not be hit if logic is correct)
+            log(`[RECON] Could not find meal context for item ${item.key}. Using context-less calc.`, 'WARN', 'CALC');
+            return computeItemMacros(item, []);
+        };
+
+
         if (RECONCILE_FLAG && Math.abs(initialDeviation) > 0.05) { // 5% tolerance
             log(`[RECON Day ${day}] Deviation ${(initialDeviation * 100).toFixed(1)}% > 5%. Attempting reconciliation.`, 'WARN', 'CALC');
 
+            // [MODIFIED V12] Re-map items for the reconciler to use its expected 'qty' 'unit' format
+            const mealsForReconciler = finalDayMeals.map(m => ({
+                ...m,
+                items: m.items.map(i => ({
+                    ...i,
+                    qty: i.qty_value,
+                    unit: i.qty_unit
+                }))
+            }));
+            
             const { adjusted, factor, meals: scaledMeals } = reconcileNonProtein({
-                meals: finalDayMeals, // Pass the meals *with* recipe data
+                meals: mealsForReconciler, // Pass the re-mapped meals
                 targetKcal: targetCalories,
-                getItemMacros: computeItemMacros,
+                getItemMacros: reconcilerGetItemMacros, // [V12] Pass the new wrapper
                 tolPct: 5
             });
 
             if (adjusted) {
-                reconciledMeals = scaledMeals; // Use the scaled meals
+                // [MODIFIED V12] Map the reconciled 'qty' back to 'qty_value'
+                reconciledMeals = scaledMeals.map(m => ({
+                    ...m,
+                    items: m.items.map(i => ({
+                        ...i,
+                        qty_value: i.qty,
+                        qty_unit: i.unit
+                        // 'qty' and 'unit' will be cleaned up later
+                    }))
+                }));
+                
                 scaleFactor = factor;
 
                 let scaledKcal = 0, scaledP = 0, scaledF = 0, scaledC = 0;
@@ -1423,7 +1566,8 @@ async function runGeneration(request, response, day, log, clientDidClose) {
                       if (!meal || !Array.isArray(meal.items)) continue;
                      for (const item of meal.items) {
                           try {
-                             const macros = computeItemMacros(item);
+                             // [MODIFIED V12] Recalculate using the meal's context
+                             const macros = computeItemMacros(item, meal.items);
                              mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                           } catch (reconItemError) {
                               log(`Error recalculating macros post-reconciliation for "${item.key}" (Day ${day}): ${reconItemError.message}`, 'CRITICAL', 'CALC');
@@ -1469,8 +1613,19 @@ async function runGeneration(request, response, day, log, clientDidClose) {
                 meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
                 meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
                  if(Array.isArray(meal.items)){
-                     meal.items.forEach(item => { if(item) delete item.normalizedKey; });
+                     meal.items.forEach(item => {
+                        if(item) {
+                            // [MODIFIED V12] Rename qty_value back to qty for frontend
+                            item.qty = item.qty_value;
+                            item.unit = item.qty_unit;
+                            delete item.normalizedKey;
+                            delete item.getItemMacros;
+                            delete item.qty_value;
+                            delete item.qty_unit;
+                        }
+                     });
                  }
+                 delete meal.getItemMacros; // Clean up helper function
             }
         });
 
@@ -1496,89 +1651,28 @@ async function runGeneration(request, response, day, log, clientDidClose) {
             dayResults: Object.fromEntries(dayResultsMap.entries()),
             // --- End Modification ---
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
-            // logs: getLogs() // [MODIFIED] Removed logs, they were streamed
+            // logs: getLogs() // [MODIFIED V12] Logs are now streamed
         };
 
         log(`Successfully completed generation for Day ${day}.`, 'SUCCESS', 'SYSTEM');
         
-        // --- [MODIFIED] Send final data event ---
-        if (clientDidClose()) return; // Don't send if client left
-        sendSseMessage(response, 'finalData', responseData);
-        // --- [MODIFIED] End ---
+        // [MODIFIED V12] Send final data via SSE
+        sendFinalDataAndClose(responseData);
+        return;
 
     } catch (error) {
-        // [MODIFIED] Send error over SSE stream
-        console.error(`DAY ${day} UNHANDLED ERROR in runGeneration:`, error);
-        if (clientDidClose()) return; // Don't send error if client left
-        
-        // The log function is already called by sendSseError
-        sendSseError(response, log, error, day);
+        log(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
+        console.error(`DAY ${day} UNHANDLED ERROR:`, error);
+
+        const isPlanError = error.message.startsWith('Plan generation failed');
+        const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
+
+        // [MODIFIED V12] Use logger to send error over SSE
+        logErrorAndClose(error.message, errorCode);
+        return;
     }
-}
-
-
-/// ===== MAIN-HANDLER-START ===== \\\\
-
-// [MODIFIED] Main handler is now a non-async function that sets up the SSE stream.
-module.exports = (request, response) => {
-    const run_id = crypto.randomUUID(); // Unique ID for this specific day's run
-    const day = request.query.day ? parseInt(request.query.day, 10) : null;
-    
-    // Set CORS headers
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept'); // Added Accept for SSE
-
-    // Handle OPTIONS
-    if (request.method === 'OPTIONS') {
-        console.log(`[SSE] Handling OPTIONS pre-flight for Day ${day || 'unknown'}.`);
-        return response.status(200).end();
-    }
-
-    // Set SSE headers
-    response.setHeader('Content-Type', 'text/event-stream');
-    response.setHeader('Cache-Control', 'no-cache');
-    response.setHeader('Connection', 'keep-alive');
-    response.flushHeaders(); // Send headers immediately
-
-    // --- [NEW] Handle client disconnect ---
-    let clientClosed = false;
-    const clientDidClose = () => clientClosed;
-    request.on('close', () => {
-        clientClosed = true;
-        console.log(`[SSE] Client disconnected for run ${run_id}, Day ${day}.`);
-        response.end(); // Ensure response is ended when client disconnects
-    });
-    // --- [NEW] End ---
-
-    // --- [NEW] Create logger with response object ---
-    const { log } = createLogger(run_id, day || 'unknown', response, clientDidClose);
-
-    // Handle non-POST methods
-    if (request.method !== 'POST') {
-        sendSseError(response, log, new Error(`Method Not Allowed: ${request.method}`), day);
-        return response.end();
-    }
-    
-    // --- [NEW] Call the async generation logic ---
-    runGeneration(request, response, day, log, clientDidClose)
-        .then(() => {
-            // After runGeneration finishes (success or caught error), end the stream
-            if (!clientClosed) {
-                log("Generation complete, closing stream.", 'DEBUG', 'SSE');
-                response.end();
-            }
-        })
-        .catch((e) => {
-            // This catch is a fallback for *unexpected* promise rejections
-            // in runGeneration that weren't handled by its own try/catch.
-            console.error(`[SSE] UNHANDLED runGeneration rejection: ${e.message}`, e);
-            if (!clientClosed) {
-                sendSseError(response, log, e, day);
-                response.end();
-            }
-        });
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
 
