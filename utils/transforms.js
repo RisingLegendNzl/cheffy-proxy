@@ -1,17 +1,28 @@
 /**
- * Cheffy Orchestrator (V12)
+ * Cheffy Orchestrator (V12.1)
  * Cooking Transforms & Nutrition Calculation Logic
  *
  * This module contains the canonical logic for:
- * 1. Cooking yield/loss factors (dry -> cooked, raw -> cooked).
- * 2. Oil absorption rates based on cooking methods.
- * 3. Functions to convert "cooked" user-facing quantities back to "as_sold" (dry/raw) equivalents
+ * 1. Unit Normalization (g/ml, heuristics).
+ * 2. Cooking yield/loss factors (dry -> cooked, raw -> cooked).
+ * 3. Oil absorption rates based on cooking methods.
+ * 4. Functions to convert "cooked" user-facing quantities back to "as_sold" (dry/raw) equivalents
  * for accurate calorie calculation.
  *
  * This file is in CommonJS format.
  */
 
-const TRANSFORM_VERSION = "2025-10-30.1";
+const TRANSFORM_VERSION = "2025-10-30.2"; // Incremented version
+
+// --- Moved from day.js: Unit Normalization Dependencies ---
+const CANONICAL_UNIT_WEIGHTS_G = {
+    'egg': 50, 'slice': 35, 'piece': 150, 'banana': 120, 'potato': 200, 'medium pancake': 60, 'large tortilla': 60, 'bun': 55, 'medium': 150, 'large': 200
+};
+const DENSITY_MAP = {
+    'milk': 1.03, 'cream': 1.01, 'oil': 0.92, 'sauce': 1.05, 'water': 1.0,
+    'juice': 1.04, 'yogurt': 1.05, 'wine': 0.98, 'beer': 1.01, 'syrup': 1.33
+};
+// --- End Moved Dependencies ---
 
 // 1. Yields Table (YIELDS[key].dry_to_cooked = 2.75 means 100g dry -> 275g cooked)
 // To convert "cooked" back to "dry", we divide: cooked_weight / dry_to_cooked
@@ -59,6 +70,79 @@ const OIL_ABSORPTION = {
     steamed: 0.0,
     default: 0.0 // Assume no absorption if unknown
 };
+
+/**
+ * --- Moved from day.js: Unit Normalization Function ---
+ * Normalizes item quantity to grams or ml.
+ * @param {object} item - The meal item object.
+ * @param {function} log - The logger function.
+ * @returns {{ value: number, unit: 'g' | 'ml' }}
+ */
+function normalizeToGramsOrMl(item, log) {
+    // Ensure log is a function, provide a dummy if not
+    const safeLog = typeof log === 'function' ? log : () => {};
+
+    if (!item || typeof item !== 'object') {
+        safeLog(`[Unit Conversion] Invalid item received: ${item}`, 'ERROR', 'CALC');
+        return { value: 0, unit: 'g' }; // Default to 0g on error
+    }
+
+    let { qty_value: qty, qty_unit: unit, key } = item;
+
+    // Basic validation
+    if (typeof qty !== 'number' || isNaN(qty) || typeof unit !== 'string' || typeof key !== 'string') {
+        safeLog(`[Unit Conversion] Invalid fields in item:`, 'ERROR', 'CALC', item);
+        return { value: 0, unit: 'g' };
+    }
+
+    unit = unit.toLowerCase().trim().replace(/s$/, '');
+    key = key.toLowerCase();
+
+    if (unit === 'g' || unit === 'ml') return { value: qty, unit: unit };
+    if (unit === 'kg') return { value: qty * 1000, unit: 'g' };
+    if (unit === 'l') return { value: qty * 1000, unit: 'ml' };
+
+    // Use density map for ml conversion first (converts ml to g)
+    if (unit === 'ml') {
+        let density = 1.0;
+        const foundDensityKey = Object.keys(DENSITY_MAP).find(k => key.includes(k));
+        if (foundDensityKey) {
+            density = DENSITY_MAP[foundDensityKey];
+        }
+        safeLog(`[Unit Conversion] Converting ${qty}ml of '${key}' to ${qty * density}g using density ${density}.`, 'DEBUG', 'CALC');
+        return { value: qty * density, unit: 'g' }; // Convert ml to g for calculation consistency
+    }
+
+    // Heuristic unit weights (converts pieces/slices etc. to g)
+    let weightPerUnit = CANONICAL_UNIT_WEIGHTS_G[unit];
+    let usedHeuristic = true;
+
+    if (!weightPerUnit) {
+        if (key.includes('egg')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['egg'];
+        else if (key.includes('bread') || key.includes('toast')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['slice'];
+        else if (key.includes('banana')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['banana'];
+        else if (key.includes('potato')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['potato'];
+        else weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['piece']; // Default
+    } else {
+        usedHeuristic = false;
+    }
+
+    // Final check for weightPerUnit
+    if (typeof weightPerUnit !== 'number' || isNaN(weightPerUnit) || weightPerUnit <= 0) {
+        safeLog(`[Unit Conversion] Could not determine valid weight for unit '${unit}' key '${key}'. Defaulting to 150g.`, 'WARN', 'CALC', item);
+        weightPerUnit = 150; // Use a reasonable default if lookup fails
+        usedHeuristic = true;
+    }
+
+    const grams = qty * weightPerUnit;
+
+    if (!['g', 'ml', 'kg', 'l'].includes(unit)) { // Log only non-standard conversions
+        safeLog(`[Unit Conversion] Converting ${qty} ${unit} of '${key}' to ${grams}g using ${weightPerUnit}g/unit.`, 'DEBUG', 'CALC', { key, fromUnit: unit, qty, toGrams: grams, heuristic: usedHeuristic });
+    }
+    return { value: grams, unit: 'g' }; // Always return 'g' after heuristic conversion
+}
+// --- End Moved Unit Normalization ---
+
 
 /**
  * Helper to pick the right yield factor based on the item key.
@@ -119,6 +203,8 @@ function getOilAbsorptionRate(methodHint) {
  * @returns {{stateHint: string, methodHint: string | null}}
  */
 function inferHints(item, log) {
+    // Ensure log is a function, provide a dummy if not
+    const safeLog = typeof log === 'function' ? log : () => {};
     let { key, stateHint, methodHint } = item;
     const keyLower = (key || '').toLowerCase();
 
@@ -129,22 +215,22 @@ function inferHints(item, log) {
     }
 
     // AI did not provide state, we must infer
-    log(`[inferHints] No/invalid stateHint '${stateHint}' for '${key}', inferring...`, 'WARN', 'CALC');
+    safeLog(`[inferHints] No/invalid stateHint '${stateHint}' for '${key}', inferring...`, 'WARN', 'CALC');
 
     if (keyLower.includes('cooked') || keyLower.includes('baked') || keyLower.includes('grilled') || keyLower.includes('steamed') || keyLower.includes('boiled')) {
         stateHint = 'cooked';
     } else if (keyLower.includes('rice') || keyLower.includes('pasta') || keyLower.includes('oats') || keyLower.includes('quinoa')) {
         // Assumption: If AI gives a grain quantity, it's the final *cooked* amount.
         stateHint = 'cooked';
-        log(`[inferHints] Inferred '${key}' as 'cooked'.`, 'DEBUG', 'CALC');
+        safeLog(`[inferHints] Inferred '${key}' as 'cooked'.`, 'DEBUG', 'CALC');
     } else if (keyLower.includes('chicken') || keyLower.includes('beef') || keyLower.includes('pork') || keyLower.includes('salmon') || keyLower.includes('fish') || keyLower.includes('mince') || keyLower.includes('steak')) {
-        // Assumption: If AI gives a meat quantity, it's the *raw* (as-sold) amount.
+        // Assumption: If AI gives a meat quantity, it's the *raw* (as-sold) amount unless specified.
         stateHint = 'raw';
-        log(`[inferHints] Inferred '${key}' as 'raw'.`, 'DEBUG', 'CALC');
+        safeLog(`[inferHints] Inferred '${key}' as 'raw'.`, 'DEBUG', 'CALC');
     } else {
         // Default assumption: as_pack (e.g., yogurt, milk, bread, oil, sauce, cheese)
         stateHint = 'as_pack';
-        log(`[inferHints] Inferred '${key}' as 'as_pack'.`, 'DEBUG', 'CALC');
+        safeLog(`[inferHints] Inferred '${key}' as 'as_pack'.`, 'DEBUG', 'CALC');
     }
 
     // Simple method inference if not provided
@@ -152,7 +238,12 @@ function inferHints(item, log) {
         if (keyLower.includes('baked')) methodHint = 'baked';
         else if (keyLower.includes('grilled')) methodHint = 'grilled';
         else if (keyLower.includes('boiled') || keyLower.includes('steamed')) methodHint = 'boiled';
-        else if (keyLower.includes('rice') || keyLower.includes('pasta')) methodHint = 'boiled';
+        else if (keyLower.includes('rice') || keyLower.includes('pasta')) methodHint = 'boiled'; // Assume boiled for grains
+        else if (stateHint === 'cooked') {
+             // If cooked state was inferred but method wasn't obvious from name, default based on type
+             if (keyLower.includes('chicken') || keyLower.includes('beef') || keyLower.includes('pork') || keyLower.includes('mince')) methodHint = 'pan_fried'; // Common default
+             else if (keyLower.includes('potato') || keyLower.includes('veg')) methodHint = 'boiled'; // Common default
+        }
     }
 
     return { stateHint, methodHint };
@@ -167,7 +258,9 @@ function inferHints(item, log) {
  * @returns {{grams_as_sold: number, log_msg: string, inferredState: string, inferredMethod: string | null}}
  */
 function toAsSold(item, gramsOrMl, log) {
-    const { stateHint, methodHint } = inferHints(item, log);
+    // Ensure log is a function, provide a dummy if not
+    const safeLog = typeof log === 'function' ? log : () => {};
+    const { stateHint, methodHint } = inferHints(item, safeLog);
     const { key } = item;
 
     // "raw", "dry", and "as_pack" are all considered "as_sold". No conversion needed.
@@ -205,7 +298,7 @@ function toAsSold(item, gramsOrMl, log) {
         log_msg = `state='cooked', ${gramsOrMl.toFixed(0)}g cooked -> ${grams_as_sold.toFixed(0)}g raw (/${yieldFactor.toFixed(2)})`;
     }
 
-    log(`[toAsSold] ${key}: ${log_msg}`, 'DEBUG', 'CALC');
+    safeLog(`[toAsSold] ${key}: ${log_msg}`, 'DEBUG', 'CALC');
     return {
         grams_as_sold,
         log_msg,
@@ -223,6 +316,8 @@ function toAsSold(item, gramsOrMl, log) {
  * @returns {{absorbed_oil_g: number, log_msg: string}}
  */
 function getAbsorbedOil(item, methodHint, mealItems, log) {
+    // Ensure log is a function, provide a dummy if not
+    const safeLog = typeof log === 'function' ? log : () => {};
     const oilAbsorptionRate = getOilAbsorptionRate(methodHint);
 
     if (oilAbsorptionRate === 0) {
@@ -247,36 +342,40 @@ function getAbsorbedOil(item, methodHint, mealItems, log) {
     
     // Simple model: Distribute absorbed oil proportionally by "as_sold" weight of fried items
     const friedItems = mealItems.filter(i => {
-        const m = (inferHints(i, () => {}).methodHint || '').toLowerCase();
+        const m = (inferHints(i, safeLog).methodHint || '').toLowerCase(); // Use safeLog
+        // Consider roasted items as potentially absorbing oil too
         return (m.includes('pan_fried') || m.includes('roasted')) && !(i.key || '').toLowerCase().includes('oil');
     });
 
     if (friedItems.length === 0) {
-        return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', no fried items found` };
+        return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', no fried/roasted items found` };
     }
 
-    // Calculate total weight of fried items to get proportion
+    // Calculate total weight of fried/roasted items to get proportion
     let totalFriedWeight = 0;
     for (const friedItem of friedItems) {
-        const { value: gOrMl } = normalizeToGramsOrMl(friedItem, log);
-        const { grams_as_sold } = toAsSold(friedItem, gOrMl, log);
+        // Use normalizeToGramsOrMl *defined in this file*
+        const { value: gOrMl } = normalizeToGramsOrMl(friedItem, safeLog); // Use safeLog
+        const { grams_as_sold } = toAsSold(friedItem, gOrMl, safeLog); // Use safeLog
         totalFriedWeight += grams_as_sold;
     }
 
-    if (totalFriedWeight === 0) {
-         return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', total fried weight is 0` };
+    if (totalFriedWeight <= 0) { // Check for non-positive total weight
+         return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', total fried/roasted weight is ${totalFriedWeight}` };
     }
     
     // Get this item's as_sold weight
-    const { value: currentGOrMl } = normalizeToGramsOrMl(item, log);
-    const { grams_as_sold: currentAsSoldWeight } = toAsSold(item, currentGOrMl, log);
+    // Use normalizeToGramsOrMl *defined in this file*
+    const { value: currentGOrMl } = normalizeToGramsOrMl(item, safeLog); // Use safeLog
+    const { grams_as_sold: currentAsSoldWeight } = toAsSold(item, currentGOrMl, safeLog); // Use safeLog
 
     // Calculate this item's share of the absorbed oil
-    const thisItemProportion = currentAsSoldWeight / totalFriedWeight;
+    // Ensure currentAsSoldWeight is non-negative before calculating proportion
+    const thisItemProportion = currentAsSoldWeight >= 0 ? currentAsSoldWeight / totalFriedWeight : 0;
     const absorbed_oil_g = (oil_g_total_in_meal * oilAbsorptionRate) * thisItemProportion;
     
     const log_msg = `method='${methodHint}', absorbed ${absorbed_oil_g.toFixed(1)}g oil (${(thisItemProportion * 100).toFixed(0)}% of total abs.)`;
-    log(`[getAbsorbedOil] ${item.key}: ${log_msg}`, 'DEBUG', 'CALC');
+    safeLog(`[getAbsorbedOil] ${item.key}: ${log_msg}`, 'DEBUG', 'CALC');
     return { absorbed_oil_g, log_msg };
 }
 
@@ -284,11 +383,13 @@ module.exports = {
     TRANSFORM_VERSION,
     YIELDS,
     OIL_ABSORPTION,
+    // --- Export the moved function ---
+    normalizeToGramsOrMl,
+    // --- End Export ---
     toAsSold,
     getAbsorbedOil,
     inferHints,
     getOilAbsorptionRate,
     getYield
 };
-
 
