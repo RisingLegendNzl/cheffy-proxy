@@ -161,7 +161,7 @@ function inferHints(item, log) {
 /**
  * Converts a meal item's quantity to its "as_sold" (raw/dry) equivalent.
  * e.g., "250g cooked rice" -> 83.3g dry rice
- * @param {object} item - The meal item object (must have key, qty, unit).
+ * @param {object} item - The meal item object (must have key, qty_value, qty_unit).
  * @param {number} gramsOrMl - The quantity already normalized to g/ml.
  * @param {function} log - The logger function.
  * @returns {{grams_as_sold: number, log_msg: string, inferredState: string, inferredMethod: string | null}}
@@ -218,7 +218,7 @@ function toAsSold(item, gramsOrMl, log) {
  * Calculates absorbed oil for a *single* item based on its method and meal context.
  * @param {object} item - The specific item being calculated.
  * @param {string} methodHint - The inferred or provided cooking method.
- * @param {Array} mealItems - All items in the meal (to find the oil).
+ * @param {Array} mealItems - All items in the same meal (to find the oil).
  * @param {function} log - The logger function.
  * @returns {{absorbed_oil_g: number, log_msg: string}}
  */
@@ -231,12 +231,12 @@ function getAbsorbedOil(item, methodHint, mealItems, log) {
 
     // Find the oil in the meal. Assumes *one* oil item per meal.
     const oilItem = mealItems.find(i => (i.key || '').toLowerCase().includes('oil'));
-    if (!oilItem || !oilItem.qty) {
+    if (!oilItem || !oilItem.qty_value) { // [V12] Check qty_value
         return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', no oil in meal` };
     }
 
     // Assume oil is in ml, convert to grams (density ~0.92)
-    const oil_ml = oilItem.qty;
+    const oil_ml = oilItem.qty_value;
     const oil_g_total_in_meal = oil_ml * 0.92;
 
     // Check if *this* item is the one being cooked (not the oil itself)
@@ -245,24 +245,39 @@ function getAbsorbedOil(item, methodHint, mealItems, log) {
         return { absorbed_oil_g: 0, log_msg: `item is oil, no abs` };
     }
     
-    // TODO: This is a simple model. It assumes the *first* "fried" item
-    // absorbs *all* the oil. A better model would distribute it.
-    // For now, this is a good start.
+    // Simple model: Distribute absorbed oil proportionally by "as_sold" weight of fried items
     const friedItems = mealItems.filter(i => {
         const m = (inferHints(i, () => {}).methodHint || '').toLowerCase();
-        return m.includes('pan_fried') || m.includes('roasted');
+        return (m.includes('pan_fried') || m.includes('roasted')) && !(i.key || '').toLowerCase().includes('oil');
     });
-    
-    // If this item is the first fried item, assign it all the absorbed oil.
-    if (friedItems.length > 0 && friedItems[0].key === item.key) {
-        const absorbed_oil_g = oil_g_total_in_meal * oilAbsorptionRate;
-        const log_msg = `method='${methodHint}', absorbed ${absorbed_oil_g.toFixed(1)}g oil (${(oilAbsorptionRate * 100).toFixed(0)}% of ${oil_ml}ml)`;
-        log(`[getAbsorbedOil] ${item.key}: ${log_msg}`, 'DEBUG', 'CALC');
-        return { absorbed_oil_g, log_msg };
+
+    if (friedItems.length === 0) {
+        return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', no fried items found` };
+    }
+
+    // Calculate total weight of fried items to get proportion
+    let totalFriedWeight = 0;
+    for (const friedItem of friedItems) {
+        const { value: gOrMl } = normalizeToGramsOrMl(friedItem, log);
+        const { grams_as_sold } = toAsSold(friedItem, gOrMl, log);
+        totalFriedWeight += grams_as_sold;
+    }
+
+    if (totalFriedWeight === 0) {
+         return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', total fried weight is 0` };
     }
     
-    // This is not the first fried item, so it absorbs 0 (for this simple model)
-    return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', oil assigned to other item` };
+    // Get this item's as_sold weight
+    const { value: currentGOrMl } = normalizeToGramsOrMl(item, log);
+    const { grams_as_sold: currentAsSoldWeight } = toAsSold(item, currentGOrMl, log);
+
+    // Calculate this item's share of the absorbed oil
+    const thisItemProportion = currentAsSoldWeight / totalFriedWeight;
+    const absorbed_oil_g = (oil_g_total_in_meal * oilAbsorptionRate) * thisItemProportion;
+    
+    const log_msg = `method='${methodHint}', absorbed ${absorbed_oil_g.toFixed(1)}g oil (${(thisItemProportion * 100).toFixed(0)}% of total abs.)`;
+    log(`[getAbsorbedOil] ${item.key}: ${log_msg}`, 'DEBUG', 'CALC');
+    return { absorbed_oil_g, log_msg };
 }
 
 module.exports = {
@@ -275,4 +290,5 @@ module.exports = {
     getOilAbsorptionRate,
     getYield
 };
+
 
