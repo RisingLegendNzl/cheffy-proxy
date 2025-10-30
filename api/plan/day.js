@@ -1,9 +1,7 @@
 // --- Cheffy API: /api/plan/day.js ---
-// [MODIFIED V12] Implements a "Four-Agent" AI system + Deterministic Calorie Calculation
-// 1. "Meal Planner" AI: Generates meal plan with stateHint/methodHint. (Phase 1a)
-// 2. "Grocery Optimizer" AI: Generates search queries for ingredients. (Phase 1b)
-// 3. "Chef" AI: Generates recipes for each meal. (Phase 1.5, in parallel)
-// (Phase 2-5: Market Run, Nutrition, Transform/Calculation, Reconciliation, Response)
+// [MODIFIED V12.1] Converted from streaming (SSE) to a standard Node.js JSON response
+// to fix Vercel runtime conflicts.
+// Implements a "Four-Agent" AI system + Deterministic Calorie Calculation
 
 /// ===== IMPORTS-START ===== \\\\
 const fetch = require('node-fetch');
@@ -107,28 +105,11 @@ function hashString(str) {
 // --- [NEW] End Cache Helpers ---
 
 
-// --- [MODIFIED V12] Logger (SSE Aware) ---
-function createLogger(run_id, day, responseStream = null) {
+// --- [MODIFIED V12.1] Logger (Non-Streaming) ---
+function createLogger(run_id, day) {
     const logs = [];
     
-    /**
-     * Writes a Server-Sent Event (SSE) to the response stream.
-     * @param {string} eventType - The event type (e.g., 'message', 'finalData').
-     * @param {object} data - The JSON-serializable data payload.
-     */
-    const writeSseEvent = (eventType, data) => {
-        if (!responseStream || responseStream.writableEnded) {
-            return; // Can't write to a closed or non-existent stream
-        }
-        try {
-            const dataString = JSON.stringify(data);
-            responseStream.write(`event: ${eventType}\n`);
-            responseStream.write(`data: ${dataString}\n\n`);
-        } catch (e) {
-            // This might fail if the client disconnected
-            console.error(`[SSE] Failed to write event ${eventType} to stream: ${e.message}`);
-        }
-    };
+    // [REMOVED] writeSseEvent function
 
     const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
         let logEntry;
@@ -146,8 +127,7 @@ function createLogger(run_id, day, responseStream = null) {
             };
             logs.push(logEntry);
             
-            // --- [NEW] Write to stream immediately ---
-            writeSseEvent('message', logEntry);
+            // [REMOVED] Immediate stream write
 
             // Also log to console for server visibility
              const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
@@ -164,37 +144,17 @@ function createLogger(run_id, day, responseStream = null) {
              logs.push(fallbackEntry);
              console.error(JSON.stringify(fallbackEntry));
              
-             // --- [NEW] Try to send serialization error to stream ---
-             writeSseEvent('message', fallbackEntry);
-
+             // [REMOVED] Stream write for serialization error
              return fallbackEntry;
         }
     };
 
-    // --- [NEW] Function to send a structured error event ---
-    const logErrorAndClose = (errorMessage, errorCode = "SERVER_FAULT_DAY") => {
-        log(errorMessage, 'CRITICAL', 'SYSTEM'); // Log it normally first
-        writeSseEvent('error', {
-            message: errorMessage,
-            code: errorCode
-        });
-        if (responseStream && !responseStream.writableEnded) {
-            responseStream.end();
-        }
-    };
-    
-    // --- [NEW] Function to send the final successful data ---
-    const sendFinalDataAndClose = (data) => {
-        writeSseEvent('finalData', data);
-        if (responseStream && !responseStream.writableEnded) {
-            log(`Generation complete, closing stream.`, 'DEBUG', 'SSE');
-            responseStream.end();
-        }
-    };
+    // [REMOVED] logErrorAndClose function
+    // [REMOVED] sendFinalDataAndClose function
 
-    return { log, getLogs: () => logs, logErrorAndClose, sendFinalDataAndClose, writeSseEvent };
+    return { log, getLogs: () => logs };
 }
-// --- [MODIFIED V12] End Logger ---
+// --- [MODIFIED V12.1] End Logger ---
 
 
 // --- Other Helpers (Copied from generate-full-plan.js) ---
@@ -975,26 +935,25 @@ function extractUniqueIngredientKeys(meals) {
 
 /// ===== MAIN-HANDLER-START ===== \\\\
 
-// [MODIFIED V12] Use Vercel Edge runtime for streaming
-// export const config = {
-//   runtime: 'edge', // Use this if you switch to native streaming
-// };
+// [REMOVED] Vercel Edge config comment
 
 module.exports = async (request, response) => {
     const run_id = crypto.randomUUID(); // Unique ID for this specific day's run
     const day = request.query.day ? parseInt(request.query.day, 10) : null;
 
-    // --- [MODIFIED V12] Setup SSE Stream ---
-    response.setHeader('Content-Type', 'text/event-stream');
+    // --- [MODIFIED V12.1] Setup Non-Streaming Logger ---
+    // Pass 'unknown' day if null, just for the logger
+    const { log, getLogs } = createLogger(run_id, day || 'unknown');
+    // --- End Logger Setup ---
+
+    // --- [MODIFIED V12.1] Set standard JSON headers ---
+    response.setHeader('Content-Type', 'application/json');
     response.setHeader('Cache-Control', 'no-cache');
-    response.setHeader('Connection', 'keep-alive');
     response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    // [REMOVED] Connection: keep-alive
     
-    // Pass the response stream to the logger
-    const { log, getLogs, logErrorAndClose, sendFinalDataAndClose } = createLogger(run_id, day || 'unknown', response);
-    // --- End SSE Setup ---
-
-
     // Handle OPTIONS
     if (request.method === 'OPTIONS') {
         log("Handling OPTIONS pre-flight.", 'INFO', 'HTTP');
@@ -1006,9 +965,12 @@ module.exports = async (request, response) => {
     if (request.method !== 'POST') {
         log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
         response.setHeader('Allow', 'POST, OPTIONS');
-        // [MODIFIED V12] Use logger to send error
-        logErrorAndClose(`Method ${request.method} Not Allowed.`, "METHOD_NOT_ALLOWED");
-        return;
+        // [MODIFIED V12.1] Return JSON error
+        return response.status(405).json({
+            message: `Method ${request.method} Not Allowed.`,
+            code: "METHOD_NOT_ALLOWED",
+            logs: getLogs()
+        });
     }
 
     // --- Main Logic ---
@@ -1651,14 +1613,13 @@ module.exports = async (request, response) => {
             dayResults: Object.fromEntries(dayResultsMap.entries()),
             // --- End Modification ---
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
-            // logs: getLogs() // [MODIFIED V12] Logs are now streamed
+            logs: getLogs() // [MODIFIED V12.1] Attach all logs to the final response
         };
 
         log(`Successfully completed generation for Day ${day}.`, 'SUCCESS', 'SYSTEM');
         
-        // [MODIFIED V12] Send final data via SSE
-        sendFinalDataAndClose(responseData);
-        return;
+        // [MODIFIED V12.1] Send final JSON response
+        return response.status(200).json(responseData);
 
     } catch (error) {
         log(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
@@ -1667,12 +1628,14 @@ module.exports = async (request, response) => {
         const isPlanError = error.message.startsWith('Plan generation failed');
         const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
 
-        // [MODIFIED V12] Use logger to send error over SSE
-        logErrorAndClose(error.message, errorCode);
-        return;
+        // [MODIFIED V12.1] Return JSON error
+        return response.status(500).json({
+            message: error.message,
+            code: errorCode,
+            logs: getLogs()
+        });
     }
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
