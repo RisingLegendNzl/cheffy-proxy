@@ -2,9 +2,13 @@
   "name": "cheffy-proxy-unified",
   "version": "2.1.4",
   "description": "Unified proxy and orchestrator for Cheffy with direct macro quantification.",
+  "scripts": {
+    "prebuild": "node scripts/build-canon.js"
+  },
   "dependencies": {
     "@vercel/kv": "^2.0.0",
     "node-fetch": "^2.7.0",
     "axios": "^1.7.2"
   }
 }
+
