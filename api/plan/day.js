@@ -1,5 +1,5 @@
 // --- Cheffy API: /api/plan/day.js ---
-// [MODIFIED V12.1] Fixed import issue causing crashes. Reverted to SSE streaming.
+// [MODIFIED V12.2] Switched all imports to CommonJS (require) to fix module errors.
 // Implements a "Four-Agent" AI system + Deterministic Calorie Calculation
 
 /// ===== IMPORTS-START ===== \\\\
@@ -12,17 +12,17 @@ const { fetchPriceData } = require('../price-search.js'); // Relative path
 const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path
 // Import the reconciler utility
 const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); // Relative path
-// --- [MODIFIED V12.1] Import normalizeToGramsOrMl along with other transform functions ---
-const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
-// --- [NEW] Import shared key normalizer ---
+// --- [MODIFIED] Use the shared CommonJS normalizer ---
 const { normalizeKey } = require('../../scripts/normalize.js');
+// --- [MODIFIED] Import normalizeToGramsOrMl along with other transform functions ---
+const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
 /// ===== CONFIG-START ===== \\\\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // Use TRANSFORM_VERSION imported from transforms.js
-const TRANSFORM_CONFIG_VERSION = TRANSFORM_VERSION || 'v12.1'; // Use updated version
+const TRANSFORM_CONFIG_VERSION = TRANSFORM_VERSION || 'v12.2-commonjs'; // Use updated version
 
 // --- Using gemini-2.5-flash as the primary model ---
 const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
@@ -39,7 +39,7 @@ const kv = createClient({
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
-// [MODIFIED V12.1] Bump cache version to account for new transforms
+// [MODIFIED] Bump cache version to account for new transforms
 const CACHE_PREFIX = `cheffy:plan:v2:t:${TRANSFORM_CONFIG_VERSION}`;
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
@@ -56,9 +56,6 @@ const BANNED_KEYWORDS = [
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
-
-// [REMOVED] CANONICAL_UNIT_WEIGHTS_G - Moved to transforms.js
-// [REMOVED] DENSITY_MAP - Moved to transforms.js
 /// ===== CONFIG-END ===== ////
 
 /// ===== MOCK-START ===== \\\\
@@ -99,7 +96,7 @@ function hashString(str) {
 // --- End Cache Helpers ---
 
 
-// --- [MODIFIED V12.1] Logger (SSE Aware - Restored) ---
+// --- Logger (SSE Aware - Unchanged) ---
 function createLogger(run_id, day, responseStream = null) {
     const logs = [];
     
@@ -141,7 +138,6 @@ function createLogger(run_id, day, responseStream = null) {
             };
             logs.push(logEntry);
             
-            // --- [RESTORED] Write to stream immediately ---
             writeSseEvent('message', logEntry);
 
             // Also log to console for server visibility
@@ -159,14 +155,12 @@ function createLogger(run_id, day, responseStream = null) {
              logs.push(fallbackEntry);
              console.error(JSON.stringify(fallbackEntry));
              
-             // --- [RESTORED] Try to send serialization error to stream ---
              writeSseEvent('message', fallbackEntry);
 
              return fallbackEntry;
         }
     };
 
-    // --- [RESTORED] Function to send a structured error event ---
     const logErrorAndClose = (errorMessage, errorCode = "SERVER_FAULT_DAY") => {
         log(errorMessage, 'CRITICAL', 'SYSTEM'); // Log it normally first
         writeSseEvent('error', {
@@ -178,7 +172,6 @@ function createLogger(run_id, day, responseStream = null) {
         }
     };
     
-    // --- [RESTORED] Function to send the final successful data ---
     const sendFinalDataAndClose = (data) => {
         writeSseEvent('finalData', data);
         if (responseStream && !responseStream.writableEnded) {
@@ -189,14 +182,12 @@ function createLogger(run_id, day, responseStream = null) {
 
     return { log, getLogs: () => logs, logErrorAndClose, sendFinalDataAndClose, writeSseEvent };
 }
-// --- [MODIFIED V12.1] End Logger Restoration ---
+// --- End Logger ---
 
 
 // --- Other Helpers (Unchanged) ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-// --- [DELETED] Old local normalizeKey function ---
-// const normalizeKey = (s = '') => s.toString().toLowerCase().trim().replace(/\s+/g, ' ');
+// --- [DELETED] Old local normalizeKey function (now imported) ---
 
 function getSanitizedFormData(formData) {
     try {
@@ -410,9 +401,6 @@ function runSmarterChecklist(product, ingredientData, log) {
     log(`${checkLogPrefix}: PASS`, 'DEBUG', 'CHECKLIST');
     return { pass: true, score: 1.0 }; // Simplified score for now
 }
-
-// [REMOVED] normalizeToGramsOrMl function - Now imported from transforms.js
-
 
 // --- Synthesis functions (Unchanged) ---
 function synthTight(ing, store) {
@@ -813,36 +801,32 @@ module.exports = async (request, response) => {
     const run_id = crypto.randomUUID();
     const day = request.query.day ? parseInt(request.query.day, 10) : null;
 
-    // --- [MODIFIED V12.1] Setup SSE Stream (Restored) ---
+    // --- Setup SSE Stream (Unchanged) ---
     response.setHeader('Content-Type', 'text/event-stream');
     response.setHeader('Cache-Control', 'no-cache');
     response.setHeader('Connection', 'keep-alive');
     response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); // Added OPTIONS back
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); // Added Headers back
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); 
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); 
     
-    // Pass the response stream to the logger
     const { log, getLogs, logErrorAndClose, sendFinalDataAndClose } = createLogger(run_id, day || 'unknown', response);
-    // --- End SSE Setup Restoration ---
+    // --- End SSE Setup ---
 
-    // Handle OPTIONS
     if (request.method === 'OPTIONS') {
         log("Handling OPTIONS pre-flight.", 'INFO', 'HTTP');
-        response.status(200).end(); // End immediately, headers already set
+        response.status(200).end(); 
         return;
     }
 
-    // Handle non-POST methods
     if (request.method !== 'POST') {
         log(`Method Not Allowed: ${request.method}`, 'WARN', 'HTTP');
         response.setHeader('Allow', 'POST, OPTIONS');
-        // [MODIFIED V12.1] Use logger to send SSE error
         logErrorAndClose(`Method ${request.method} Not Allowed.`, "METHOD_NOT_ALLOWED");
         return;
     }
 
     // --- Main Logic ---
-    let scaleFactor = null; // For reconciliation telemetry
+    let scaleFactor = null; 
 
     try {
         log(`Generating plan for Day ${day}...`, 'INFO', 'SYSTEM');
@@ -896,16 +880,16 @@ module.exports = async (request, response) => {
         });
         log(`Chef AI complete for Day ${day}.`, 'SUCCESS', 'PHASE');
 
-        // --- [MODIFIED] Normalize Ingredient Keys (Uses shared normalizer) ---
+        // --- [MODIFIED] Normalize Ingredient Keys (Use shared normalizer) ---
         const dayIngredientsPlan = rawDayIngredients.map(ing => ({
             ...ing,
-            normalizedKey: normalizeKey(ing.originalIngredient) // Use shared normalizer
+            normalizedKey: normalizeKey(ing.originalIngredient) // <-- Use shared function
         }));
+        // --- End Modification ---
 
         // --- Phase 2: Market Run (Unchanged) ---
         log("Phase 2: Market Run (Day " + day + ")...", 'INFO', 'PHASE');
         const processSingleIngredientOptimized = async (ingredient) => {
-             // (Logic inside this function remains the same as previous SSE version)
              try {
                  if (!ingredient || !ingredient.originalIngredient) {
                      log(`Market Run: Skipping invalid ingredient data`, 'WARN', 'MARKET_RUN', { ingredient });
@@ -1045,7 +1029,8 @@ module.exports = async (request, response) => {
              const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
              if (!hasNutri && (result.source === 'failed' || result.source === 'error')) {
                  const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log);
-                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source?.startsWith('canonical') || canonicalNutrition.source === 'nutrition-search-internal' || canonicalNutrition.source === 'CANON')) {
+                 // [MODIFIED] Updated check for canonical source
+                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source === 'CANON' || canonicalNutrition.source === 'nutrition-search-internal')) {
                      log(`[${result.originalIngredient}] Using CANONICAL fallback (Day ${day}).`, 'DEBUG', 'CALC');
                      nutritionDataMap.set(normalizedKey, canonicalNutrition); canonicalHitsToday++;
                      const finalResult = dayResultsMap.get(normalizedKey); if(finalResult) finalResult.source = 'canonical_fallback';
@@ -1054,7 +1039,7 @@ module.exports = async (request, response) => {
          }
         if (canonicalHitsToday > 0) log(`Used ${canonicalHitsToday} canonical fallbacks for Day ${day}.`, 'INFO', 'CALC');
 
-        // --- computeItemMacros using imported normalizeToGramsOrMl ---
+        // --- [MODIFIED] computeItemMacros (Use shared normalizer) ---
         const computeItemMacros = (item, mealItems) => {
              if (!item || !item.key || typeof item.qty_value !== 'number' || !item.qty_unit) {
                 log(`[computeItemMacros] Invalid item structure received (Day ${day}).`, 'ERROR', 'CALC', item);
@@ -1064,9 +1049,7 @@ module.exports = async (request, response) => {
              const normalizedKey = item.normalizedKey || normalizeKey(item.key);
              item.normalizedKey = normalizedKey;
 
-             // --- [MODIFIED V12.1] Use imported normalizeToGramsOrMl ---
              const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
-             // --- End Modification ---
 
              if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0 || gramsOrMl > 5000) {
                  log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${item.key}' (Day ${day}).`, 'CRITICAL', 'CALC', { item, gramsOrMl });
@@ -1078,14 +1061,13 @@ module.exports = async (request, response) => {
              const nutritionData = nutritionDataMap.get(normalizedKey);
              let grams = grams_as_sold;
              let p = 0, f = 0, c = 0, kcal = 0;
-             let densityHeuristicUsed = false; // Only true if fallback density used
-
-             // Density check moved inside normalizeToGramsOrMl in transforms.js
+             let densityHeuristicUsed = false; 
 
              if (nutritionData && nutritionData.status === 'found') {
-                 const proteinPer100 = Number(nutritionData.protein) || 0;
-                 const fatPer100 = Number(nutritionData.fat) || 0;
-                 const carbsPer100 = Number(nutritionData.carbs) || 0;
+                 // [MODIFIED] Check for both old 'protein' and new 'protein_g_per_100g' schemas
+                 const proteinPer100 = Number(nutritionData.protein || nutritionData.protein_g_per_100g) || 0;
+                 const fatPer100 = Number(nutritionData.fat || nutritionData.fat_g_per_100g) || 0;
+                 const carbsPer100 = Number(nutritionData.carbs || nutritionData.carb_g_per_100g) || 0;
                  p = (proteinPer100 / 100) * grams;
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
@@ -1100,8 +1082,9 @@ module.exports = async (request, response) => {
                  item, gramsOrMl_user: gramsOrMl, grams_as_sold: grams_as_sold, abs_oil_g: absorbed_oil_g, final_p: p, final_f: f, final_c: c, final_kcal: kcal
              });
 
-             return { p, f, c, kcal, key: item.key, densityHeuristicUsed }; // densityHeuristicUsed is now only for fallback, not standard liquids
+             return { p, f, c, kcal, key: item.key, densityHeuristicUsed }; 
          };
+         // --- End Modification ---
 
         // --- Calculate Initial Totals (Unchanged) ---
         log(`Calculating initial totals for Day ${day}...`, 'INFO', 'CALC');
@@ -1197,23 +1180,20 @@ module.exports = async (request, response) => {
             mealPlanForDay: { day: day, meals: reconciledMeals },
             dayResults: Object.fromEntries(dayResultsMap.entries()),
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
-            // [REMOVED] logs: getLogs() - Logs are now streamed via 'message' events
         };
 
         log(`Successfully completed generation for Day ${day}.`, 'SUCCESS', 'SYSTEM');
         
-        // [MODIFIED V12.1] Send final data via SSE (Restored)
         sendFinalDataAndClose(responseData);
-        return; // Important: Return here to prevent falling through to error handling
+        return; 
 
     } catch (error) {
         log(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
         console.error(`DAY ${day} UNHANDLED ERROR:`, error);
         const isPlanError = error.message.startsWith('Plan generation failed');
         const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
-        // [MODIFIED V12.1] Use logger to send SSE error (Restored)
         logErrorAndClose(error.message, errorCode);
-        return; // Ensure handler exits after sending error
+        return; 
     }
     // Ensure the stream is closed if execution somehow reaches here without returning (should not happen)
     finally {
@@ -1224,4 +1204,5 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
 
