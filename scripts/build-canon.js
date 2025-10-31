@@ -12,17 +12,15 @@ const fs = require('fs');
 const path = require('path');
 const { normalizeKey } = require('./normalize.js'); // Use shared normalizer
 
-// --- [FIX] Use process.cwd() for Vercel build environment ---
+// Use process.cwd() for Vercel build environment
 const CWD = process.cwd();
 const DATA_DIR = path.join(CWD, 'Data', 'CanonicalNutrition');
 const API_DIR = path.join(CWD, 'api');
-// --- End Fix ---
 
 const MANIFEST_FILE = 'manifest.json';
 const OUTPUT_MODULE_FILE = '_canon.js';
 const OUTPUT_MANIFEST_FILE = '_canon.manifest.json';
 
-// --- [NEW] Robust JSON Parsing ---
 /**
  * Cleans header/footer text and parses *all* JSON arrays from a file.
  * @param {string} content - Raw file content.
@@ -31,15 +29,15 @@ const OUTPUT_MANIFEST_FILE = '_canon.manifest.json';
 function cleanAndParseJson(content) {
   // 1. Clean headers/footers (e.g., "———-Produce-Start————-")
   const cleanedContent = content.replace(/———-.*?———-|\(.*\)/g, '');
-  
+
   // 2. Find all occurrences of JSON arrays (text blocks starting with '[' and ending with ']')
   const jsonMatches = cleanedContent.match(/\[.*?\]/gs); // 'g' for global, 's' for dotall
-  
+
   if (!jsonMatches || jsonMatches.length === 0) {
     console.warn('  -> No JSON arrays found in file.');
     return [];
   }
-  
+
   // 3. Parse each match and concatenate
   let allEntries = [];
   for (const match of jsonMatches) {
@@ -49,14 +47,17 @@ function cleanAndParseJson(content) {
         allEntries = allEntries.concat(parsedArray);
       }
     } catch (e) {
-      console.warn(`  -> Found a JSON-like block but failed to parse: ${e.message}`);
-      console.warn(`  -> Block (first 100 chars): ${match.substring(0, 100)}...`);
+      console.warn(
+        `  -> Found a JSON-like block but failed to parse: ${e.message}`
+      );
+      console.warn(
+        `  -> Block (first 100 chars): ${match.substring(0, 100)}...`
+      );
     }
   }
-  
+
   return allEntries;
 }
-// --- [END NEW] ---
 
 /**
  * Runs sanity checks on a single transformed CanonRow.
@@ -77,7 +78,9 @@ function runSanityChecks(item, warnings) {
   const estimatedKcal = p * 4 + c * 4 + f * 9;
   if (kcal > 0.1 && Math.abs(kcal - estimatedKcal) / kcal > 0.12) {
     warnings.push(
-      `[${key}] Calorie mismatch: Stated ${kcal} kcal, but P/F/C calculates to ${estimatedKcal.toFixed(0)} kcal.`
+      `[${key}] Calorie mismatch: Stated ${kcal} kcal, but P/F/C calculates to ${estimatedKcal.toFixed(
+        0
+      )} kcal.`
     );
   }
 
@@ -107,9 +110,13 @@ async function run() {
     const manifest = JSON.parse(manifestContent);
     canonVersion = manifest.version || canonVersion;
     filesToProcess = manifest.files || [];
-    console.log(`[build-canon] Loaded manifest version ${canonVersion}. Found ${filesToProcess.length} files.`);
+    console.log(
+      `[build-canon] Loaded manifest version ${canonVersion}. Found ${filesToProcess.length} files.`
+    );
   } catch (e) {
-    console.error(`[build-canon] CRITICAL: Could not read or parse manifest.json: ${e.message}`);
+    console.error(
+      `[build-canon] CRITICAL: Could not read or parse manifest.json: ${e.message}`
+    );
     process.exit(1);
   }
 
@@ -119,10 +126,10 @@ async function run() {
     console.log(`[build-canon] Processing file: ${fileName}`);
     try {
       const fileContent = fs.readFileSync(filePath, 'utf8');
-      
-      // [FIX] Use new robust parser
+
+      // Use new robust parser
       const entries = cleanAndParseJson(fileContent);
-      
+
       if (entries.length > 0) {
         console.log(`  -> Parsed ${entries.length} entries.`);
         allEntries.push(...entries);
@@ -139,13 +146,17 @@ async function run() {
 
   for (const item of allEntries) {
     if (!item.name) {
-      warnings.push(`Skipping item with no 'name' field: ${JSON.stringify(item)}`);
+      warnings.push(
+        `Skipping item with no 'name' field: ${JSON.stringify(item)}`
+      );
       continue;
     }
 
     const key = normalizeKey(item.name);
     if (CANON[key]) {
-      duplicates.push(`Duplicate key '${key}' (from '${item.name}'). '${CANON[key].name}' won.`);
+      duplicates.push(
+        `Duplicate key '${key}' (from '${item.name}'). '${CANON[key].name}' won.`
+      );
       continue;
     }
 
@@ -155,25 +166,26 @@ async function run() {
       name: item.display_name || item.name,
       category: item.category || 'misc',
       state: item.state || 'raw',
-      
+
       kcal_per_100g: item.energy_kcal || 0,
       protein_g_per_100g: item.protein_g || 0,
       fat_g_per_100g: item.fat_g || 0,
       carb_g_per_100g: item.carbs_g || 0,
       fiber_g_per_100g: item.fiber_g || 0,
-      
+
       source: item.source || 'unknown',
       notes: item.notes || '',
-      fallback_source: item.fallback_source || null
+      fallback_source: item.fallback_source || null,
     };
     // --- End Transform ---
-    
+
     runSanityChecks(canonItem, warnings);
-    
+
     CANON[key] = canonItem;
-    categoryCounts[canonItem.category] = (categoryCounts[canonItem.category] || 0) + 1;
+    categoryCounts[canonItem.category] =
+      (categoryCounts[canonItem.category] || 0) + 1;
   }
-  
+
   const totalItems = Object.keys(CANON).length;
   console.log(`[build-canon] Processed ${totalItems} unique items.`);
   if (duplicates.length > 0) {
@@ -183,7 +195,9 @@ async function run() {
   // 4. Generate Output Module (CommonJS format)
   const sortedKeys = Object.keys(CANON).sort();
   const sortedCanon = {};
-  sortedKeys.forEach(key => { sortedCanon[key] = CANON[key]; });
+  sortedKeys.forEach((key) => {
+    sortedCanon[key] = CANON[key];
+  });
 
   const outputContent = `
 /**
@@ -230,13 +244,19 @@ module.exports = {
     fs.writeFileSync(modulePath, outputContent);
     console.log(`[build-canon] Successfully wrote module to ${modulePath}`);
 
-    const manifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
-    fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
-    console.log(`[build-canon] Successfully wrote manifest to ${manifestPath}`);
-    
+    // --- [FIX] Renamed second 'manifestPath' variable ---
+    const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
+    fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
+    console.log(
+      `[build-canon] Successfully wrote manifest to ${outputManifestPath}`
+    );
+    // --- End Fix ---
+
     console.log('[build-canon] Build complete!');
   } catch (e) {
-    console.error(`[build-canon] CRITICAL: Failed to write output files: ${e.message}`);
+    console.error(
+      `[build-canon] CRITICAL: Failed to write output files: ${e.message}`
+    );
     process.exit(1);
   }
 }
