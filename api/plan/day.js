@@ -14,6 +14,8 @@ const { fetchNutritionData } = require('../nutrition-search.js'); // Relative pa
 const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); // Relative path
 // --- [MODIFIED V12.1] Import normalizeToGramsOrMl along with other transform functions ---
 const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
+// --- [NEW] Import shared key normalizer ---
+const { normalizeKey } = require('../../scripts/normalize.js');
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
@@ -192,8 +194,9 @@ function createLogger(run_id, day, responseStream = null) {
 
 // --- Other Helpers (Unchanged) ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-// --- [MODIFIED V12.1] Use the more specific normalizeKey for internal use ---
-const normalizeKey = (s = '') => s.toString().toLowerCase().trim().replace(/\s+/g, ' ');
+
+// --- [DELETED] Old local normalizeKey function ---
+// const normalizeKey = (s = '') => s.toString().toLowerCase().trim().replace(/\s+/g, ' ');
 
 function getSanitizedFormData(formData) {
     try {
@@ -893,10 +896,10 @@ module.exports = async (request, response) => {
         });
         log(`Chef AI complete for Day ${day}.`, 'SUCCESS', 'PHASE');
 
-        // --- Normalize Ingredient Keys (Unchanged) ---
+        // --- [MODIFIED] Normalize Ingredient Keys (Uses shared normalizer) ---
         const dayIngredientsPlan = rawDayIngredients.map(ing => ({
             ...ing,
-            normalizedKey: normalizeKey(ing.originalIngredient)
+            normalizedKey: normalizeKey(ing.originalIngredient) // Use shared normalizer
         }));
 
         // --- Phase 2: Market Run (Unchanged) ---
@@ -974,12 +977,14 @@ module.exports = async (request, response) => {
              if (currentResult._error) {
                  log(`Market Run Item Error (Day ${day}) for "${currentResult.itemKey}": ${currentResult.message}`, 'WARN', 'MARKET_RUN');
                  const planItem = dayIngredientsPlan.find(i => i.originalIngredient === currentResult.itemKey);
+                 // [MODIFIED] Use shared normalizer
                  const baseData = planItem || { originalIngredient: currentResult.itemKey, normalizedKey: normalizeKey(currentResult.itemKey) };
                  dayResultsMap.set(baseData.normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
                  return;
              }
              const ingredientKey = Object.keys(currentResult)[0];
              const resultData = currentResult[ingredientKey];
+             // [MODIFIED] Use shared normalizer
              const normalizedKey = normalizeKey(ingredientKey);
              const planItem = dayIngredientsPlan.find(i => i.normalizedKey === normalizedKey);
              if (!planItem) {
@@ -1040,7 +1045,7 @@ module.exports = async (request, response) => {
              const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
              if (!hasNutri && (result.source === 'failed' || result.source === 'error')) {
                  const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log);
-                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source?.startsWith('canonical') || canonicalNutrition.source === 'nutrition-search-internal')) {
+                 if (canonicalNutrition?.status === 'found' && (canonicalNutrition.source?.startsWith('canonical') || canonicalNutrition.source === 'nutrition-search-internal' || canonicalNutrition.source === 'CANON')) {
                      log(`[${result.originalIngredient}] Using CANONICAL fallback (Day ${day}).`, 'DEBUG', 'CALC');
                      nutritionDataMap.set(normalizedKey, canonicalNutrition); canonicalHitsToday++;
                      const finalResult = dayResultsMap.get(normalizedKey); if(finalResult) finalResult.source = 'canonical_fallback';
@@ -1055,6 +1060,7 @@ module.exports = async (request, response) => {
                 log(`[computeItemMacros] Invalid item structure received (Day ${day}).`, 'ERROR', 'CALC', item);
                 throw new Error(`Plan generation failed for Day ${day}: Invalid item structure during calculation for "${item?.key || 'unknown'}".`);
              }
+             // [MODIFIED] Use shared normalizer
              const normalizedKey = item.normalizedKey || normalizeKey(item.key);
              item.normalizedKey = normalizedKey;
 
@@ -1102,6 +1108,7 @@ module.exports = async (request, response) => {
         let initialDayKcal = 0, initialDayP = 0, initialDayF = 0, initialDayC = 0;
         let mealHasInvalidItems = false;
         let densityHeuristicsToday = 0;
+        // [MODIFIED] Use shared normalizer
         finalDayMeals.forEach(meal => { if (meal && Array.isArray(meal.items)) { meal.items.forEach(item => { if(item && item.key) { item.normalizedKey = normalizeKey(item.key); } }); } });
         for (const meal of finalDayMeals) {
             if (!meal || !Array.isArray(meal.items) || meal.items.length === 0) {
@@ -1217,5 +1224,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
