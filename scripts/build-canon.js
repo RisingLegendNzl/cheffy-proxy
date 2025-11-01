@@ -111,8 +111,9 @@ async function run() {
     console.log(`[build-canon] Reading manifest from: ${manifestPath}`);
     const manifestContent = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(manifestContent);
-    canonVersion = manifest.canon_version || canonVersion; // Match key in manifest.json
-    filesToProcess = manifest.source_files || []; // Match key in manifest.json
+    // [FIX] Read the correct keys from manifest.json
+    canonVersion = manifest.canon_version || canonVersion;
+    filesToProcess = manifest.source_files || [];
     console.log(
       `[build-canon] Loaded manifest version ${canonVersion}. Found ${filesToProcess.length} files.`
     );
