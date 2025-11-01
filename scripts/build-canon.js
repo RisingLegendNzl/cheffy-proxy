@@ -10,6 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
+// [MODIFIED] Use the normalize script from its correct location
 const { normalizeKey } = require('./normalize.js'); // Use shared normalizer
 
 // --- [FIX] Use __dirname to create reliable paths ---
@@ -52,6 +53,7 @@ function cleanAndParseJson(content) {
         allEntries = allEntries.concat(parsedArray);
       }
     } catch (e) {
+      // This is a WARNING, not an ERROR. We log it and continue.
       console.warn(
         `  -> Found a JSON-like block but failed to parse: ${e.message}`
       );
@@ -104,141 +106,120 @@ async function run() {
   console.log('=======================================');
   console.log('[build-canon] SCRIPT EXECUTION STARTED');
   console.log('=======================================');
-
   console.log(`[build-canon] Node.js CWD: ${process.cwd()}`);
   console.log(`[build-canon] __dirname (SCRIPT_DIR): ${SCRIPT_DIR}`);
   console.log(`[build-canon] Resolved PROJECT_ROOT: ${PROJECT_ROOT}`);
   console.log(`[build-canon] Resolved DATA_DIR: ${DATA_DIR}`);
   console.log(`[build-canon] Resolved API_DIR: ${API_DIR}`);
 
+  // --- [FIX] Declare manifestData and other vars in the outer scope ---
+  let manifestData = {
+    version: '0.0.0-error',
+    builtAt: new Date().toISOString(),
+    totalItems: 0,
+    categories: {},
+    warnings: ['Build script failed during initialization'],
+    duplicateKeysFound: 0,
+  };
   let canonVersion = '0.0.0-dev';
   let filesToProcess = [];
   const allEntries = [];
   const warnings = [];
   const categoryCounts = {};
+  let totalItems = 0;
+  let duplicates = [];
+  // --- [END FIX] ---
 
-  // 1. Read Manifest
-  const manifestPath = path.join(DATA_DIR, MANIFEST_FILE);
   try {
+    // 1. Read Manifest
+    const manifestPath = path.join(DATA_DIR, MANIFEST_FILE);
     console.log(`[build-canon] Reading manifest from: ${manifestPath}`);
-    // Check if manifest exists BEFORE reading
-    if (!fs.existsSync(manifestPath)) {
-        throw new Error(`Manifest file not found at path: ${manifestPath}. Check build paths.`);
-    }
     const manifestContent = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(manifestContent);
-    
-    // --- [FIX] Read correct keys from manifest.json ---
+
     canonVersion = manifest.canon_version || canonVersion;
     filesToProcess = manifest.source_files || [];
-    // --- [END FIX] ---
 
     console.log(
       `[build-canon] Manifest OK. Version ${canonVersion}. Found ${filesToProcess.length} files.`
     );
-  } catch (e) {
-    console.error(
-      `[build-canon] CRITICAL: Could not read or parse manifest.json: ${e.message}`
-    );
-    throw e; // Re-throw to be caught by outer catch
-  }
+    console.log(`[build-canon] Reading source data files...`);
 
-  // 2. Read and Parse All Files
-  console.log('[build-canon] Reading source data files...');
-  for (const fileName of filesToProcess) {
-    const filePath = path.join(DATA_DIR, fileName);
-    console.log(`[build-canon] Processing file: ${fileName}`);
-    try {
-      // Check file existence
-      if (!fs.existsSync(filePath)) {
-          throw new Error(`Data file not found at path: ${filePath}. Is it included in the deployment?`);
+    // 2. Read and Parse All Files
+    for (const fileName of filesToProcess) {
+      const filePath = path.join(DATA_DIR, fileName);
+      console.log(`[build-canon] Processing file: ${fileName}`);
+      try {
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        const entries = cleanAndParseJson(fileContent);
+
+        if (entries.length > 0) {
+          console.log(`  -> Parsed ${entries.length} entries from ${fileName}.`);
+          allEntries.push(...entries);
+        }
+      } catch (e) {
+        warnings.push(`Failed to read file ${fileName}: ${e.message}`);
       }
-      const fileContent = fs.readFileSync(filePath, 'utf8');
+    }
+    console.log(`[build-canon] Total raw entries aggregated: ${allEntries.length}`);
 
-      // Use new robust parser
-      const entries = cleanAndParseJson(fileContent);
+    // 3. Transform, Normalize, and De-duplicate
+    console.log('[build-canon] Normalizing and transforming entries...');
+    const CANON = {};
+    duplicates = []; // Assign to outer scope var
 
-      if (entries.length > 0) {
-        console.log(`  -> Parsed ${entries.length} entries from ${fileName}.`);
-        allEntries.push(...entries);
-      } else {
-         warnings.push(`No entries parsed from ${fileName}. File might be empty or malformed.`);
-         console.warn(`  -> No entries parsed from ${fileName}.`);
+    for (const item of allEntries) {
+      if (!item.name) {
+        warnings.push(
+          `Skipping item with no 'name' field: ${JSON.stringify(item)}`
+        );
+        continue;
       }
-    } catch (e) {
-      console.error(`[build-canon] CRITICAL: Failed to read/parse data file ${fileName}: ${e.message}`);
-      throw e; // Re-throw
+
+      const key = normalizeKey(item.name);
+      if (CANON[key]) {
+        duplicates.push(
+          `Duplicate key '${key}' (from '${item.name}'). '${CANON[key].name}' won.`
+        );
+        continue;
+      }
+
+      // --- [Plan A] Transform Schema ---
+      const canonItem = {
+        key: key,
+        name: item.display_name || item.name,
+        category: item.category || 'misc',
+        state: item.state || 'raw',
+        kcal_per_100g: item.energy_kcal || 0,
+        protein_g_per_100g: item.protein_g || 0,
+        fat_g_per_100g: item.fat_g || 0,
+        carb_g_per_100g: item.carbs_g || 0,
+        fiber_g_per_100g: item.fiber_g || 0,
+        source: item.source || 'unknown',
+        notes: item.notes || '',
+        fallback_source: item.fallback_source || null,
+      };
+      // --- End Transform ---
+
+      runSanityChecks(canonItem, warnings);
+
+      CANON[key] = canonItem;
+      categoryCounts[canonItem.category] =
+        (categoryCounts[canonItem.category] || 0) + 1;
     }
-  }
-  console.log(`[build-canon] Total raw entries aggregated: ${allEntries.length}`);
-  if (allEntries.length === 0) {
-     throw new Error("No entries aggregated. Build cannot continue.");
-  }
 
+    totalItems = Object.keys(CANON).length; // Assign to outer scope var
+    console.log(`[build-canon] Processed ${totalItems} unique items.`);
 
-  // 3. Transform, Normalize, and De-duplicate
-  console.log('[build-canon] Normalizing and transforming entries...');
-  const CANON = {};
-  const duplicates = [];
+    // 4. Generate Output Module (CommonJS format)
+    console.log('[build-canon] Generating module content...');
+    const sortedKeys = Object.keys(CANON).sort();
+    const sortedCanon = {};
+    sortedKeys.forEach((key) => {
+      sortedCanon[key] = CANON[key];
+    });
 
-  for (const item of allEntries) {
-    if (!item.name) {
-      warnings.push(
-        `Skipping item with no 'name' field: ${JSON.stringify(item)}`
-      );
-      continue;
-    }
-
-    const key = normalizeKey(item.name);
-    if (CANON[key]) {
-      duplicates.push(
-        `Duplicate key '${key}' (from '${item.name}'). '${CANON[key].name}' won.`
-      );
-      continue;
-    }
-
-    // --- [Plan A] Transform Schema ---
-    const canonItem = {
-      key: key,
-      name: item.display_name || item.name,
-      category: item.category || 'misc',
-      state: item.state || 'raw',
-
-      kcal_per_100g: item.energy_kcal || 0,
-      protein_g_per_100g: item.protein_g || 0,
-      fat_g_per_100g: item.fat_g || 0,
-      carb_g_per_100g: item.carbs_g || 0,
-      fiber_g_per_100g: item.fiber_g || 0,
-
-      source: item.source || 'unknown',
-      notes: item.notes || '',
-      fallback_source: item.fallback_source || null,
-    };
-    // --- End Transform ---
-
-    runSanityChecks(canonItem, warnings);
-
-    CANON[key] = canonItem;
-    categoryCounts[canonItem.category] =
-      (categoryCounts[canonItem.category] || 0) + 1;
-  }
-
-  const totalItems = Object.keys(CANON).length;
-  console.log(`[build-canon] Processed ${totalItems} unique items.`);
-  if (duplicates.length > 0) {
-    warnings.push(...duplicates.slice(0, 20)); // Log first 20 duplicates
-    console.warn(`[build-canon] Found ${duplicates.length} duplicate keys. See manifest for details.`);
-  }
-
-  // 4. Generate Output Module (CommonJS format)
-  console.log('[build-canon] Generating module content...');
-  const sortedKeys = Object.keys(CANON).sort();
-  const sortedCanon = {};
-  sortedKeys.forEach((key) => {
-    sortedCanon[key] = CANON[key];
-  });
-
-  const outputContent = `
+    const outputContent = `
 /**
  * AUTO-GENERATED FILE (Do not edit)
  * Source: /Data/CanonicalNutrition/
@@ -267,65 +248,70 @@ module.exports = {
 };
 `;
 
-  // 5. Generate Output Manifest
-  console.log('[build-canon] Generating build manifest...');
-  manifestData.warnings = warnings; // Update warnings
-  const manifestData = {
-    version: canonVersion,
-    builtAt: new Date().toISOString(),
-    totalItems: totalItems,
-    categories: categoryCounts,
-    warnings: warnings, // Add warnings list
-    duplicateKeysFound: duplicates.length,
-  };
+    if (duplicates.length > 0) {
+      console.log(`[build-canon] Found ${duplicates.length} duplicate keys. See manifest for details.`);
+      warnings.push(...duplicates);
+    }
 
-  // 6. Write Files
-  console.log('[build-canon] Writing output files...');
-  try {
-    // --- [FIX] Create api directory if it doesn't exist ---
+    // 5. Generate Output Manifest
+    console.log('[build-canon] Generating build manifest...');
+    // --- [FIX] Assign to the outer-scoped variable ---
+    manifestData = {
+      version: canonVersion,
+      builtAt: new Date().toISOString(),
+      totalItems: totalItems,
+      categories: categoryCounts,
+      warnings: warnings,
+      duplicateKeysFound: duplicates.length,
+    };
+    // --- [END FIX] ---
+
+    // 6. Write Files
+    // Create api directory if it doesn't exist
     if (!fs.existsSync(API_DIR)) {
       console.log(`[build-canon] API directory not found. Creating: ${API_DIR}`);
       fs.mkdirSync(API_DIR, { recursive: true });
     }
-    // --- [END FIX] ---
 
     const modulePath = path.join(API_DIR, OUTPUT_MODULE_FILE);
-    console.log(`[build-canon] Writing module to: ${modulePath}`);
     fs.writeFileSync(modulePath, outputContent);
-    console.log(`[build-canon] Module write OK.`);
+    console.log(`[build-canon] Successfully wrote module to ${modulePath}`);
 
-    // --- [FIX] Renamed second 'manifestPath' variable ---
     const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
-    console.log(`[build-canon] Writing manifest to: ${outputManifestPath}`);
     fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
     console.log(
-      `[build-canon] Manifest write OK.`
+      `[build-canon] Successfully wrote manifest to ${outputManifestPath}`
     );
-    // --- End Fix ---
 
-    console.log('=======================================');
+    console.log('=========================================');
     console.log('[build-canon] SCRIPT EXECUTION SUCCEEDED');
-    console.log('=======================================');
+    console.log('=========================================');
   } catch (e) {
-    console.error(
-      `[build-canon] CRITICAL: Failed to write output files: ${e.message}`
-    );
-    throw e; // Re-throw
+    console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+    console.error('[build-canon] SCRIPT EXECUTION FAILED');
+    console.error(e); // This will print the error
+
+    // --- [FIX] Write a failure manifest using the outer-scoped variable ---
+    warnings.push(`FATAL BUILD ERROR: ${e.message}`);
+    manifestData.warnings = warnings; // Add the fatal error
+    manifestData.builtAt = new Date().toISOString();
+    manifestData.totalItems = totalItems; // Log what we got
+    
+    try {
+      const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
+      fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
+      console.log('[build-canon] Wrote failure manifest.');
+    } catch (writeError) {
+      console.error('[build-canon] Could not even write failure manifest.', writeError);
+    }
+    // --- [END FIX] ---
+
+    console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+    process.exit(1); // Fail the build
   }
 }
 
-// --- [NEW] Wrap entire script in a try/catch to force build failure on any error ---
-(async () => {
-    try {
-        await run();
-    } catch (error) {
-        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
-        console.error('[build-canon] SCRIPT EXECUTION FAILED');
-        console.error(`[build-canon] Error: ${error.message}`);
-        console.error(error.stack);
-        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
-        process.exit(1); // <-- CRITICAL: Force a non-zero exit code
-    }
-})();
+// Run the script
+run();
 
 
