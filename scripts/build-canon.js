@@ -34,7 +34,8 @@ const OUTPUT_MANIFEST_FILE = '_canon.manifest.json';
  */
 function cleanAndParseJson(content) {
   // 1. Clean headers/footers (e.g., "———-Produce-Start————-")
-  const cleanedContent = content.replace(/———-.*?———-|\(.*\)/g, '');
+  // [FIX] Also remove single-line JS comments
+  const cleanedContent = content.replace(/———-.*?———-|\(.*\)/g, '').replace(/\/\/.*/g, '');
 
   // 2. Find all occurrences of JSON arrays (text blocks starting with '[' and ending with ']')
   const jsonMatches = cleanedContent.match(/\[.*?\]/gs); // 'g' for global, 's' for dotall
@@ -112,7 +113,7 @@ async function run() {
   console.log(`[build-canon] Resolved DATA_DIR: ${DATA_DIR}`);
   console.log(`[build-canon] Resolved API_DIR: ${API_DIR}`);
 
-  // --- [FIX] Declare manifestData and other vars in the outer scope ---
+  // --- [FIX] Declare all variables in the outer scope, *before* the try block ---
   let manifestData = {
     version: '0.0.0-error',
     builtAt: new Date().toISOString(),
@@ -293,12 +294,21 @@ module.exports = {
 
     // --- [FIX] Write a failure manifest using the outer-scoped variable ---
     warnings.push(`FATAL BUILD ERROR: ${e.message}`);
-    manifestData.warnings = warnings; // Add the fatal error
-    manifestData.builtAt = new Date().toISOString();
-    manifestData.totalItems = totalItems; // Log what we got
+    // Check if manifestData is still at its initial error state or was populated
+    if (manifestData.totalItems === 0) {
+        manifestData.warnings = warnings;
+    } else {
+        // If error happened after parsing, we can still provide some data
+        manifestData = {
+           ...manifestData,
+           warnings: warnings,
+           builtAt: new Date().toISOString(),
+        };
+    }
     
     try {
       const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
+      // We are *guaranteed* manifestData is initialized now.
       fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
       console.log('[build-canon] Wrote failure manifest.');
     } catch (writeError) {
