@@ -4,7 +4,7 @@
       "maxDuration": 300
     }
   },
-  "includeFiles": [
+  "includeFiles": 
     "api/_canon.js",
     "scripts/normalize.js",
     "utils/reconcileNonProtein.js",
@@ -15,7 +15,7 @@
     "Data/CanonicalNutrition/Oils & Fats",
     "Data/CanonicalNutrition/Pantry Staples",
     "Data/CanonicalNutrition/produce"
-  ]
+  
 }
 
 
