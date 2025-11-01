@@ -253,13 +253,11 @@ module.exports = {
     fs.writeFileSync(modulePath, outputContent);
     console.log(`[build-canon] Successfully wrote module to ${modulePath}`);
 
-    // --- [FIX] Renamed second 'manifestPath' variable ---
     const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
     fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
     console.log(
       `[build-canon] Successfully wrote manifest to ${outputManifestPath}`
     );
-    // --- End Fix ---
 
     console.log('[build-canon] Build complete!');
   } catch (e) {
@@ -272,4 +270,5 @@ module.exports = {
 
 // Run the script
 run();
+
 
