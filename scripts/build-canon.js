@@ -269,6 +269,5 @@ module.exports = {
 }
 
 // Run the script
-run();
 
 
