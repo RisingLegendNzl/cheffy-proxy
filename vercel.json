@@ -1,10 +1,15 @@
 {
   "functions": {
     "api/**/*.js": {
-      "maxDuration": 300,
-      "includeFiles": "{api/_canon.js,scripts/normalize.js,utils/reconcileNonProtein.js,utils/transforms.js}"
+      "maxDuration": 300
     }
-  }
+  },
+  "includeFiles": [
+    "Data/CanonicalNutrition/**",
+    "scripts/normalize.js",
+    "utils/reconcileNonProtein.js",
+    "utils/transforms.js"
+  ]
 }
 
 
