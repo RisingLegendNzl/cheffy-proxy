@@ -10,12 +10,13 @@ const { createClient } = require('@vercel/kv');
 // Import cache-wrapped microservices
 const { fetchPriceData } = require('../price-search.js'); // Relative path
 const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path
-// Import the reconciler utility
-const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js'); // Relative path
-// --- [MODIFIED] Use the shared CommonJS normalizer ---
-const { normalizeKey } = require('../../scripts/normalize.js');
-// --- [MODIFIED] Import normalizeToGramsOrMl along with other transform functions ---
-const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
+
+// --- [FIX] Corrected relative paths for Vercel bundling ---
+const { reconcileNonProtein } = require('../utils/reconcileNonProtein.js');
+const { normalizeKey } = require('../scripts/normalize.js');
+const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../utils/transforms.js');
+// --- [END FIX] ---
+
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
@@ -1204,5 +1205,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
