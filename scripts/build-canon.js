@@ -101,10 +101,15 @@ function runSanityChecks(item, warnings) {
  * Main build function.
  */
 async function run() {
-  console.log('[build-canon] Starting build...');
-  console.log(`[build-canon] Project Root resolved to: ${PROJECT_ROOT}`);
-  console.log(`[build-canon] Data Dir resolved to: ${DATA_DIR}`);
-  console.log(`[build-canon] API Dir resolved to: ${API_DIR}`);
+  console.log('=======================================');
+  console.log('[build-canon] SCRIPT EXECUTION STARTED');
+  console.log('=======================================');
+
+  console.log(`[build-canon] Node.js CWD: ${process.cwd()}`);
+  console.log(`[build-canon] __dirname (SCRIPT_DIR): ${SCRIPT_DIR}`);
+  console.log(`[build-canon] Resolved PROJECT_ROOT: ${PROJECT_ROOT}`);
+  console.log(`[build-canon] Resolved DATA_DIR: ${DATA_DIR}`);
+  console.log(`[build-canon] Resolved API_DIR: ${API_DIR}`);
 
   let canonVersion = '0.0.0-dev';
   let filesToProcess = [];
@@ -113,9 +118,13 @@ async function run() {
   const categoryCounts = {};
 
   // 1. Read Manifest
+  const manifestPath = path.join(DATA_DIR, MANIFEST_FILE);
   try {
-    const manifestPath = path.join(DATA_DIR, MANIFEST_FILE);
     console.log(`[build-canon] Reading manifest from: ${manifestPath}`);
+    // Check if manifest exists BEFORE reading
+    if (!fs.existsSync(manifestPath)) {
+        throw new Error(`Manifest file not found at path: ${manifestPath}. Check build paths.`);
+    }
     const manifestContent = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(manifestContent);
     
@@ -125,38 +134,50 @@ async function run() {
     // --- [END FIX] ---
 
     console.log(
-      `[build-canon] Loaded manifest version ${canonVersion}. Found ${filesToProcess.length} files.`
+      `[build-canon] Manifest OK. Version ${canonVersion}. Found ${filesToProcess.length} files.`
     );
   } catch (e) {
     console.error(
       `[build-canon] CRITICAL: Could not read or parse manifest.json: ${e.message}`
     );
-    console.error(`[build-canon] CWD: ${process.cwd()}`);
-    console.error(`[build-canon] Expected Path: ${path.join(DATA_DIR, MANIFEST_FILE)}`);
-    process.exit(1); // Fail the build
+    throw e; // Re-throw to be caught by outer catch
   }
 
   // 2. Read and Parse All Files
+  console.log('[build-canon] Reading source data files...');
   for (const fileName of filesToProcess) {
     const filePath = path.join(DATA_DIR, fileName);
     console.log(`[build-canon] Processing file: ${fileName}`);
     try {
+      // Check file existence
+      if (!fs.existsSync(filePath)) {
+          throw new Error(`Data file not found at path: ${filePath}. Is it included in the deployment?`);
+      }
       const fileContent = fs.readFileSync(filePath, 'utf8');
 
       // Use new robust parser
       const entries = cleanAndParseJson(fileContent);
 
       if (entries.length > 0) {
-        console.log(`  -> Parsed ${entries.length} entries.`);
+        console.log(`  -> Parsed ${entries.length} entries from ${fileName}.`);
         allEntries.push(...entries);
+      } else {
+         warnings.push(`No entries parsed from ${fileName}. File might be empty or malformed.`);
+         console.warn(`  -> No entries parsed from ${fileName}.`);
       }
     } catch (e) {
-      warnings.push(`Failed to read file ${fileName}: ${e.message}`);
+      console.error(`[build-canon] CRITICAL: Failed to read/parse data file ${fileName}: ${e.message}`);
+      throw e; // Re-throw
     }
   }
-  console.log(`[build-canon] Total raw entries found: ${allEntries.length}`);
+  console.log(`[build-canon] Total raw entries aggregated: ${allEntries.length}`);
+  if (allEntries.length === 0) {
+     throw new Error("No entries aggregated. Build cannot continue.");
+  }
+
 
   // 3. Transform, Normalize, and De-duplicate
+  console.log('[build-canon] Normalizing and transforming entries...');
   const CANON = {};
   const duplicates = [];
 
@@ -209,6 +230,7 @@ async function run() {
   }
 
   // 4. Generate Output Module (CommonJS format)
+  console.log('[build-canon] Generating module content...');
   const sortedKeys = Object.keys(CANON).sort();
   const sortedCanon = {};
   sortedKeys.forEach((key) => {
@@ -245,6 +267,7 @@ module.exports = {
 `;
 
   // 5. Generate Output Manifest
+  console.log('[build-canon] Generating build manifest...');
   const manifestData = {
     version: canonVersion,
     builtAt: new Date().toISOString(),
@@ -255,6 +278,7 @@ module.exports = {
   };
 
   // 6. Write Files
+  console.log('[build-canon] Writing output files...');
   try {
     // --- [FIX] Create api directory if it doesn't exist ---
     if (!fs.existsSync(API_DIR)) {
@@ -264,27 +288,41 @@ module.exports = {
     // --- [END FIX] ---
 
     const modulePath = path.join(API_DIR, OUTPUT_MODULE_FILE);
+    console.log(`[build-canon] Writing module to: ${modulePath}`);
     fs.writeFileSync(modulePath, outputContent);
-    console.log(`[build-canon] Successfully wrote module to ${modulePath}`);
+    console.log(`[build-canon] Module write OK.`);
 
     // --- [FIX] Renamed second 'manifestPath' variable ---
     const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
+    console.log(`[build-canon] Writing manifest to: ${outputManifestPath}`);
     fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
     console.log(
-      `[build-canon] Successfully wrote manifest to ${outputManifestPath}`
+      `[build-canon] Manifest write OK.`
     );
     // --- End Fix ---
 
-    console.log('[build-canon] Build complete!');
+    console.log('=======================================');
+    console.log('[build-canon] SCRIPT EXECUTION SUCCEEDED');
+    console.log('=======================================');
   } catch (e) {
     console.error(
       `[build-canon] CRITICAL: Failed to write output files: ${e.message}`
     );
-    process.exit(1); // Fail the build
+    throw e; // Re-throw
   }
 }
 
-// Run the script
-run();
-
+// --- [NEW] Wrap entire script in a try/catch to force build failure on any error ---
+(async () => {
+    try {
+        await run();
+    } catch (error) {
+        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+        console.error('[build-canon] SCRIPT EXECUTION FAILED');
+        console.error(`[build-canon] Error: ${error.message}`);
+        console.error(error.stack);
+        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+        process.exit(1); // <-- CRITICAL: Force a non-zero exit code
+    }
+})();
 
