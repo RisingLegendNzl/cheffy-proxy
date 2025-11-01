@@ -226,7 +226,8 @@ async function run() {
   const totalItems = Object.keys(CANON).length;
   console.log(`[build-canon] Processed ${totalItems} unique items.`);
   if (duplicates.length > 0) {
-    warnings.push(...duplicates);
+    warnings.push(...duplicates.slice(0, 20)); // Log first 20 duplicates
+    console.warn(`[build-canon] Found ${duplicates.length} duplicate keys. See manifest for details.`);
   }
 
   // 4. Generate Output Module (CommonJS format)
@@ -268,12 +269,13 @@ module.exports = {
 
   // 5. Generate Output Manifest
   console.log('[build-canon] Generating build manifest...');
+  manifestData.warnings = warnings; // Update warnings
   const manifestData = {
     version: canonVersion,
     builtAt: new Date().toISOString(),
     totalItems: totalItems,
     categories: categoryCounts,
-    warnings: warnings,
+    warnings: warnings, // Add warnings list
     duplicateKeysFound: duplicates.length,
   };
 
@@ -325,4 +327,5 @@ module.exports = {
         process.exit(1); // <-- CRITICAL: Force a non-zero exit code
     }
 })();
+
 
