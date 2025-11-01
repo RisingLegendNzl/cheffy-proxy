@@ -8,13 +8,14 @@ const crypto = require('crypto'); // For run_id and hashing
 // --- [NEW] Import Vercel KV client ---
 const { createClient } = require('@vercel/kv');
 // Import cache-wrapped microservices
-const { fetchPriceData } = require('../price-search.js'); // Relative path
-const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path
+const { fetchPriceData } = require('../price-search.js'); // Relative path (api/price-search.js) - This is CORRECT
+const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path (api/nutrition-search.js) - This is CORRECT
 
 // --- [FIX] Corrected relative paths for Vercel bundling ---
-const { reconcileNonProtein } = require('../utils/reconcileNonProtein.js');
-const { normalizeKey } = require('../scripts/normalize.js');
-const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../utils/transforms.js');
+// These files are at the root of the /var/task/ bundle, so we go up two levels.
+const { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js');
+const { normalizeKey } = require('../../scripts/normalize.js');
+const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
 // --- [END FIX] ---
 
 /// ===== IMPORTS-END ===== ////
