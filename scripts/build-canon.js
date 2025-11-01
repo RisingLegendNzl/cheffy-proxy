@@ -12,9 +12,12 @@ const fs = require('fs');
 const path = require('path');
 const { normalizeKey } = require('./normalize.js'); // Use shared normalizer
 
-// --- [FIX] Use __dirname for robust pathing in Vercel's build environment ---
-// __dirname is the directory this script is in (e.g., /project/scripts)
-const PROJECT_ROOT = path.join(__dirname, '..'); // Go up one level to the project root
+// --- [FIX] Use __dirname to create reliable paths ---
+// __dirname is the directory of the *current script* (e.g., /vercel/path/scripts)
+const SCRIPT_DIR = __dirname;
+// Project root is one level up (e.g., /vercel/path)
+const PROJECT_ROOT = path.join(SCRIPT_DIR, '..');
+
 const DATA_DIR = path.join(PROJECT_ROOT, 'Data', 'CanonicalNutrition');
 const API_DIR = path.join(PROJECT_ROOT, 'api');
 // --- [END FIX] ---
@@ -99,6 +102,10 @@ function runSanityChecks(item, warnings) {
  */
 async function run() {
   console.log('[build-canon] Starting build...');
+  console.log(`[build-canon] Project Root resolved to: ${PROJECT_ROOT}`);
+  console.log(`[build-canon] Data Dir resolved to: ${DATA_DIR}`);
+  console.log(`[build-canon] API Dir resolved to: ${API_DIR}`);
+
   let canonVersion = '0.0.0-dev';
   let filesToProcess = [];
   const allEntries = [];
@@ -111,9 +118,12 @@ async function run() {
     console.log(`[build-canon] Reading manifest from: ${manifestPath}`);
     const manifestContent = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(manifestContent);
-    // [FIX] Read the correct keys from manifest.json
+    
+    // --- [FIX] Read correct keys from manifest.json ---
     canonVersion = manifest.canon_version || canonVersion;
     filesToProcess = manifest.source_files || [];
+    // --- [END FIX] ---
+
     console.log(
       `[build-canon] Loaded manifest version ${canonVersion}. Found ${filesToProcess.length} files.`
     );
@@ -121,14 +131,15 @@ async function run() {
     console.error(
       `[build-canon] CRITICAL: Could not read or parse manifest.json: ${e.message}`
     );
-    console.error(`[build-canon] Data directory path was: ${DATA_DIR}`);
-    process.exit(1);
+    console.error(`[build-canon] CWD: ${process.cwd()}`);
+    console.error(`[build-canon] Expected Path: ${path.join(DATA_DIR, MANIFEST_FILE)}`);
+    process.exit(1); // Fail the build
   }
 
   // 2. Read and Parse All Files
   for (const fileName of filesToProcess) {
     const filePath = path.join(DATA_DIR, fileName);
-    console.log(`[build-canon] Processing file: ${filePath}`);
+    console.log(`[build-canon] Processing file: ${fileName}`);
     try {
       const fileContent = fs.readFileSync(filePath, 'utf8');
 
@@ -245,30 +256,35 @@ module.exports = {
 
   // 6. Write Files
   try {
-    // Ensure API directory exists
+    // --- [FIX] Create api directory if it doesn't exist ---
     if (!fs.existsSync(API_DIR)) {
+      console.log(`[build-canon] API directory not found. Creating: ${API_DIR}`);
       fs.mkdirSync(API_DIR, { recursive: true });
     }
-    
+    // --- [END FIX] ---
+
     const modulePath = path.join(API_DIR, OUTPUT_MODULE_FILE);
     fs.writeFileSync(modulePath, outputContent);
     console.log(`[build-canon] Successfully wrote module to ${modulePath}`);
 
+    // --- [FIX] Renamed second 'manifestPath' variable ---
     const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
     fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
     console.log(
       `[build-canon] Successfully wrote manifest to ${outputManifestPath}`
     );
+    // --- End Fix ---
 
     console.log('[build-canon] Build complete!');
   } catch (e) {
     console.error(
       `[build-canon] CRITICAL: Failed to write output files: ${e.message}`
     );
-    process.exit(1);
+    process.exit(1); // Fail the build
   }
 }
 
 // Run the script
+run();
 
 
