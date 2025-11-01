@@ -1,19 +1,20 @@
 {
   "functions": {
     "api/**/*.js": {
-      "maxDuration": 300,
-      "includeFiles": 
-    
-    "api/_canon.js"
+      "maxDuration": 300
+    }
+  },
+  "includeFiles": [
     "scripts/normalize.js",
     "utils/reconcileNonProtein.js",
     "utils/transforms.js",
+    "Data/CanonicalNutrition/manifest.json",
     "Data/CanonicalNutrition/Dairy",
     "Data/CanonicalNutrition/Meat & Poultry",
     "Data/CanonicalNutrition/Oils & Fats",
     "Data/CanonicalNutrition/Pantry Staples",
     "Data/CanonicalNutrition/produce"
-    }
-  }
+  ]
 }
+
 
