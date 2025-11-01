@@ -3,7 +3,8 @@
   "version": "2.1.4",
   "description": "Unified proxy and orchestrator for Cheffy with direct macro quantification.",
   "scripts": {
-    "prebuild": "node scripts/build-canon.js"
+    "prebuild": "node scripts/build-canon.js",
+    "build": "npm run prebuild"
   },
   "dependencies": {
     "@vercel/kv": "^2.0.0",
