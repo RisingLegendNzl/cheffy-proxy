@@ -8,7 +8,21 @@ const { createClient } = require('@vercel/kv');
 
 // --- [NEW] CommonJS imports for our new modules ---
 // Use require for CommonJS compatibility
-const { CANON_VERSION, canonGet } = require('./_canon.js'); 
+
+// --- [MODIFICATION] Add defensive try/catch for the _canon.js import ---
+let CANON_VERSION = '0.0.0-detached';
+let canonGet = () => null;
+try {
+  // This file is generated at build time. If it fails, we fallback.
+  const canonModule = require('./_canon.js'); 
+  CANON_VERSION = canonModule.CANON_VERSION;
+  canonGet = canonModule.canonGet;
+  console.log(`[nutrition-search] Successfully loaded _canon.js version ${CANON_VERSION}`);
+} catch (e) {
+  console.warn('[nutrition-search] WARN: Could not load _canon.js. Canonical DB will be unavailable. Error:', e.message);
+}
+// --- [END MODIFICATION] ---
+
 const { normalizeKey } = require('../scripts/normalize.js'); 
 // --- [END NEW] ---
 
@@ -326,5 +340,4 @@ module.exports = async (req, res) => {
 
 module.exports.fetchNutritionData = fetchNutritionData;
 /// ========= NUTRITION-SEARCH-END ========= \\\\
-
 
