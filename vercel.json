@@ -1,4 +1,7 @@
 {
+  "build": {
+    "command": "npm run prebuild"
+  },
   "builds": [
     {
       "src": "api/**/*.js",
