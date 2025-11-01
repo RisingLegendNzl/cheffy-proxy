@@ -1,0 +1,25 @@
+{
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "outputDirectory": "."
+      }
+    },
+    {
+      "src": "api/**/*.js",
+      "use": "@vercel/node",
+      "config": {
+        "maxDuration": 300,
+        "includeFiles": [
+          "api/_canon.js",
+          "scripts/normalize.js",
+          "utils/reconcileNonProtein.js",
+          "utils/transforms.js"
+        ]
+      }
+    }
+  ]
+}
+
