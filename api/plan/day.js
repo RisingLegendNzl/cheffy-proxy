@@ -429,7 +429,7 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
-// --- Meal Planner Prompt (Unchanged) ---
+// --- [MODIFIED] Meal Planner Prompt (Solution 3) ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
 RULES:
@@ -438,13 +438,14 @@ RULES:
 3.  MEAL PORTIONS: For each meal, populate 'items' with:
     a) 'key': (string) The generic ingredient name.
     b) 'qty_value': (number) The portion size for the user.
-    c) 'qty_unit': (string) e.g., 'g', 'ml', 'slice', 'egg', 'medium', 'large'.
+    c) 'qty_unit': (string) e.g., 'g', 'ml', 'slice', 'egg'.
     d) 'stateHint': (string) MANDATORY. The state of the ingredient. Must be one of: "dry", "raw", "cooked", "as_pack".
     e) 'methodHint': (string | null) MANDATORY. Cooking method if state is "cooked". Must be one of: "boiled", "pan_fried", "grilled", "baked", "steamed", or null.
-4.  TARGETS: Aim for the protein target. The code will calculate calories based on your plan; you do NOT need to estimate them.
-5.  Adhere to all user constraints.
-6.  'meals' array is MANDATORY. Do NOT include 'ingredients' array.
-7.  Do NOT include calorie estimates in your response.
+4.  **CRITICAL UNIT RULE:** You MUST provide quantities in **'g'** (grams), **'ml'** (milliliters), or a specific single unit like **'egg'** or **'slice'**. You **MUST NOT** use ambiguous units like 'medium', 'large', or 'piece' for any item.
+5.  TARGETS: Aim for the protein target. The code will calculate calories based on your plan; you do NOT need to estimate them.
+6.  Adhere to all user constraints.
+7.  'meals' array is MANDATORY. Do NOT include 'ingredients' array.
+8.  Do NOT include calorie estimates in your response.
 
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
@@ -467,6 +468,7 @@ JSON Structure:
   ]
 }
 `;
+// --- [END MODIFICATION] ---
 
 // --- Grocery Optimizer Prompt (Unchanged) ---
 const GROCERY_OPTIMIZER_SYSTEM_PROMPT = (store, australianTermNote) => `
@@ -1238,4 +1240,5 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
 
