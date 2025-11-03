@@ -16,7 +16,13 @@ const TRANSFORM_VERSION = "2025-10-30.2"; // Incremented version
 
 // --- Moved from day.js: Unit Normalization Dependencies ---
 const CANONICAL_UNIT_WEIGHTS_G = {
-    'egg': 50, 'slice': 35, 'piece': 150, 'banana': 120, 'potato': 200, 'medium pancake': 60, 'large tortilla': 60, 'bun': 55, 'medium': 150, 'large': 200
+    'egg': 50, 'slice': 35, 'piece': 150, 'banana': 120, 'potato': 200, 'medium pancake': 60, 'large tortilla': 60, 'bun': 55
+    // --- TACTICAL FIX (Solution 1) ---
+    // Removed ambiguous generic keys: 'medium': 150, 'large': 200
+    // These keys caused "1 large egg" to be mis-calculated as 200g (1360 kcal)
+    // instead of allowing the logic to fall back to the key-based heuristic ('egg': 50).
+    // This directly fixes the bug identified in the logs.
+    // ---------------------------------
 };
 const DENSITY_MAP = {
     'milk': 1.03, 'cream': 1.01, 'oil': 0.92, 'sauce': 1.05, 'water': 1.0,
@@ -255,7 +261,7 @@ function inferHints(item, log) {
  * @param {object} item - The meal item object (must have key, qty_value, qty_unit).
  * @param {number} gramsOrMl - The quantity already normalized to g/ml.
  * @param {function} log - The logger function.
- * @returns {{grams_as_sold: number, log_msg: string, inferredState: string, inferredMethod: string | null}}
+ *a * @returns {{grams_as_sold: number, log_msg: string, inferredState: string, inferredMethod: string | null}}
  */
 function toAsSold(item, gramsOrMl, log) {
     // Ensure log is a function, provide a dummy if not
