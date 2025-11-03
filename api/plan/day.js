@@ -58,6 +58,11 @@ const BANNED_KEYWORDS = [
 const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
 const PRICE_OUTLIER_Z_SCORE = 2.0;
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
+
+// --- [NEW] Solution 2: Defensive Sanity Check Limit ---
+const MAX_CALORIES_PER_ITEM = 1200; // 1360 kcal for an egg was the bug. 1200 is a safe cap.
+// --- [END NEW] ---
+
 /// ===== CONFIG-END ===== ////
 
 /// ===== MOCK-START ===== \\\\
@@ -1080,6 +1085,15 @@ module.exports = async (request, response) => {
              
              kcal = (p * 4) + (f * 9) + (c * 4);
              
+             // --- [NEW] Solution 2: Defensive Sanity Check ---
+             // Check if calculated kcal exceeds the defined limit, but ignore oils/fats
+             if (kcal > MAX_CALORIES_PER_ITEM && !key.toLowerCase().includes('oil') && !key.toLowerCase().includes('butter') && !key.toLowerCase().includes('ghee')) {
+                log(`CRITICAL: Item '${key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit of ${MAX_CALORIES_PER_ITEM}.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
+                // This is a non-recoverable data error. Fail fast.
+                throw new Error(`Calculation error: Item "${key}" has an impossibly high calorie count (${kcal.toFixed(0)} kcal). Check unit conversion.`);
+             }
+             // --- [END NEW] ---
+
              log(`[computeItemMacros] ${item.key}: ${transform_log} | ${oil_log_msg} | Final: ${kcal.toFixed(0)}kcal`, 'DEBUG', 'CALC', {
                  item, gramsOrMl_user: gramsOrMl, grams_as_sold: grams_as_sold, abs_oil_g: absorbed_oil_g, final_p: p, final_f: f, final_c: c, final_kcal: kcal
              });
@@ -1113,7 +1127,15 @@ module.exports = async (request, response) => {
                      const macros = computeItemMacros(item, meal.items);
                      mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                      if (macros.densityHeuristicUsed) densityHeuristicsToday++;
-                 } catch (itemError) { log(`Error calculating macros for item "${item.key}" in meal "${meal.name}" (Day ${day}): ${itemError.message}`, 'CRITICAL', 'CALC'); mealHasInvalidItems = true; mealKcal = NaN; break; }
+                 } catch (itemError) { 
+                    // --- [MODIFIED] Check if this error came from our new sanity check ---
+                    if (itemError.message.startsWith('Calculation error:')) {
+                        log(`[computeItemMacros] Failing fast due to sanity check: ${itemError.message}`, 'CRITICAL', 'CALC');
+                        throw itemError; // Re-throw the specific error
+                    }
+                    log(`Error calculating macros for item "${item.key}" in meal "${meal.name}" (Day ${day}): ${itemError.message}`, 'CRITICAL', 'CALC'); 
+                    mealHasInvalidItems = true; mealKcal = NaN; break; 
+                }
             }
             meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC;
             if (!isNaN(mealKcal)) { initialDayKcal += mealKcal; initialDayP += mealP; initialDayF += mealF; initialDayC += mealC; } else { mealHasInvalidItems = true; }
@@ -1144,7 +1166,12 @@ module.exports = async (request, response) => {
                 let scaledKcal = 0, scaledP = 0, scaledF = 0, scaledC = 0;
                  for (const meal of reconciledMeals) {
                      let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0; if (!meal || !Array.isArray(meal.items)) continue;
-                     for (const item of meal.items) { try { const macros = computeItemMacros(item, meal.items); mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c; } catch (reconItemError) { log(`Error recalculating macros post-reconciliation for "${item.key}" (Day ${day}): ${reconItemError.message}`, 'CRITICAL', 'CALC'); scaledKcal=NaN; break; } }
+                     for (const item of meal.items) { try { const macros = computeItemMacros(item, meal.items); mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c; } catch (reconItemError) { 
+                         // --- [MODIFIED] Also catch sanity check errors here ---
+                         log(`Error recalculating macros post-reconciliation for "${item.key}" (Day ${day}): ${reconItemError.message}`, 'CRITICAL', 'CALC'); 
+                         if (reconItemError.message.startsWith('Calculation error:')) throw reconItemError;
+                         scaledKcal=NaN; break; 
+                        } }
                      meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC; if(isNaN(scaledKcal)) break;
                      scaledKcal += mealKcal; scaledP += mealP; scaledF += mealF; scaledC += mealC;
                  }
@@ -1192,8 +1219,13 @@ module.exports = async (request, response) => {
     } catch (error) {
         log(`CRITICAL Orchestrator ERROR (Day ${day}): ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
         console.error(`DAY ${day} UNHANDLED ERROR:`, error);
+        
+        // --- [MODIFIED] Check for our new sanity check error ---
+        const isSanityCheckError = error.message.startsWith('Calculation error:');
         const isPlanError = error.message.startsWith('Plan generation failed');
-        const errorCode = isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY";
+        const errorCode = isSanityCheckError ? "PLAN_CALC_FAULT" : (isPlanError ? "PLAN_INVALID_DAY" : "SERVER_FAULT_DAY");
+        // --- [END MODIFIED] ---
+
         logErrorAndClose(error.message, errorCode);
         return; 
     }
