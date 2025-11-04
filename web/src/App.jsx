@@ -1,4 +1,4 @@
-// web/src/App.js
+// web/src/App.jsx
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered } from 'lucide-react';
 
@@ -1053,5 +1053,4 @@ const App = () => {
 };
 
 export default App;
-
 
