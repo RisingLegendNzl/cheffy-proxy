@@ -1,3 +1,22 @@
 {
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/:path*"
+    },
+    {
+      "source": "/assets/:path*",
+      "destination": "/web/dist/assets/:path*"
+    },
+    {
+      "source": "/vite.svg",
+      "destination": "/web/dist/vite.svg"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/web/dist/index.html"
+    }
+  ]
 }
 
