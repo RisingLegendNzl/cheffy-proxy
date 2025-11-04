@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "outputDirectory": "web/dist",
   "rewrites": [
     {
       "source": "/api/:path*",
@@ -19,5 +20,4 @@
     }
   ]
 }
-
 
