@@ -2,8 +2,11 @@
   "name": "cheffy-proxy-unified",
   "version": "2.1.4",
   "description": "Unified proxy and orchestrator for Cheffy with direct macro quantification.",
+  "private": true,
   "scripts": {
-    "build": "node scripts/build-canon.js && mkdir public && echo 'Cheffy API is live' > public/index.html"
+    "build:canon": "node scripts/build-canon.js",
+    "build:web": "cd web && npm install && npm run build",
+    "build": "npm run build:canon && npm run build:web"
   },
   "dependencies": {
     "@vercel/kv": "^2.0.0",
@@ -11,5 +14,4 @@
     "axios": "^1.7.2"
   }
 }
-
 
