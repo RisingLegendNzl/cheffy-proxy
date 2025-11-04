@@ -1,6 +1,18 @@
 // web/src/index.js
-// TODO: Import React, ReactDOM, and App.
-// TODO: Render <App /> into the "root" div.
-console.log("React entry point stub.");
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+// Note: We are not importing a global CSS file
+// Styling is handled by Tailwind CDN linked in index.html
+
+const rootElement = document.getElementById('root');
+const root = ReactDOM.createRoot(rootElement);
+
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
 
 
