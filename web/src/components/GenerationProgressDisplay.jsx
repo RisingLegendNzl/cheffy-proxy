@@ -12,10 +12,11 @@ import {
     Terminal,
     Loader,
     Circle, // Used for pending steps
+    Grid,   // Fallback for finalizing
 } from 'lucide-react';
 
-// --- Thematic Agent Mapping ---
-// Translates technical log tags into "fun names" and icons for the live-ticker
+// --- Thematic "Fun Name" Mapping ---
+// We map the *technical log tag* to a fun name for the live-ticker
 const agentMap = {
     'LLM': { name: "Creative Chef", Icon: ChefHat, color: "text-purple-600" },
     'LLM_PROMPT': { name: "Creative Chef", Icon: ChefHat, color: "text-purple-600" },
@@ -33,8 +34,8 @@ const agentMap = {
     'default': { name: "AI Agent", Icon: Loader, color: "text-indigo-600" }
 };
 
-// --- Stepper Logic ---
-// Defines the steps of the generation process
+// --- Stepper Definition ---
+// This defines the steps, their keys, and their default icons (for pending state)
 const STEPS = [
     {
         key: 'targets',
@@ -44,7 +45,7 @@ const STEPS = [
     },
     {
         key: 'planning',
-        title: 'Designing Your Meal Plan',
+        title: 'Designing Your Plan',
         description: 'The AI Chef is creating your daily meals.',
         Icon: ChefHat,
     },
@@ -58,43 +59,18 @@ const STEPS = [
         key: 'finalizing',
         title: 'Calculating Nutrition & Finalizing',
         description: 'Assembling the dashboard and data.',
-        Icon: Flame,
+        Icon: Grid, // Using Grid as the "finalizing" icon
     },
 ];
 
 /**
- * Determines the current active step based on generation status and logs.
- * @param {string} status - The high-level generationStatus string.
- * @param {object} latestLog - The most recent log object from the SSE stream.
- * @returns {string} The key of the current active step (e.g., 'targets', 'planning').
- */
-const getActiveStep = (status, latestLog) => {
-    const logTag = latestLog?.tag || null;
-
-    if (status === 'Calculating nutritional targets...') {
-        return 'targets';
-    }
-
-    if (status.startsWith('Generating plan for Day')) {
-        // We are in the main generation loop
-        if (logTag === 'MARKET_RUN' || logTag === 'CHECKLIST' || logTag === 'HTTP') {
-            return 'market';
-        }
-        if (logTag === 'CALC') {
-            return 'finalizing';
-        }
-        // Default to 'planning' if the tag is for the LLM or system
-        return 'planning';
-    }
-
-    // Default to the first step if status is 'Initializing...' or unknown
-    return 'targets';
-};
-
-/**
  * Renders a single step in the "Live Stepper".
+ * @param {object} step - The step definition object from STEPS.
+ * @param {string} state - 'complete', 'active', or 'pending'.
+ * @param {object} agent - The "fun name" and icon for the active agent.
+ * @param {string} liveMessage - The raw log message for the ticker.
  */
-const Step = ({ step, state, agentName, liveMessage }) => {
+const Step = ({ step, state, agent, liveMessage }) => {
     let IconComponent;
     let iconColor;
     let titleColor = 'text-gray-500';
@@ -125,22 +101,25 @@ const Step = ({ step, state, agentName, liveMessage }) => {
     return (
         <div className="flex space-x-4">
             {/* Icon */}
-            <div className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center ${iconColor}`}>
+            <div className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center ${iconColor} transition-all duration-300`}>
                 <IconComponent className={`w-6 h-6 ${isSpinning ? 'animate-spin' : ''}`} />
             </div>
             {/* Text Content */}
-            <div className="flex-1 pt-1">
-                <h4 className={`text-lg font-semibold ${titleColor}`}>{step.title}</h4>
+            <div className="flex-1 pt-1 min-w-0"> {/* Added min-w-0 to allow truncation */}
+                <h4 className={`text-lg font-semibold ${titleColor} transition-colors duration-300`}>{step.title}</h4>
+                
                 {/* Show live-ticker if active, otherwise show default description */}
-                {state === 'active' ? (
+                {state === 'active' && agent && liveMessage ? (
                     <div className="mt-1">
-                        <p className={`text-sm font-bold ${agentName.color}`}>{agentName.name}</p>
+                        <p className={`text-sm font-bold ${agent.color}`}>
+                            Agent: {agent.name}
+                        </p>
                         <p className="text-sm text-gray-600 font-mono truncate" title={liveMessage}>
                             {liveMessage}
                         </p>
                     </div>
                 ) : (
-                    <p className={`text-sm ${descriptionColor}`}>{step.description}</p>
+                    <p className={`text-sm ${descriptionColor} transition-colors duration-300`}>{step.description}</p>
                 )}
             </div>
         </div>
@@ -149,24 +128,24 @@ const Step = ({ step, state, agentName, liveMessage }) => {
 
 /**
  * A "live-stepper" dashboard for generation progress, inspired by the user's image.
+ * This component is now "smart" and derives its state from the activeStepKey prop.
  */
 const GenerationProgressDisplay = ({
-    status,
-    error,
+    activeStepKey, // 'targets', 'planning', 'market', 'finalizing', 'complete', 'error'
+    errorMsg,
     latestLog,
 }) => {
-    // 1. Determine overall state
-    const isError = !!error;
-    const isComplete = status === 'Plan generation finished.';
+    // 1. Determine overall state from the activeStepKey
+    const isError = activeStepKey === 'error';
+    const isComplete = activeStepKey === 'complete';
     const isRunning = !isError && !isComplete;
 
-    // 2. Find the active step
-    const activeStepKey = isRunning ? getActiveStep(status, latestLog) : null;
+    // 2. Find the index of the active step
     const activeStepIndex = STEPS.findIndex(s => s.key === activeStepKey);
 
     // 3. Determine live-ticker content
     const agent = agentMap[latestLog?.tag || 'default'] || agentMap['default'];
-    const liveMessage = latestLog?.message || status || 'Initializing...';
+    const liveMessage = latestLog?.message || (activeStepKey ? `${activeStepKey}...` : 'Initializing...');
 
     return (
         <div className="w-full p-6 bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl shadow-lg border border-indigo-100 overflow-hidden">
@@ -182,7 +161,9 @@ const GenerationProgressDisplay = ({
                     <div className="w-16 h-16 rounded-full flex items-center justify-center bg-red-100">
                         <AlertTriangle className="w-8 h-8 text-red-500" />
                     </div>
-                    <p className="text-gray-700 mt-4 font-mono text-sm break-words">{error}</p>
+                    <p className="text-gray-700 mt-4 font-mono text-sm break-words">
+                        {errorMsg || "An unknown error occurred. Please check the logs."}
+                    </p>
                 </div>
             )}
 
@@ -212,7 +193,7 @@ const GenerationProgressDisplay = ({
                                 key={step.key}
                                 step={step}
                                 state={state}
-                                agentName={agent}
+                                agent={agent}
                                 liveMessage={liveMessage}
                             />
                         );
