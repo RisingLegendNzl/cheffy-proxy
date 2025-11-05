@@ -14,7 +14,7 @@ import DaySidebar from './components/DaySidebar';
 import ProductCard from './components/ProductCard';
 import CollapsibleSection from './components/CollapsibleSection';
 import SubstituteMenu from './components/SubstituteMenu';
-import GenerationProgressDisplay from './components/GenerationProgressDisplay';
+import GenerationProgressDisplay from './components/GenerationProgressDisplay'; // This is the new component
 import NutritionalInfo from './components/NutritionalInfo';
 import IngredientResultBlock from './components/IngredientResultBlock';
 import MealPlanDisplay from './components/MealPlanDisplay';
@@ -181,7 +181,7 @@ const App = () => {
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' }); // For save/load feedback
     const [generationStatus, setGenerationStatus] = useState('');
-    // const [generationProgress, setGenerationProgress] = useState(0); // [REMOVED]
+    // [REMOVED] generationProgress state
 
     // --- [NEW] State for selected meal modal ---
     const [selectedMeal, setSelectedMeal] = useState(null);
@@ -534,7 +534,7 @@ const App = () => {
         } finally {
             setLoading(false);
         }
-    }, [formData, isLogOpen, recalculateTotalCost]); // Removed generationProgress
+    }, [formData, isLogOpen, recalculateTotalCost]); // [MODIFIED] Removed generationProgress
     // --- END: handleGeneratePlan Modifications ---
 
 
@@ -752,16 +752,17 @@ const App = () => {
         );
     }, [mealPlan]); // Dependency: mealPlan
 
+    // --- [START MODIFICATION] ---
+    // --- Derive props for GenerationProgressDisplay ---
+    const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
+    const completedDays = mealPlan.length;
+    const totalDays = parseInt(formData.days, 10) || 0;
+
     // --- Content Views ---
-    // --- [START MODIFICATION] priceComparisonContent ---
     const priceComparisonContent = (
-        <div className="space-y-0 p-4"> {/* Removed space-y-8 */}
-            {loading && (
-                <GenerationProgressDisplay
-                    status={generationStatus}
-                    error={error} // Pass partial errors during loading
-                />
-            )}
+        <div className="space-y-0 p-4">
+            {/* [REMOVED] Old GenerationProgressDisplay was here */}
+
             {/* Show final/critical error only when not loading */}
             {error && !loading && (
                  <div className="p-4 bg-red-50 text-red-800 rounded-lg">
@@ -771,9 +772,11 @@ const App = () => {
                  </div>
             )}
 
+            {/* [MODIFIED] Added !loading check. This content now renders progressively
+                 but we hide the cost summary until generation is fully complete. */}
             {!loading && Object.keys(results).length > 0 && (
                 <>
-                    <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600 mb-6"> {/* Added margin-bottom */}
+                    <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600 mb-6">
                         <div className="flex items-center justify-between mb-3">
                             <h3 className="text-xl font-bold flex items-center"><DollarSign className="w-5 h-5 mr-2"/> Total Estimated Cost</h3>
                             <p className="text-3xl font-extrabold text-green-700">${totalCost.toFixed(2)}</p>
@@ -781,15 +784,14 @@ const App = () => {
                         <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
                     </div>
 
-                    {/* --- REPLACED: Old category rendering --- */}
+                    {/* This list will now populate as days are completed */}
                     <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
                         {Object.keys(categorizedResults).map((category, index) => (
                             <CollapsibleSection
                                 key={category}
                                 title={`${category} (${categorizedResults[category].length})`}
-                                // Use the map to find the icon, defaulting to 'default'
                                 icon={categoryIconMap[category.toLowerCase()] || categoryIconMap['default']}
-                                defaultOpen={false} // <-- MODIFIED: Set to false per request
+                                defaultOpen={false}
                             >
                                 <div className="grid grid-cols-1 gap-6 pt-4">
                                     {categorizedResults[category].map(({ normalizedKey, ingredient, ...result }) => {
@@ -815,7 +817,6 @@ const App = () => {
                             </CollapsibleSection>
                         ))}
                     </div>
-                    {/* --- END REPLACEMENT --- */}
                 </>
             )}
             {/* Show 'Generate plan' message only if not loading, no results, and no critical error */}
@@ -824,17 +825,16 @@ const App = () => {
             )}
         </div>
     );
-    // --- [END MODIFICATION] priceComparisonContent ---
     
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
+            {/* This sidebar will now appear as soon as Day 1 is done */}
             {mealPlan.length > 0 && (
                 <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white rounded-lg shadow p-4">
-                    {/* Ensure days prop is at least 1 */}
                     <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
                 </div>
             )}
-            {/* Check if selectedDay is valid for the current mealPlan length */}
+            {/* This display will now populate as soon as Day 1 is done */}
             {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
                 <MealPlanDisplay
                     key={selectedDay} // Re-render when selectedDay changes
@@ -846,27 +846,26 @@ const App = () => {
                     onViewRecipe={setSelectedMeal} // <-- [MODIFIED] Pass new prop
                 />
             ) : (
-                 // Handle cases: loading, no plan generated yet, or invalid selectedDay
+                 // [MODIFIED] Removed the 'loading' ternary. This is the new fallback state.
                 <div className="flex-1 text-center p-8 text-gray-500">
-                    {loading ? (
-                         <GenerationProgressDisplay status={generationStatus} error={error} />
-                    ) : error && !loading ? (
+                    {error && !loading ? (
                          // Show error message if loading finished with an error
                          <div className="p-4 bg-red-50 text-red-800 rounded-lg">
                              <AlertTriangle className="inline w-6 h-6 mr-2" />
                              <strong>Error generating plan. Check logs for details.</strong>
                              <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
                          </div>
-                    ) : mealPlan.length === 0 ? (
+                    ) : mealPlan.length === 0 && !loading ? (
                          'Generate a plan to see your meals.'
                     ) : (
-                         // This case might happen if selectedDay becomes invalid after plan generation (e.g., reducing days)
-                         'Select a valid day to view meals.'
+                         // This message will show while loading OR if selectedDay is invalid
+                         'Waiting for meal data...'
                     )}
                 </div>
             )}
         </div>
     );
+    // --- [END MODIFICATION] ---
 
     // Calculate total log height dynamically
     const failedLogViewerHeight = failedIngredientsHistory.length > 0 ? 60 : 0; // Estimate height when visible
@@ -1008,14 +1007,27 @@ const App = () => {
                                 </div>
                             </div>
 
+                            {/* --- [START MODIFICATION] --- */}
                             {/* --- Main Content Area (Ingredients / Meal Plan) --- */}
-                            {/* Guard against rendering content area if calculation errored */}
                             {hasInvalidMeals ? (
                                 <PlanCalculationErrorPanel />
                             ) : (
                                 <div className="p-0">
-                                    {/* View Toggles (only show if plan data exists) */}
-                                    {(results && Object.keys(results).length > 0) && (
+                                    {/* --- [NEW] Render Live Dashboard (only when loading) --- */}
+                                    {loading && (
+                                        <div className="p-4 md:p-6"> {/* Padding for the dashboard */}
+                                            <GenerationProgressDisplay
+                                                status={generationStatus}
+                                                error={error}
+                                                latestLog={latestLog}
+                                                completedDays={completedDays}
+                                                totalDays={totalDays}
+                                            />
+                                        </div>
+                                    )}
+
+                                    {/* View Toggles (only show if plan data exists AND not loading) */}
+                                    {(results && Object.keys(results).length > 0 && !loading) && (
                                         <div className="flex space-x-2 p-4">
                                             <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
                                             {/* Show Meal Plan button only if mealPlan array has data */}
@@ -1024,10 +1036,13 @@ const App = () => {
                                             )}
                                         </div>
                                     )}
+                                    
                                     {/* Render selected content view */}
+                                    {/* This content is now always rendered, allowing it to update progressively */}
                                     {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
                                 </div>
                             )}
+                            {/* --- [END MODIFICATION] --- */}
                         </div>
                     </div>
                 </div>
