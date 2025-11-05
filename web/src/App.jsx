@@ -181,7 +181,6 @@ const App = () => {
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' }); // For save/load feedback
     const [generationStatus, setGenerationStatus] = useState('');
-    // [REMOVED] generationProgress state
 
     // --- [NEW] State for selected meal modal ---
     const [selectedMeal, setSelectedMeal] = useState(null);
@@ -254,8 +253,6 @@ const App = () => {
     }, []); // Empty dependency array is correct here
 
     // --- Load Profile on Auth Ready ---
-    // Moved function definition before useEffect
-    // --- [START MODIFICATION] ---
     const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
         // Guard moved inside function
         if (!isAuthReady || !userId || !db) {
@@ -281,8 +278,6 @@ const App = () => {
                 const loadedData = docSnap.data();
                 console.log('[FIREBASE LOAD] Profile data found:', loadedData);
                 
-                // [MODIFIED] Simplified check. If we have data and it's an object with keys, load it.
-                // We don't need to compare its keys to the *current* formData state.
                 if (loadedData && typeof loadedData === 'object' && Object.keys(loadedData).length > 0) {
                      setFormData(loadedData); // Overwrite state with loaded data
                      if (!isInitialLoad) {
@@ -323,9 +318,7 @@ const App = () => {
                 }, 3000);
             }
         }
-    // [MODIFIED] Removed `formData` from dependency array
     }, [isAuthReady, userId, db, appId]);
-    // --- [END MODIFICATION] ---
 
     useEffect(() => {
         if (isAuthReady && userId && db) {
@@ -335,8 +328,6 @@ const App = () => {
 
 
     // --- Handlers ---
-    // Moved function definitions before useEffects that use them
-
     const recalculateTotalCost = useCallback((currentResults) => {
         let newTotal = 0;
         Object.values(currentResults).forEach(item => {
@@ -349,7 +340,7 @@ const App = () => {
             }
         });
         setTotalCost(newTotal);
-    }, []); // Empty dependency array, as it only depends on its argument
+    }, []); // Empty dependency array
 
     // --- [MODIFIED] handleGeneratePlan (SSE Version) ---
     const handleGeneratePlan = useCallback(async (e) => {
@@ -365,7 +356,7 @@ const App = () => {
         setTotalCost(0);
         setEatenMeals({});
         setFailedIngredientsHistory([]);
-        setGenerationStatus('Initializing...');
+        setGenerationStatus('Initializing...'); // <-- This is the high-level status
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
 
         let targets;
@@ -375,7 +366,7 @@ const App = () => {
 
         try {
             // --- Step 1: Fetch Nutritional Targets (Still a normal JSON request) ---
-            setGenerationStatus('Calculating nutritional targets...');
+            setGenerationStatus('Calculating nutritional targets...'); // <-- Set phase
             const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -395,7 +386,7 @@ const App = () => {
             // --- Step 2: Loop and fetch each day (Now using SSE) ---
             const numDays = parseInt(formData.days, 10);
             for (let day = 1; day <= numDays; day++) {
-                setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
+                setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`); // <-- Set phase
                 
                 let dailyFailedIngredients = [];
                 let dayFetchError = null; // Track error for this day
@@ -405,7 +396,7 @@ const App = () => {
                         method: 'POST',
                         headers: { 
                             'Content-Type': 'application/json',
-                            'Accept': 'text/event-stream' // <-- [NEW] Tell the server we want a stream
+                            'Accept': 'text/event-stream' 
                         },
                         body: JSON.stringify({
                             formData,
@@ -414,12 +405,11 @@ const App = () => {
                     });
 
                     if (!dayResponse.ok) {
-                        // If the stream itself fails (e.g., 500 error), try to read JSON error
                         const errorData = await dayResponse.json();
                         throw new Error(`Day ${day} request failed: ${errorData.message || 'Unknown server error'}`);
                     }
 
-                    // --- [NEW] Stream processing logic ---
+                    // --- Stream processing logic ---
                     const reader = dayResponse.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
@@ -429,7 +419,6 @@ const App = () => {
                         const { value, done } = await reader.read();
                         if (done) {
                             if (!dayDataReceived && !dayFetchError) {
-                                // Stream ended without finalData or an error event, which is a problem
                                 throw new Error(`Day ${day} stream ended unexpectedly without data.`);
                             }
                             break; // Stream finished
@@ -446,15 +435,12 @@ const App = () => {
                                     break;
                                 
                                 case 'error':
-                                    // A structured error from the backend stream
                                     console.error(`[SSE Error Day ${day}]`, event.data);
                                     dayFetchError = event.data.message || 'An error occurred during generation.';
-                                    // Set the main error state
                                     setError(prevError => prevError ? `${prevError}\nDay ${day}: ${dayFetchError}` : `Day ${day}: ${dayFetchError}`);
                                     break;
 
                                 case 'finalData':
-                                    // This is the successful data payload for the day
                                     const dayData = event.data;
                                     dayDataReceived = true;
 
@@ -465,7 +451,6 @@ const App = () => {
                                     if (dayData.dayResults) {
                                         accumulatedResults = { ...accumulatedResults, ...dayData.dayResults };
                                         
-                                        // Check for failed ingredients
                                         Object.values(dayData.dayResults).forEach(item => {
                                             if (item && (item.source === 'failed' || item.source === 'error')) {
                                                 dailyFailedIngredients.push({
@@ -490,7 +475,7 @@ const App = () => {
                                         });
                                     }
                                     
-                                    // --- Update state incrementally ---
+                                    // --- Update state incrementally (Progressive Rendering) ---
                                     setMealPlan([...accumulatedMealPlan]);
                                     setResults({ ...accumulatedResults }); 
                                     setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
@@ -498,49 +483,41 @@ const App = () => {
                                     break;
                             }
                         }
-                        // If we got a stream error, stop processing this day
                         if (dayFetchError) break;
                     } // end while(true)
-                    // --- [NEW] End stream processing ---
-
                 } catch (dayError) {
-                    // This catches errors in the fetch() call itself or in stream setup
                     console.error(`Error processing day ${day}:`, dayError);
                     setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
                     setDiagnosticLogs(prev => [...prev, {
                         timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: dayError.message
                     }]);
-                    // Continue to the next day
                 } finally {
-                     // Update the failed history state regardless of day success/error
                      if (dailyFailedIngredients.length > 0) {
                          setFailedIngredientsHistory(prev => [...prev, ...dailyFailedIngredients]);
                      }
                 }
-
             } // --- End of day loop ---
 
-            setGenerationStatus(`Plan generation finished.`);
+            setGenerationStatus(`Plan generation finished.`); // <-- Set final phase
             setSelectedDay(1); 
             setContentView('priceComparison'); 
 
-        } catch (err) { // --- Error handling for critical initial failures (e.g., Targets API) ---
+        } catch (err) { 
             console.error("Plan generation failed critically:", err);
             setError(`Critical failure: ${err.message}`);
-            setGenerationStatus('Failed'); // Update status for UI
+            setGenerationStatus('Failed'); // <-- Set error phase
             setDiagnosticLogs(prev => [...prev, {
                 timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
             }]);
         } finally {
             setLoading(false);
         }
-    }, [formData, isLogOpen, recalculateTotalCost]); // [MODIFIED] Removed generationProgress
+    }, [formData, isLogOpen, recalculateTotalCost]);
     // --- END: handleGeneratePlan Modifications ---
 
 
     const handleFetchNutrition = useCallback(async (product) => {
         if (!product || !product.url || nutritionCache[product.url]) { return; }
-        // If nutrition data already exists on the product object (e.g., from initial plan load), use it
         if (product.nutrition && product.nutrition.status === 'found') {
              setNutritionCache(prev => ({...prev, [product.url]: product.nutrition}));
              return;
@@ -549,9 +526,7 @@ const App = () => {
         try {
             const params = product.barcode ? `barcode=${product.barcode}` : `query=${encodeURIComponent(product.name)}`;
             const response = await fetch(`${NUTRITION_API_URL}?${params}`);
-            // Check if response is ok and content-type is application/json
             if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
-                // Handle non-JSON or error responses
                 const errorText = await response.text();
                 throw new Error(`Nutrition API Error ${response.status}: ${errorText || 'Invalid response'}`);
             }
@@ -559,40 +534,35 @@ const App = () => {
             setNutritionCache(prev => ({...prev, [product.url]: nutritionData}));
         } catch (err) {
             console.error("Failed to fetch nutrition for", product.name, ":", err);
-            // Store a 'not_found' status in cache to prevent repeated failed fetches
             setNutritionCache(prev => ({...prev, [product.url]: { status: 'not_found', source: 'fetch_error', reason: err.message }}));
         } finally {
             setLoadingNutritionFor(null);
         }
-    }, [nutritionCache]); // Dependency: nutritionCache
+    }, [nutritionCache]); 
 
-    // --- [FIXED] handleSubstituteSelection ---
     const handleSubstituteSelection = useCallback((key, newProduct) => {
-        // key is now normalizedKey (e.g., "chicken breast")
         setResults(prev => {
             const updatedItem = { ...prev[key], currentSelectionURL: newProduct.url };
             const newResults = { ...prev, [key]: updatedItem };
-            recalculateTotalCost(newResults); // Recalculate cost after substitution
+            recalculateTotalCost(newResults); 
             return newResults;
         });
-    }, [recalculateTotalCost]); // Dependency: recalculateTotalCost
+    }, [recalculateTotalCost]); 
 
-    // --- [FIXED] handleQuantityChange ---
     const handleQuantityChange = useCallback((key, delta) => {
-        // key is now normalizedKey (e.g., "chicken breast")
         setResults(prev => {
             if (!prev[key]) {
                 console.error(`[handleQuantityChange] Error: Ingredient key "${key}" not found.`);
                 return prev;
             }
-            const currentQty = prev[key].userQuantity || 1; // Default to 1 if undefined
-            const newQty = Math.max(1, currentQty + delta); // Ensure quantity is at least 1
+            const currentQty = prev[key].userQuantity || 1; 
+            const newQty = Math.max(1, currentQty + delta); 
             const updatedItem = { ...prev[key], userQuantity: newQty };
             const newResults = { ...prev, [key]: updatedItem };
-            recalculateTotalCost(newResults); // Recalculate cost after quantity change
+            recalculateTotalCost(newResults); 
             return newResults;
         });
-    }, [recalculateTotalCost]); // Dependency: recalculateTotalCost
+    }, [recalculateTotalCost]); 
 
     const handleDownloadFailedLogs = useCallback(() => {
         if (failedIngredientsHistory.length === 0) return;
@@ -610,13 +580,12 @@ const App = () => {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
-    }, [failedIngredientsHistory]); // Dependency: failedIngredientsHistory
+    }, [failedIngredientsHistory]); 
 
     const handleDownloadLogs = useCallback(() => {
         if (!diagnosticLogs || diagnosticLogs.length === 0) return;
         let logContent = "Cheffy Orchestrator Logs\n=========================\n\n";
         diagnosticLogs.forEach(log => {
-            // Ensure log is valid object before accessing properties
             if (log && typeof log === 'object' && log.timestamp) {
                 const time = new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
                 logContent += `${time} [${log.level || 'N/A'}] [${log.tag || 'N/A'}] ${log.message || ''}\n`;
@@ -642,7 +611,7 @@ const App = () => {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
-    }, [diagnosticLogs]); // Dependency: diagnosticLogs
+    }, [diagnosticLogs]); 
 
     const handleSaveProfile = useCallback(async () => {
         if (!isAuthReady || !userId || !db) {
@@ -652,30 +621,25 @@ const App = () => {
         }
         setStatusMessage({ text: 'Saving profile...', type: 'info' });
         try {
-            // Construct the path correctly
             const profileDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PROFILE_COLLECTION, FIRESTORE_PROFILE_DOC_ID);
             console.log(`[FIREBASE SAVE] Saving profile to: ${profileDocRef.path}`);
-            await setDoc(profileDocRef, formData); // Save the current formData
+            await setDoc(profileDocRef, formData); 
             setStatusMessage({ text: 'Profile saved successfully!', type: 'success' });
             console.log('[FIREBASE SAVE] Profile saved.');
         } catch (saveError) {
             console.error('[FIREBASE SAVE] Error saving profile:', saveError);
             setStatusMessage({ text: `Error saving profile: ${saveError.message}`, type: 'error' });
         } finally {
-             // Clear saving message after a delay
              setTimeout(() => {
                  setStatusMessage(prev => prev.text === 'Saving profile...' ? { text: '', type: '' } : prev);
              }, 3000);
         }
-    }, [isAuthReady, userId, db, formData, appId]); // Dependencies for saving
+    }, [isAuthReady, userId, db, formData, appId]); 
 
 
     const handleChange = (e) => {
         const { name, value } = e.target;
-        // --- START: FIX (Correct Spread Syntax) ---
         setFormData(prev => ({ ...prev, [name]: value }));
-        // --- END: FIX ---
-        // Adjust selectedDay if 'days' decreases below current selection
         if (name === 'days') {
              const newDays = parseInt(value, 10);
              if (!isNaN(newDays) && newDays < selectedDay) {
@@ -685,9 +649,7 @@ const App = () => {
     };
     const handleSliderChange = (e) => {
         const value = parseInt(e.target.value, 10);
-         // --- START: FIX (Correct Spread Syntax) ---
         setFormData(prev => ({ ...prev, days: value }));
-         // --- END: FIX ---
         if (value < selectedDay) {
             setSelectedDay(value);
         }
@@ -695,43 +657,30 @@ const App = () => {
     const onToggleMealEaten = useCallback((day, mealName) => {
         setEatenMeals(prev => {
             const dayKey = `day${day}`;
-             // --- START: FIX (Correct Spread Syntax) ---
             const dayMeals = { ...(prev[dayKey] || {}) };
-             // --- END: FIX ---
-            dayMeals[mealName] = !dayMeals[mealName]; // Toggle the specific meal's status
-             // --- START: FIX (Correct Spread Syntax) ---
+            dayMeals[mealName] = !dayMeals[mealName];
             return { ...prev, [dayKey]: dayMeals };
-             // --- END: FIX ---
         });
-    }, []); // Empty dependency array as it only depends on previous state
+    }, []); 
 
-    // --- [FIXED] categorizedResults useMemo ---
     const categorizedResults = useMemo(() => {
         const groups = {};
-        // --- [FIX] Iterate over Object.entries to get the normalizedKey ---
         Object.entries(results || {}).forEach(([normalizedKey, item]) => {
-            // Ensure item is valid before processing
-            // --- [MODIFIED] Include 'failed' and 'error' sources here ---
             if (item && item.originalIngredient && (item.source === 'discovery' || item.source === 'failed' || item.source === 'error' || item.source === 'canonical_fallback')) {
                 const category = item.category || 'Uncategorized';
                 if (!groups[category]) groups[category] = [];
-                 // Check if this ingredient (identified by originalIngredient) is already in the group
-                 // This prevents duplicates if it appears in multiple days with the same source
                  if (!groups[category].some(existing => existing.originalIngredient === item.originalIngredient)) {
-                       // --- [FIX] Push the normalizedKey along with the item data ---
                       groups[category].push({ normalizedKey: normalizedKey, ingredient: item.originalIngredient, ...item });
                  }
             }
         });
-        // --- [NEW] Sort categories
         const sortedCategories = Object.keys(groups).sort();
         const sortedGroups = {};
         for (const category of sortedCategories) {
             sortedGroups[category] = groups[category];
         }
         return sortedGroups;
-    }, [results]); // Dependency: results
-    // --- END: categorizedResults Fix ---
+    }, [results]); 
 
 
     const PlanCalculationErrorPanel = () => (
@@ -744,25 +693,20 @@ const App = () => {
 
     const hasInvalidMeals = useMemo(() => {
         if (!mealPlan || mealPlan.length === 0) return false;
-        // Check if *any* day plan is invalid or contains invalid meals
         return mealPlan.some(dayPlan =>
             !dayPlan || !Array.isArray(dayPlan.meals) || dayPlan.meals.some(meal =>
                 !meal || typeof meal.subtotal_kcal !== 'number' || meal.subtotal_kcal <= 0
             )
         );
-    }, [mealPlan]); // Dependency: mealPlan
+    }, [mealPlan]); 
 
     // --- [START MODIFICATION] ---
     // --- Derive props for GenerationProgressDisplay ---
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
-    const completedDays = mealPlan.length;
-    const totalDays = parseInt(formData.days, 10) || 0;
 
     // --- Content Views ---
     const priceComparisonContent = (
         <div className="space-y-0 p-4">
-            {/* [DELETED] Old GenerationProgressDisplay was here */}
-
             {/* Show final/critical error only when not loading */}
             {error && !loading && (
                  <div className="p-4 bg-red-50 text-red-800 rounded-lg">
@@ -772,8 +716,7 @@ const App = () => {
                  </div>
             )}
 
-            {/* [MODIFIED] Added !loading check. This content now renders progressively
-                 but we hide the cost summary until generation is fully complete. */}
+            {/* Cost summary is hidden until loading is false */}
             {!loading && Object.keys(results).length > 0 && (
                 <>
                     <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600 mb-6">
@@ -843,14 +786,11 @@ const App = () => {
                     nutritionalTargets={nutritionalTargets}
                     eatenMeals={eatenMeals}
                     onToggleMealEaten={onToggleMealEaten}
-                    onViewRecipe={setSelectedMeal} // <-- [MODIFIED] Pass new prop
+                    onViewRecipe={setSelectedMeal} 
                 />
             ) : (
-                 // [MODIFIED] Removed the 'loading' ternary. This is the new fallback state.
                 <div className="flex-1 text-center p-8 text-gray-500">
-                    {/* [DELETED] Old GenerationProgressDisplay was here */}
                     {error && !loading ? (
-                         // Show error message if loading finished with an error
                          <div className="p-4 bg-red-50 text-red-800 rounded-lg">
                              <AlertTriangle className="inline w-6 h-6 mr-2" />
                              <strong>Error generating plan. Check logs for details.</strong>
@@ -859,7 +799,6 @@ const App = () => {
                     ) : mealPlan.length === 0 && !loading ? (
                          'Generate a plan to see your meals.'
                     ) : (
-                         // This message will show while loading OR if selectedDay is invalid
                          !loading && 'Select a valid day to view meals.'
                     )}
                 </div>
@@ -869,9 +808,8 @@ const App = () => {
     // --- [END MODIFICATION] ---
 
     // Calculate total log height dynamically
-    const failedLogViewerHeight = failedIngredientsHistory.length > 0 ? 60 : 0; // Estimate height when visible
+    const failedLogViewerHeight = failedIngredientsHistory.length > 0 ? 60 : 0; 
     const diagnosticLogActualHeight = isLogOpen ? Math.max(minLogHeight, logHeight) : minLogHeight;
-    // Ensure totalLogHeight is a number
     const totalLogHeight = (failedLogViewerHeight || 0) + (diagnosticLogActualHeight || 0);
 
 
@@ -882,13 +820,12 @@ const App = () => {
             case 'error': return 'bg-red-100 text-red-800';
             case 'warn': return 'bg-yellow-100 text-yellow-800';
             case 'info': return 'bg-blue-100 text-blue-800';
-            default: return 'hidden'; // Hide if type is empty or invalid
+            default: return 'hidden'; 
         }
     };
 
     return (
         <>
-            {/* Added style check to ensure totalLogHeight is a number */}
             <div className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" style={{ paddingBottom: `${Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight}px` }}>
                 <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1>
 
@@ -912,30 +849,26 @@ const App = () => {
                             <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
                                 <div className="flex space-x-2">
-                                    {/* Load Button */}
                                     <button
-                                        onClick={() => handleLoadProfile(false)} // Explicitly pass false for manual load
-                                        disabled={!isAuthReady || !userId || !db} // Ensure DB is also ready
+                                        onClick={() => handleLoadProfile(false)} 
+                                        disabled={!isAuthReady || !userId || !db} 
                                         className="flex items-center px-3 py-1.5 bg-blue-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
                                         title="Load Saved Profile"
                                     >
                                         <FolderDown size={14} className="mr-1" /> Load
                                     </button>
-                                    {/* Save Button */}
                                      <button
                                         onClick={handleSaveProfile}
-                                        disabled={!isAuthReady || !userId || !db} // Ensure DB is also ready
+                                        disabled={!isAuthReady || !userId || !db} 
                                         className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
                                         title="Save Current Profile"
                                     >
                                         <Save size={14} className="mr-1" /> Save
                                     </button>
-                                    {/* Mobile Menu Toggle */}
                                     <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
                                 </div>
                             </div>
                             <form onSubmit={handleGeneratePlan}>
-                                {/* Form fields remain the same */}
                                 <InputField label="Name" name="name" value={formData.name} onChange={handleChange} />
                                 <div className="grid grid-cols-2 gap-4"><InputField label="Height (cm)" name="height" type="number" value={formData.height} onChange={handleChange} required /><InputField label="Weight (kg)" name="weight" type="number" value={formData.weight} onChange={handleChange} required /></div>
                                 <div className="grid grid-cols-2 gap-4"><InputField label="Age" name="age" type="number" value={formData.age} onChange={handleChange} required /><InputField label="Body Fat % (Optional)" name="bodyFat" type="number" value={formData.bodyFat} onChange={handleChange} placeholder="e.g., 15" /></div>
@@ -948,14 +881,12 @@ const App = () => {
                                 <h3 className="text-lg font-bold mt-6 mb-3 border-t pt-3">Customization</h3>
                                 <InputField label="Meals Per Day" name="eatingOccasions" type="select" value={formData.eatingOccasions} onChange={handleChange} options={[ { value: '3', label: '3 Meals' }, { value: '4', label: '4 Meals' }, { value: '5', label: '5 Meals' } ]} />
                                 <InputField label="Spending Priority" name="costPriority" type="select" value={formData.costPriority} onChange={handleChange} options={[ { value: 'Extreme Budget', label: 'Extreme Budget' }, { value: 'Best Value', label: 'Best Value' }, { value: 'Quality Focus', label: 'Quality Focus' } ]} />
-                                {/* --- [FIX] Corrected 'Modular' to 'Low' --- */}
                                 <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
                                 <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
 
                                 <button type="submit" disabled={loading || !isAuthReady} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
                                     {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
                                 </button>
-                                {/* Auth Ready Check Message */}
                                 {!isAuthReady && <p className="text-xs text-center text-red-600 mt-2">Initializing Firebase auth...</p>}
                             </form>
                         </div>
@@ -979,26 +910,20 @@ const App = () => {
                                                     <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Flame size={14} className="mr-1 text-red-500" /> Cals</p><p className="text-lg font-extrabold">{nutritionalTargets.calories}</p></div>
                                                     <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Soup size={14} className="mr-1 text-green-500" /> Protein</p><p className="text-lg font-extrabold">{nutritionalTargets.protein}g</p></div>
                                                     <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Droplet size={14} className="mr-1 text-yellow-500" /> Fat</p><p className="text-lg font-extrabold">{nutritionalTargets.fat}g</p></div>
-                                                    {/* --- [FIX] Corrected the closing tag from </M> to </p> --- */}
                                                     <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Wheat size={14} className="mr-1 text-orange-500" /> Carbs</p><p className="text-lg font-extrabold">{nutritionalTargets.carbs}g</p></div>
                                                 </div>
                                             </div>
                                         )}
                                     </div>
-                                    {/* Shopping List Section */}
                                     {uniqueIngredients.length > 0 && !hasInvalidMeals && (
                                         <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                                 {uniqueIngredients.map((item, index) => (
                                                      <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
                                                         <div className="flex-1 min-w-0">
-                                                            {/* Added check for originalIngredient */}
                                                             <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
-                                                            {/* Added check for results[item.originalIngredient] */}
-                                                            {/* --- [FIX] Need to use normalizedKey here too eventually, but less critical --- */}
                                                             <p className="text-sm">Est. Qty: {results[item.originalIngredient]?.quantityUnits || 'N/A'}</p>
                                                         </div>
-                                                         {/* Added check for category */}
                                                         <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
                                                     </div>
                                                 ))}
@@ -1021,8 +946,9 @@ const App = () => {
                                                 status={generationStatus}
                                                 error={error}
                                                 latestLog={latestLog}
-                                                completedDays={completedDays}
-                                                totalDays={totalDays}
+                                                // [MODIFIED] Pass day counts for the stepper
+                                                completedDays={mealPlan.length}
+                                                totalDays={parseInt(formData.days, 10) || 0}
                                             />
                                         </div>
                                     )}
@@ -1031,7 +957,6 @@ const App = () => {
                                     {(results && Object.keys(results).length > 0 && !loading) && (
                                         <div className="flex space-x-2 p-4">
                                             <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
-                                            {/* Show Meal Plan button only if mealPlan array has data */}
                                             {mealPlan.length > 0 && (
                                                 <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
                                             )}
@@ -1050,14 +975,12 @@ const App = () => {
             </div>
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
-             {/* [MODIFIED] Increased z-index to 100 to be above modal backdrop (z-50) */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                 <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
-                {/* --- [MODIFIED] Now uses state correctly --- */}
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
-            {/* --- [NEW] Render the modal conditionally --- */}
+            {/* --- Render the modal conditionally --- */}
             {selectedMeal && (
                 <RecipeModal 
                     meal={selectedMeal} 
