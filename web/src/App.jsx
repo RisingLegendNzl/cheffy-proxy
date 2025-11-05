@@ -156,6 +156,7 @@ const App = () => {
     
     // --- [NEW] State for GenerationProgressDisplay stepper ---
     const [generationStepKey, setGenerationStepKey] = useState(null); // e.g., 'targets', 'planning', 'market', 'finalizing', 'complete', 'error'
+    const [generationStatus, setGenerationStatus] = useState("Ready to generate plan."); // Added this line
 
     const [selectedMeal, setSelectedMeal] = useState(null);
 
@@ -953,7 +954,8 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                {/* [FIX] Changed setHeight={setHeight} to setHeight={setLogHeight} */}
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
@@ -969,5 +971,4 @@ const App = () => {
 };
 
 export default App;
-
 
