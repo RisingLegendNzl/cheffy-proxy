@@ -954,8 +954,8 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                {/* [FIX] Changed setHeight={setHeight} to setHeight={setLogHeight} */}
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                {/* [FIX] Changed setIsOpen={setIsOpen} to setIsOpen={setIsLogOpen} */}
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
@@ -971,4 +971,5 @@ const App = () => {
 };
 
 export default App;
+
 
