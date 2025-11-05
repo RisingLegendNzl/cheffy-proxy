@@ -14,7 +14,7 @@ import DaySidebar from './components/DaySidebar';
 import ProductCard from './components/ProductCard';
 import CollapsibleSection from './components/CollapsibleSection';
 import SubstituteMenu from './components/SubstituteMenu';
-import GenerationProgressDisplay from './components/GenerationProgressDisplay'; // This is the new component
+import GenerationProgressDisplay from './components/GenerationProgressDisplay';
 import NutritionalInfo from './components/NutritionalInfo';
 import IngredientResultBlock from './components/IngredientResultBlock';
 import MealPlanDisplay from './components/MealPlanDisplay';
@@ -761,7 +761,7 @@ const App = () => {
     // --- Content Views ---
     const priceComparisonContent = (
         <div className="space-y-0 p-4">
-            {/* [REMOVED] Old GenerationProgressDisplay was here */}
+            {/* [DELETED] Old GenerationProgressDisplay was here */}
 
             {/* Show final/critical error only when not loading */}
             {error && !loading && (
@@ -848,6 +848,7 @@ const App = () => {
             ) : (
                  // [MODIFIED] Removed the 'loading' ternary. This is the new fallback state.
                 <div className="flex-1 text-center p-8 text-gray-500">
+                    {/* [DELETED] Old GenerationProgressDisplay was here */}
                     {error && !loading ? (
                          // Show error message if loading finished with an error
                          <div className="p-4 bg-red-50 text-red-800 rounded-lg">
@@ -859,7 +860,7 @@ const App = () => {
                          'Generate a plan to see your meals.'
                     ) : (
                          // This message will show while loading OR if selectedDay is invalid
-                         'Waiting for meal data...'
+                         !loading && 'Select a valid day to view meals.'
                     )}
                 </div>
             )}
@@ -1051,7 +1052,7 @@ const App = () => {
              {/* --- Log Viewers (Fixed at bottom) --- */}
              {/* [MODIFIED] Increased z-index to 100 to be above modal backdrop (z-50) */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                 {/* --- [MODIFIED] Now uses state correctly --- */}
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
@@ -1068,4 +1069,5 @@ const App = () => {
 };
 
 export default App;
+
 
