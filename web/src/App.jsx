@@ -25,12 +25,12 @@ import RecipeModal from './components/RecipeModal';
 import EmojiIcon from './components/EmojiIcon';
 
 // --- CONFIGURATION ---
-const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets'; // Use relative path for Vercel proxy
-const ORCHESTRATOR_DAY_API_URL = '/api/plan/day';         // Use relative path for Vercel proxy
-const NUTRITION_API_URL = '/api/nutrition-search'; // Use relative path for Vercel proxy
+const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
+const ORCHESTRATOR_DAY_API_URL = '/api/plan/day';
+const NUTRITION_API_URL = '/api/nutrition-search';
 const MAX_SUBSTITUTES = 5;
-const FIRESTORE_PROFILE_COLLECTION = 'profile'; // Collection name within user data
-const FIRESTORE_PROFILE_DOC_ID = 'userProfile'; // Document ID for the profile
+const FIRESTORE_PROFILE_COLLECTION = 'profile';
+const FIRESTORE_PROFILE_DOC_ID = 'userProfile';
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = {
@@ -38,62 +38,52 @@ const MOCK_PRODUCT_TEMPLATE = {
     url: "#api_down_mock_product", unit_price_per_100: 1.59,
 };
 
-// --- Firebase Config and App ID (Provided by Environment) ---
-// Note: Vite uses import.meta.env for env vars
+// --- [FIX] Firebase Config and App ID (Guarded Initialization) ---
 const firebaseConfigStr = import.meta.env.VITE_FIREBASE_CONFIG;
 const appId = import.meta.env.VITE_APP_ID || 'default-app-id';
 
 let firebaseConfig = null;
+let firebaseInitializationError = null; // Store any init error
+
 try {
-    if (firebaseConfigStr) {
+    // This is the critical fix. We MUST check if the string exists before parsing.
+    if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
         firebaseConfig = JSON.parse(firebaseConfigStr);
     } else {
-        console.warn("[FIREBASE] VITE_FIREBASE_CONFIG is not defined.");
+        console.warn("[FIREBASE] VITE_FIREBASE_CONFIG is not defined or is empty.");
+        firebaseInitializationError = 'Firebase config environment variable is missing.';
     }
 } catch (e) {
     console.error("CRITICAL: Failed to parse Firebase config:", e);
+    firebaseInitializationError = `Failed to parse Firebase config: ${e.message}`;
 }
+// --- [END FIX] ---
 
 
-// --- [NEW] SSE Stream Parser ---
-/**
- * Processes a chunk of SSE data from a Uint8Array.
- * @param {Uint8Array} value - The chunk read from the stream.
- * @param {string} buffer - The leftover buffer from the previous chunk.
- * @param {TextDecoder} decoder - The TextDecoder instance.
- * @returns {{events: Array<object>, newBuffer: string}} - Parsed events and the new buffer.
- */
+// --- SSE Stream Parser ---
 function processSseChunk(value, buffer, decoder) {
-    // Decode the new chunk and append it to the buffer
     const chunk = decoder.decode(value, { stream: true });
     buffer += chunk;
-
     const events = [];
-    let lines = buffer.split('\n\n'); // Split by the message boundary
-    
-    // All but the last part are complete messages
+    let lines = buffer.split('\n\n');
     for (let i = 0; i < lines.length - 1; i++) {
         const message = lines[i];
-        if (message.trim().length === 0) continue; // Skip empty messages
-        
-        let eventType = 'message'; // default
+        if (message.trim().length === 0) continue;
+        let eventType = 'message';
         let eventData = '';
-
         message.split('\n').forEach(line => {
             if (line.startsWith('event: ')) {
                 eventType = line.substring(7).trim();
             } else if (line.startsWith('data: ')) {
-                eventData += line.substring(6).trim(); // Accumulate data lines
+                eventData += line.substring(6).trim();
             }
         });
-
         if (eventData) {
             try {
                 const jsonData = JSON.parse(eventData);
                 events.push({ eventType, data: jsonData });
             } catch (e) {
                 console.error("SSE: Failed to parse JSON data:", eventData, e);
-                // Push a special error log event
                 events.push({
                     eventType: 'message',
                     data: {
@@ -107,54 +97,37 @@ function processSseChunk(value, buffer, decoder) {
             }
         }
     }
-
-    // The last part is the new buffer
     let newBuffer = lines[lines.length - 1];
-
     return { events, newBuffer };
 }
 // --- END: SSE Stream Parser ---
 
 
-// --- [MODIFIED] Category Icon Map ---
-// Now maps category strings to the new EmojiIcon component
+// --- Category Icon Map ---
 const categoryIconMap = {
-    // Greens
-    'produce': <EmojiIcon code="1f966" alt="produce" />, // broccoli 🥦
-    'fruit': <EmojiIcon code="1f353" alt="fruit" />, // strawberry 🍓
-    'veg': <EmojiIcon code="1f955" alt="veg" />, // carrot 🥕
-
-    // Grains
-    'grains': <EmojiIcon code="1f33e" alt="grains" />, // rice 🌾
-    'carb': <EmojiIcon code="1f33e" alt="grains" />, // rice 🌾
-
-    // Reds
-    'meat': <EmojiIcon code="1f969" alt="meat" />, // steak 🥩
-    'protein': <EmojiIcon code="1f969" alt="meat" />, // steak 🥩
-    'seafood': <EmojiIcon code="1f41f" alt="seafood" />, // fish 🐟
-
-    // Blues
-    'dairy': <EmojiIcon code="1f95b" alt="dairy" />, // milk 🥛
-    'fat': <EmojiIcon code="1f951" alt="fat" />, // avocado 🥑
-    'drinks': <EmojiIcon code="1f9c3" alt="drinks" />, // juice 🧃
-
-    // Oranges/Browns
-    'pantry': <EmojiIcon code="1f968" alt="pantry" />, // pretzel 🥨
-    'canned': <EmojiIcon code="1f96b" alt="canned" />, // canned food 🥫
-    'spreads': <EmojiIcon code="1f95c" alt="spreads" />, // peanuts 🥜
-    'condiments': <EmojiIcon code="1f9c2" alt="condiments" />, // salt 🧂
-    'bakery': <EmojiIcon code="1f370" alt="bakery" />, // cake 🍰
-
-    // Cyan
-    'frozen': <EmojiIcon code="2744" alt="frozen" />, // snowflake ❄️
-
-    // Gray
-    'snacks': <EmojiIcon code="1f36b" alt="snacks" />, // chocolate 🍫
-    'misc': <EmojiIcon code="1f36b" alt="snacks" />, // chocolate 🍫
-    'uncategorized': <EmojiIcon code="1f6cd" alt="shopping" />, // shopping bag 🛍️
-    'default': <EmojiIcon code="1f6cd" alt="shopping" /> // shopping bag 🛍️
+    'produce': <EmojiIcon code="1f966" alt="produce" />,
+    'fruit': <EmojiIcon code="1f353" alt="fruit" />,
+    'veg': <EmojiIcon code="1f955" alt="veg" />,
+    'grains': <EmojiIcon code="1f33e" alt="grains" />,
+    'carb': <EmojiIcon code="1f33e" alt="grains" />,
+    'meat': <EmojiIcon code="1f969" alt="meat" />,
+    'protein': <EmojiIcon code="1f969" alt="meat" />,
+    'seafood': <EmojiIcon code="1f41f" alt="seafood" />,
+    'dairy': <EmojiIcon code="1f95b" alt="dairy" />,
+    'fat': <EmojiIcon code="1f951" alt="fat" />,
+    'drinks': <EmojiIcon code="1f9c3" alt="drinks" />,
+    'pantry': <EmojiIcon code="1f968" alt="pantry" />,
+    'canned': <EmojiIcon code="1f96b" alt="canned" />,
+    'spreads': <EmojiIcon code="1f95c" alt="spreads" />,
+    'condiments': <EmojiIcon code="1f9c2" alt="condiments" />,
+    'bakery': <EmojiIcon code="1f370" alt="bakery" />,
+    'frozen': <EmojiIcon code="2744" alt="frozen" />,
+    'snacks': <EmojiIcon code="1f36b" alt="snacks" />,
+    'misc': <EmojiIcon code="1f36b" alt="snacks" />,
+    'uncategorized': <EmojiIcon code="1f6cd" alt="shopping" />,
+    'default': <EmojiIcon code="1f6cd" alt="shopping" />
 };
-// --- END: Modified Map ---
+// --- END: Category Icon Map ---
 
 
 // --- MAIN APP COMPONENT ---
@@ -179,94 +152,90 @@ const App = () => {
     const [isLogOpen, setIsLogOpen] = useState(false);
     const minLogHeight = 50;
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
-    const [statusMessage, setStatusMessage] = useState({ text: '', type: '' }); // For save/load feedback
-    const [generationStatus, setGenerationStatus] = useState('');
+    const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
+    
+    // --- [NEW] State for GenerationProgressDisplay stepper ---
+    const [generationStepKey, setGenerationStepKey] = useState(null); // e.g., 'targets', 'planning', 'market', 'finalizing', 'complete', 'error'
 
-    // --- [NEW] State for selected meal modal ---
     const [selectedMeal, setSelectedMeal] = useState(null);
 
     // --- Firebase State ---
     const [auth, setAuth] = useState(null);
     const [db, setDb] = useState(null);
     const [userId, setUserId] = useState(null);
-    const [isAuthReady, setIsAuthReady] = useState(false); // Track auth state readiness
+    const [isAuthReady, setIsAuthReady] = useState(false);
 
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
-        if (!firebaseConfig) {
-            console.error("[FIREBASE] Firebase config is missing or invalid JSON."); // Updated error message
-            setStatusMessage({ text: 'Firebase config missing or invalid. Cannot save/load profile.', type: 'error' });
+        // Use the error variable from the outer scope
+        if (firebaseInitializationError) {
+            console.error("[FIREBASE] Firebase init failed:", firebaseInitializationError);
+            setStatusMessage({ text: firebaseInitializationError, type: 'error' });
             setIsAuthReady(true); // Set auth ready even if config fails, to avoid blocking UI
             return;
         }
 
-        try {
-            const app = initializeApp(firebaseConfig);
-            const authInstance = getAuth(app);
-            const dbInstance = getFirestore(app);
-            setDb(dbInstance);
-            setAuth(authInstance);
-            setLogLevel('debug'); // Enable Firestore logging
+        // We only proceed if firebaseConfig was successfully parsed
+        if (firebaseConfig) {
+            try {
+                const app = initializeApp(firebaseConfig);
+                const authInstance = getAuth(app);
+                const dbInstance = getFirestore(app);
+                setDb(dbInstance);
+                setAuth(authInstance);
+                setLogLevel('debug');
+                console.log("[FIREBASE] Initialized.");
 
-            console.log("[FIREBASE] Initialized.");
-
-            const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
-                if (user) {
-                    console.log("[FIREBASE] User is signed in:", user.uid);
-                    setUserId(user.uid);
-                } else {
-                    console.log("[FIREBASE] User is signed out. Attempting sign-in...");
-                    setUserId(null); // Clear userId while attempting sign-in
-                    try {
-                        const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN;
-                        if (initialAuthToken) {
-                            console.log("[FIREBASE] Signing in with custom token...");
-                            await signInWithCustomToken(authInstance, initialAuthToken);
-                        } else {
-                            console.log("[FIREBASE] Signing in anonymously...");
-                            const anonUserCredential = await signInAnonymously(authInstance);
-                            console.log("[FIREBASE] Signed in anonymously:", anonUserCredential.user.uid);
-                            // User state will be updated by onAuthStateChanged firing again
+                const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
+                    if (user) {
+                        console.log("[FIREBASE] User is signed in:", user.uid);
+                        setUserId(user.uid);
+                    } else {
+                        console.log("[FIREBASE] User is signed out. Attempting sign-in...");
+                        setUserId(null);
+                        try {
+                            const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN;
+                            if (initialAuthToken) {
+                                console.log("[FIREBASE] Signing in with custom token...");
+                                await signInWithCustomToken(authInstance, initialAuthToken);
+                            } else {
+                                console.log("[FIREBASE] Signing in anonymously...");
+                                await signInAnonymously(authInstance);
+                            }
+                        } catch (signInError) {
+                            console.error("[FIREBASE] Sign-in error:", signInError);
+                            setStatusMessage({ text: `Firebase sign-in failed: ${signInError.message}`, type: 'error' });
+                            const tempId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                            setUserId(tempId);
+                            console.warn("[FIREBASE] Using temporary local ID:", tempId);
                         }
-                    } catch (signInError) {
-                        console.error("[FIREBASE] Sign-in error:", signInError);
-                        setStatusMessage({ text: `Firebase sign-in failed: ${signInError.message}`, type: 'error' });
-                        const tempId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-                        setUserId(tempId);
-                        console.warn("[FIREBASE] Using temporary local ID:", tempId);
                     }
-                }
-                 // Set auth ready only *after* the first auth state check completes
-                 if (!isAuthReady) {
-                    setIsAuthReady(true);
-                    console.log("[FIREBASE] Auth state ready.");
-                }
-            });
-
-            return () => unsubscribe();
-
-        } catch (initError) {
-            console.error("[FIREBASE] Initialization failed:", initError);
-            setStatusMessage({ text: `Firebase init failed: ${initError.message}`, type: 'error' });
-            setIsAuthReady(true); // Ensure auth ready is set even on init failure
+                    if (!isAuthReady) {
+                        setIsAuthReady(true);
+                        console.log("[FIREBASE] Auth state ready.");
+                    }
+                });
+                return () => unsubscribe();
+            } catch (initError) {
+                console.error("[FIREBASE] Initialization failed:", initError);
+                setStatusMessage({ text: `Firebase init failed: ${initError.message}`, type: 'error' });
+                setIsAuthReady(true);
+            }
         }
-    }, []); // Empty dependency array is correct here
+    }, [isAuthReady]); // Re-run this effect only if isAuthReady changes (which it won't, but this is fine)
+
 
     // --- Load Profile on Auth Ready ---
     const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
-        // Guard moved inside function
         if (!isAuthReady || !userId || !db) {
-            if (!isInitialLoad) {
-                setStatusMessage({ text: 'Firebase not ready. Cannot load profile.', type: 'error' });
-                console.error('[FIREBASE LOAD] Auth not ready or DB/userId missing.');
-            } else {
-                 console.log('[FIREBASE LOAD] Skipping initial load: Auth not ready or DB/userId missing.');
-            }
+            const msg = 'Firebase not ready. Cannot load profile.';
+            if (!isInitialLoad) setStatusMessage({ text: msg, type: 'error' });
+            console.error(`[FIREBASE LOAD] ${msg}`);
             return;
         }
-         if (!isInitialLoad) {
+        if (!isInitialLoad) {
             setStatusMessage({ text: 'Loading profile...', type: 'info' });
-         } else {
+        } else {
              console.log('[FIREBASE LOAD] Attempting initial profile load...');
          }
         try {
@@ -279,7 +248,7 @@ const App = () => {
                 console.log('[FIREBASE LOAD] Profile data found:', loadedData);
                 
                 if (loadedData && typeof loadedData === 'object' && Object.keys(loadedData).length > 0) {
-                     setFormData(loadedData); // Overwrite state with loaded data
+                     setFormData(loadedData);
                      if (!isInitialLoad) {
                          setStatusMessage({ text: 'Profile loaded successfully!', type: 'success' });
                      } else {
@@ -290,28 +259,20 @@ const App = () => {
                      console.warn('[FIREBASE LOAD] Loaded data is empty or not an object.');
                       if (!isInitialLoad) {
                         setStatusMessage({ text: 'Found profile document, but data is invalid.', type: 'warn' });
-                      } else {
-                           console.log('[FIREBASE LOAD] Initial profile data invalid.');
                       }
                 }
-
             } else {
                 console.log('[FIREBASE LOAD] No profile document found.');
                  if (!isInitialLoad) {
                     setStatusMessage({ text: 'No saved profile found.', type: 'info' });
-                 } else {
-                      console.log('[FIREBASE LOAD] No profile found on initial load.');
                  }
             }
         } catch (loadError) {
             console.error('[FIREBASE LOAD] Error loading profile:', loadError);
              if (!isInitialLoad) {
                 setStatusMessage({ text: `Error loading profile: ${loadError.message}`, type: 'error' });
-             } else {
-                  console.error('[FIREBASE LOAD] Error during initial profile load.');
              }
         } finally {
-            // Clear loading message after a delay if it wasn't replaced by success/error
             if (!isInitialLoad) {
                 setTimeout(() => {
                     setStatusMessage(prev => prev.text === 'Loading profile...' ? { text: '', type: '' } : prev);
@@ -322,9 +283,9 @@ const App = () => {
 
     useEffect(() => {
         if (isAuthReady && userId && db) {
-            handleLoadProfile(true); // Call initial load here
+            handleLoadProfile(true);
         }
-    }, [isAuthReady, userId, db, handleLoadProfile]); // Added handleLoadProfile to dependency array
+    }, [isAuthReady, userId, db, handleLoadProfile]);
 
 
     // --- Handlers ---
@@ -340,7 +301,7 @@ const App = () => {
             }
         });
         setTotalCost(newTotal);
-    }, []); // Empty dependency array
+    }, []);
 
     // --- [MODIFIED] handleGeneratePlan (SSE Version) ---
     const handleGeneratePlan = useCallback(async (e) => {
@@ -356,7 +317,7 @@ const App = () => {
         setTotalCost(0);
         setEatenMeals({});
         setFailedIngredientsHistory([]);
-        setGenerationStatus('Initializing...'); // <-- This is the high-level status
+        setGenerationStepKey('targets'); // <-- [NEW] Set initial step
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
 
         let targets;
@@ -365,8 +326,7 @@ const App = () => {
         let accumulatedUniqueIngredients = new Map(); 
 
         try {
-            // --- Step 1: Fetch Nutritional Targets (Still a normal JSON request) ---
-            setGenerationStatus('Calculating nutritional targets...'); // <-- Set phase
+            // --- Step 1: Fetch Nutritional Targets ---
             const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -382,14 +342,16 @@ const App = () => {
             targets = targetsData.nutritionalTargets;
             setNutritionalTargets(targets); 
             setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
+            setGenerationStepKey('planning'); // <-- [NEW] Set next step
             
-            // --- Step 2: Loop and fetch each day (Now using SSE) ---
+            // --- Step 2: Loop and fetch each day (SSE) ---
             const numDays = parseInt(formData.days, 10);
             for (let day = 1; day <= numDays; day++) {
-                setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`); // <-- Set phase
+                // This status is now for the main title, not the step logic
+                setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
                 
                 let dailyFailedIngredients = [];
-                let dayFetchError = null; // Track error for this day
+                let dayFetchError = null;
 
                 try {
                     const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
@@ -409,7 +371,6 @@ const App = () => {
                         throw new Error(`Day ${day} request failed: ${errorData.message || 'Unknown server error'}`);
                     }
 
-                    // --- Stream processing logic ---
                     const reader = dayResponse.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
@@ -421,37 +382,44 @@ const App = () => {
                             if (!dayDataReceived && !dayFetchError) {
                                 throw new Error(`Day ${day} stream ended unexpectedly without data.`);
                             }
-                            break; // Stream finished
+                            break;
                         }
                         
                         const { events, newBuffer } = processSseChunk(value, buffer, decoder);
                         buffer = newBuffer;
 
                         for (const event of events) {
+                            const eventData = event.data;
                             switch (event.eventType) {
                                 case 'message':
-                                    // Add log to state
-                                    setDiagnosticLogs(prev => [...prev, event.data]);
+                                    setDiagnosticLogs(prev => [...prev, eventData]);
+                                    
+                                    // --- [NEW] Logic to drive the stepper ---
+                                    if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
+                                        setGenerationStepKey(prevKey => (prevKey === 'planning' || prevKey === 'market') ? 'market' : prevKey);
+                                    } else if (eventData?.tag === 'LLM' || eventData?.tag === 'LLM_PROMPT') {
+                                         setGenerationStepKey(prevKey => (prevKey === 'planning' || prevKey === 'market') ? 'planning' : prevKey);
+                                    }
+                                    // --- [END NEW] ---
                                     break;
                                 
                                 case 'error':
-                                    console.error(`[SSE Error Day ${day}]`, event.data);
-                                    dayFetchError = event.data.message || 'An error occurred during generation.';
+                                    console.error(`[SSE Error Day ${day}]`, eventData);
+                                    dayFetchError = eventData.message || 'An error occurred during generation.';
                                     setError(prevError => prevError ? `${prevError}\nDay ${day}: ${dayFetchError}` : `Day ${day}: ${dayFetchError}`);
+                                    setGenerationStepKey('error'); // <-- [NEW] Set error step
                                     break;
 
                                 case 'finalData':
-                                    const dayData = event.data;
                                     dayDataReceived = true;
 
-                                    // --- Accumulate successful day data ---
-                                    if (dayData.mealPlanForDay) {
-                                        accumulatedMealPlan.push(dayData.mealPlanForDay);
+                                    if (eventData.mealPlanForDay) {
+                                        accumulatedMealPlan.push(eventData.mealPlanForDay);
                                     }
-                                    if (dayData.dayResults) {
-                                        accumulatedResults = { ...accumulatedResults, ...dayData.dayResults };
+                                    if (eventData.dayResults) {
+                                        accumulatedResults = { ...accumulatedResults, ...eventData.dayResults };
                                         
-                                        Object.values(dayData.dayResults).forEach(item => {
+                                        Object.values(eventData.dayResults).forEach(item => {
                                             if (item && (item.source === 'failed' || item.source === 'error')) {
                                                 dailyFailedIngredients.push({
                                                     timestamp: new Date().toISOString(),
@@ -464,8 +432,8 @@ const App = () => {
                                             }
                                         });
                                     }
-                                    if (dayData.dayUniqueIngredients) {
-                                        dayData.dayUniqueIngredients.forEach(ing => {
+                                    if (eventData.dayUniqueIngredients) {
+                                        eventData.dayUniqueIngredients.forEach(ing => {
                                             if (ing && ing.originalIngredient) {
                                                 accumulatedUniqueIngredients.set(ing.originalIngredient, {
                                                     ...(accumulatedUniqueIngredients.get(ing.originalIngredient) || {}), 
@@ -475,7 +443,6 @@ const App = () => {
                                         });
                                     }
                                     
-                                    // --- Update state incrementally (Progressive Rendering) ---
                                     setMealPlan([...accumulatedMealPlan]);
                                     setResults({ ...accumulatedResults }); 
                                     setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
@@ -488,6 +455,7 @@ const App = () => {
                 } catch (dayError) {
                     console.error(`Error processing day ${day}:`, dayError);
                     setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
+                    setGenerationStepKey('error'); // <-- [NEW] Set error step
                     setDiagnosticLogs(prev => [...prev, {
                         timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: dayError.message
                     }]);
@@ -498,19 +466,33 @@ const App = () => {
                 }
             } // --- End of day loop ---
 
-            setGenerationStatus(`Plan generation finished.`); // <-- Set final phase
+            // --- [NEW] Set final step keys ---
+            if (!error) {
+                setGenerationStatus(`Plan generation finished.`);
+                setGenerationStepKey('finalizing'); // Show finalizing briefly
+                setTimeout(() => {
+                    setGenerationStepKey('complete'); // Then set to complete
+                }, 1500); // Show "finalizing" for 1.5s
+            } else {
+                 setGenerationStepKey('error');
+            }
+            // --- [END NEW] ---
+
             setSelectedDay(1); 
             setContentView('priceComparison'); 
 
         } catch (err) { 
             console.error("Plan generation failed critically:", err);
             setError(`Critical failure: ${err.message}`);
-            setGenerationStatus('Failed'); // <-- Set error phase
+            setGenerationStepKey('error'); // <-- [NEW] Set error step
             setDiagnosticLogs(prev => [...prev, {
                 timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
             }]);
         } finally {
-            setLoading(false);
+            // Hide the spinner *after* the 'complete' state has a chance to show
+             setTimeout(() => {
+                setLoading(false);
+            }, 2000); // Wait 2s total
         }
     }, [formData, isLogOpen, recalculateTotalCost]);
     // --- END: handleGeneratePlan Modifications ---
@@ -700,11 +682,10 @@ const App = () => {
         );
     }, [mealPlan]); 
 
-    // --- [START MODIFICATION] ---
-    // --- Derive props for GenerationProgressDisplay ---
+    // --- [MODIFIED] Find latestLog to pass to stepper ---
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
 
-    // --- Content Views ---
+    // --- Content Views (Progressive Rendering) ---
     const priceComparisonContent = (
         <div className="space-y-0 p-4">
             {/* Show final/critical error only when not loading */}
@@ -727,7 +708,6 @@ const App = () => {
                         <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
                     </div>
 
-                    {/* This list will now populate as days are completed */}
                     <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
                         {Object.keys(categorizedResults).map((category, index) => (
                             <CollapsibleSection
@@ -771,16 +751,14 @@ const App = () => {
     
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
-            {/* This sidebar will now appear as soon as Day 1 is done */}
             {mealPlan.length > 0 && (
                 <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white rounded-lg shadow p-4">
                     <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
                 </div>
             )}
-            {/* This display will now populate as soon as Day 1 is done */}
             {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
                 <MealPlanDisplay
-                    key={selectedDay} // Re-render when selectedDay changes
+                    key={selectedDay}
                     mealPlan={mealPlan}
                     selectedDay={selectedDay}
                     nutritionalTargets={nutritionalTargets}
@@ -805,15 +783,9 @@ const App = () => {
             )}
         </div>
     );
-    // --- [END MODIFICATION] ---
 
-    // Calculate total log height dynamically
-    const failedLogViewerHeight = failedIngredientsHistory.length > 0 ? 60 : 0; 
-    const diagnosticLogActualHeight = isLogOpen ? Math.max(minLogHeight, logHeight) : minLogHeight;
-    const totalLogHeight = (failedLogViewerHeight || 0) + (diagnosticLogActualHeight || 0);
+    const totalLogHeight = (failedIngredientsHistory.length > 0 ? 60 : 0) + (isLogOpen ? Math.max(minLogHeight, logHeight) : minLogHeight);
 
-
-    // --- Status Message Display ---
     const getStatusColor = (type) => {
         switch (type) {
             case 'success': return 'bg-green-100 text-green-800';
@@ -884,10 +856,12 @@ const App = () => {
                                 <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
                                 <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
 
-                                <button type="submit" disabled={loading || !isAuthReady} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
+                                <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
                                     {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
                                 </button>
-                                {!isAuthReady && <p className="text-xs text-center text-red-600 mt-2">Initializing Firebase auth...</p>}
+                                {(!isAuthReady || !firebaseConfig) && <p className="text-xs text-center text-red-600 mt-2">
+                                    {firebaseInitializationError ? firebaseInitializationError : 'Initializing Firebase auth...'}
+                                </p>}
                             </form>
                         </div>
 
@@ -933,22 +907,19 @@ const App = () => {
                                 </div>
                             </div>
 
-                            {/* --- [START MODIFICATION] --- */}
-                            {/* --- Main Content Area (Ingredients / Meal Plan) --- */}
+                            {/* --- [MODIFIED] Main Content Area (Progressive Rendering) --- */}
                             {hasInvalidMeals ? (
                                 <PlanCalculationErrorPanel />
                             ) : (
                                 <div className="p-0">
-                                    {/* --- [NEW] Render Live Dashboard (only when loading) --- */}
+                                    {/* --- [NEW] Render Live Stepper (only when loading) --- */}
                                     {loading && (
-                                        <div className="p-4 md:p-6"> {/* Padding for the dashboard */}
+                                        <div className="p-4 md:p-6">
                                             <GenerationProgressDisplay
-                                                status={generationStatus}
-                                                error={error}
-                                                latestLog={latestLog}
-                                                // [MODIFIED] Pass day counts for the stepper
-                                                completedDays={mealPlan.length}
-                                                totalDays={parseInt(formData.days, 10) || 0}
+                                                activeStepKey={generationStepKey}
+                                                errorMsg={error}
+                                                // [NEW] Pass latest log for the sub-text
+                                                latestLog={latestLog} 
                                             />
                                         </div>
                                     )}
@@ -963,9 +934,15 @@ const App = () => {
                                         </div>
                                     )}
                                     
-                                    {/* Render selected content view */}
-                                    {/* This content is now always rendered, allowing it to update progressively */}
-                                    {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
+                                    {/* These are now always rendered (unless `loading`), allowing progressive updates */}
+                                    {!loading && (
+                                        contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent
+                                    )}
+
+                                    {/* [NEW] During loading, show the content containers so they can be populated */}
+                                    {loading && (
+                                         contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent
+                                    )}
                                 </div>
                             )}
                             {/* --- [END MODIFICATION] --- */}
