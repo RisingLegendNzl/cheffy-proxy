@@ -122,21 +122,37 @@ function hashString(str) {
 function createLogger(run_id, responseStream = null) {
     const logs = [];
     
+    /**
+     * Writes a Server-Sent Event (SSE) to the response stream.
+     * @param {string} eventType - The event type (e.g., 'message', 'finalData').
+     * @param {object} data - The JSON-serializable data payload.
+     */
     const writeSseEvent = (eventType, data) => {
         if (!responseStream || responseStream.writableEnded) {
-            return; 
+            // console.warn(`[SSE Logger] Attempted to write event '${eventType}' but stream is null or ended.`); // Optional: Log attempts to write to closed stream
+            return; // Can't write to a closed or non-existent stream
         }
         try {
+            // Ensure data is always an object, even if a simple string is passed
             const payload = (typeof data === 'string') ? { message: data } : data;
             const dataString = JSON.stringify(payload);
             responseStream.write(`event: ${eventType}\n`);
             responseStream.write(`data: ${dataString}\n\n`);
         } catch (e) {
+            // This might fail if the client disconnected
             console.error(`[SSE Logger] Failed to write event ${eventType} to stream: ${e.message}`);
+            // Attempt to close the stream gracefully if write fails
              try { if (!responseStream.writableEnded) responseStream.end(); } catch {}
         }
     };
 
+    /**
+     * Creates a log entry, sends it via SSE, and logs it to the console.
+     * @param {string} message - The log message.
+     * @param {string} [level='INFO'] - Log level (e.g., 'INFO', 'WARN', 'ERROR').
+     * @param {string} [tag='SYSTEM'] - A tag for categorizing the log (e.g., 'LLM', 'MARKET_RUN').
+     * @param {object} [data=null] - Optional serializable data.
+     */
     const log = (message, level = 'INFO', tag = 'SYSTEM', data = null) => {
         let logEntry;
         try {
@@ -146,34 +162,45 @@ function createLogger(run_id, responseStream = null) {
                 level: level.toUpperCase(),
                 tag: tag.toUpperCase(),
                 message,
-                data: data ? JSON.parse(JSON.stringify(data, (key, value) => 
+                data: data ? JSON.parse(JSON.stringify(data, (key, value) => // Basic serialization
                     (typeof value === 'string' && value.length > 300) ? value.substring(0, 300) + '...' : value
                 )) : null
             };
             logs.push(logEntry);
             
+            // Send log message over SSE
             writeSseEvent('log_message', logEntry);
 
+            // Also log to console for server visibility
              const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
              console.log(`${time} [${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
+             // Only log data blobs for non-debug or high-severity levels
              if (data && (level !== 'DEBUG' || ['ERROR', 'CRITICAL', 'WARN'].includes(level))) {
                  try {
+                     // Truncate long strings within data for console logging
                      const truncatedData = JSON.stringify(data, (k, v) => typeof v === 'string' && v.length > 150 ? v.substring(0, 150) + '...' : v, 2);
                      console.log("  Data:", truncatedData.length > 500 ? truncatedData.substring(0, 500) + '...' : truncatedData);
                  } catch { console.log("  Data: [Serialization Error]"); }
              }
             return logEntry;
         } catch (error) {
+             // Fallback if logging itself fails
              const fallbackEntry = { timestamp: new Date().toISOString(), run_id: run_id, level: 'ERROR', tag: 'LOGGING', message: `Log serialization failed: ${message}`, data: { error: error.message }}
              logs.push(fallbackEntry);
              console.error(JSON.stringify(fallbackEntry));
+             // Try to send this critical error over SSE
              writeSseEvent('log_message', fallbackEntry);
              return fallbackEntry;
         }
     };
 
+    /**
+     * Logs a critical error, sends an 'error' event, and closes the stream.
+     * @param {string} errorMessage - The final error message.
+     * @param {string} [errorCode="SERVER_FAULT_PLAN"] - A machine-readable error code.
+     */
     const logErrorAndClose = (errorMessage, errorCode = "SERVER_FAULT_PLAN") => {
-        log(errorMessage, 'CRITICAL', 'SYSTEM');
+        log(errorMessage, 'CRITICAL', 'SYSTEM'); // Log it normally first
         writeSseEvent('error', {
             code: errorCode,
             message: errorMessage
@@ -183,6 +210,10 @@ function createLogger(run_id, responseStream = null) {
         }
     };
     
+    /**
+     * Sends the final 'plan:complete' event and closes the stream.
+     * @param {object} data - The final plan data payload.
+     */
     const sendFinalDataAndClose = (data) => {
         log(`Generation complete, sending final payload and closing stream.`, 'INFO', 'SYSTEM');
         writeSseEvent('plan:complete', data);
@@ -191,11 +222,17 @@ function createLogger(run_id, responseStream = null) {
         }
     };
     
+    /**
+     * Sends a generic SSE event.
+     * @param {string} eventType - The event name.
+     * @param {object} data - The JSON-serializable data payload.
+     */
     const sendEvent = (eventType, data) => {
         writeSseEvent(eventType, data);
     };
 
-    return { log, getLogs, logErrorAndClose, sendFinalDataAndClose, sendEvent };
+    // [FIX] Explicitly define getLogs as a function returning the logs array
+    return { log, getLogs: () => logs, logErrorAndClose, sendFinalDataAndClose, sendEvent };
 }
 // --- End Logger ---
 
@@ -206,6 +243,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function getSanitizedFormData(formData) {
     try {
         if (!formData || typeof formData !== 'object') return { error: "Invalid form data received." };
+        // Redact PII
         const { name, height, weight, age, bodyFat, ...rest } = formData;
         return { ...rest, user_profile: "[REDACTED]" };
     } catch (e) { return { error: "Failed to sanitize form data." }; }
@@ -217,23 +255,30 @@ async function concurrentlyMap(array, limit, asyncMapper) {
     for (const item of array) {
         const promise = asyncMapper(item)
             .then(result => {
+                // Remove this promise from the executing list once it's done
                 const index = executing.indexOf(promise);
                 if (index > -1) executing.splice(index, 1);
                 return result;
             })
             .catch(error => {
+                // Handle errors gracefully
                 console.error(`Error in concurrentlyMap item "${item?.originalIngredient || item?.name || 'unknown'}":`, error);
                 const index = executing.indexOf(promise);
                 if (index > -1) executing.splice(index, 1);
+                // Return an error object to be handled by the caller
                 return { _error: true, message: error.message || 'Unknown concurrent map error', itemKey: item?.originalIngredient || item?.name || 'unknown' };
             });
         executing.push(promise);
         results.push(promise);
-        if (executing.length >= limit) { await Promise.race(executing); }
+        if (executing.length >= limit) {
+            // Wait for at least one promise to resolve before adding more
+            await Promise.race(executing);
+        }
     }
-    return Promise.all(results).then(res => res.filter(r => r != null));
+    return Promise.all(results).then(res => res.filter(r => r != null)); // Filter out null/undefined results
 }
 
+// --- fetchLLMWithRetry with JSON Guard ---
 async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
     for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
         const controller = new AbortController();
@@ -242,55 +287,70 @@ async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
         try {
             log(`${attemptPrefix} Attempt ${attempt}: Fetching from ${url} (Timeout: ${LLM_REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
             const response = await fetch(url, { ...options, signal: controller.signal });
-            clearTimeout(timeout);
+            clearTimeout(timeout); // Clear the timeout as the request completed
 
             if (response.ok) {
+                // [FIX] Read as text first to check for non-JSON
                 const rawText = await response.text();
                 if (!rawText || rawText.trim() === "") {
+                    // This can happen. Treat as a retryable error.
                     throw new Error("Response was 200 OK but body was empty.");
                 }
                 
                 const trimmedText = rawText.trim();
-                // [MODIFIED] Check for { or [
+                // [FIX] Check if the text *looks* like JSON before parsing
                 if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+                    // It looks like JSON, return a new response-like object
                     return {
                         ok: true,
                         status: response.status,
-                        json: () => Promise.resolve(JSON.parse(trimmedText)), 
+                        json: () => Promise.resolve(JSON.parse(trimmedText)), // Parse the text we already read
                         text: () => Promise.resolve(trimmedText)
                     };
                 } else {
+                    // This is a 200 OK with a non-JSON body (e.g., "I cannot..." safety refusal)
                     log(`${attemptPrefix} Attempt ${attempt}: 200 OK with non-JSON body. Retrying...`, 'WARN', 'HTTP', { body: trimmedText.substring(0, 100) });
                     throw new Error(`200 OK with non-JSON body: ${trimmedText.substring(0, 100)}`);
                 }
             }
 
+            // Handle non-OK statuses
             if (response.status === 429 || response.status >= 500) {
+                // Retryable server errors
                 log(`${attemptPrefix} Attempt ${attempt}: Received retryable error ${response.status}. Retrying...`, 'WARN', 'HTTP');
             } else {
+                // Client errors (400, 401, etc.) - not retryable
                 const errorBody = await response.text();
                 log(`${attemptPrefix} Attempt ${attempt}: Non-retryable error ${response.status}.`, 'CRITICAL', 'HTTP', { body: errorBody });
                 throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody}`);
             }
         } catch (error) {
-             clearTimeout(timeout);
+             clearTimeout(timeout); // Clear timeout on error
+             
              if (error.name === 'AbortError') {
+                 // Request timed out
                  log(`${attemptPrefix} Attempt ${attempt}: Fetch timed out after ${LLM_REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
              } else if (error instanceof SyntaxError) {
+                 // This shouldn't happen with the new guard, but as a safety net
                 log(`${attemptPrefix} Attempt ${attempt}: Failed to parse response as JSON. Retrying...`, 'WARN', 'HTTP', { error: error.message });
              } else if (!error.message?.startsWith(`${attemptPrefix} call failed with status`)) {
+                 // General network error or the 200-non-JSON error
                 log(`${attemptPrefix} Attempt ${attempt}: Fetch failed: ${error.message}. Retrying...`, 'WARN', 'HTTP');
              } else {
+                 // This was a non-retryable error (e.g., 400)
                  throw error; // Rethrow non-retryable or final attempt errors
              }
         }
 
+        // Wait before retrying
         if (attempt < MAX_LLM_RETRIES) {
-            const delayTime = Math.pow(2, attempt -1) * 3000 + Math.random() * 1000;
+            const delayTime = Math.pow(2, attempt -1) * 3000 + Math.random() * 1000; // Exponential backoff
             log(`Waiting ${delayTime.toFixed(0)}ms before ${attemptPrefix} retry...`, 'DEBUG', 'HTTP');
             await delay(delayTime);
         }
     }
+    
+    // All retries failed
     log(`${attemptPrefix} call failed definitively after ${MAX_LLM_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
     throw new Error(`${attemptPrefix} call to ${url} failed after ${MAX_LLM_RETRIES} attempts.`);
 }
@@ -305,11 +365,15 @@ const calculateUnitPrice = (price, size) => {
         numericSize = parseFloat(match[1]);
         const unit = match[2];
         if (numericSize > 0) {
+            // Convert to base unit (g or ml)
             let totalUnits = (unit === 'kg' || unit === 'l') ? numericSize * 1000 : numericSize;
-            if (totalUnits >= 100) return (price / totalUnits) * 100;
+            if (totalUnits >= 100) {
+                // Calculate price per 100 units
+                return (price / totalUnits) * 100;
+            }
         }
     }
-    return price; // Fallback
+    return price; // Fallback to item price if unit parse fails
 };
 
 function parseSize(sizeString) {
@@ -327,12 +391,14 @@ function parseSize(sizeString) {
     return null;
 }
 
+// --- Validation Helpers ---
 function passRequiredWords(title = '', required = []) {
   if (!required || required.length === 0) return true;
   const t = title.toLowerCase();
   return required.every(w => {
-    if (!w) return true;
-    const base = w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!w) return true; // Handle empty strings in requiredWords array
+    const base = w.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Escape regex chars
+    // Match whole word, allow optional 's' for plural
     const rx = new RegExp(`\\b${base}s?\\b`, 'i');
     return rx.test(t);
   });
@@ -347,16 +413,17 @@ const stdev = (arr) => {
 };
 
 function applyPriceOutlierGuard(products, log, ingredientKey) {
-    if (products.length < 3) return products;
+    if (products.length < 3) return products; // Not enough data to check for outliers
     const prices = products.map(p => p.product.unit_price_per_100).filter(p => p > 0);
     if (prices.length < 3) return products;
+    
     const m = mean(prices);
     const s = stdev(prices);
-    if (s === 0) return products;
+    if (s === 0) return products; // All prices are identical
 
     return products.filter(p => {
         const price = p.product.unit_price_per_100;
-        if (price <= 0) return true;
+        if (price <= 0) return true; // Keep items with no price data
         const zScore = (price - m) / s;
         if (zScore > PRICE_OUTLIER_Z_SCORE) {
             log(`[${ingredientKey}] Demoting Price Outlier: "${p.product.name}" ($${price.toFixed(2)}/100) vs avg $${m.toFixed(2)}/100 (z=${zScore.toFixed(2)})`, 'INFO', 'PRICE_OUTLIER');
@@ -373,40 +440,56 @@ function passCategory(product = {}, allowed = []) {
 }
 
 function sizeOk(productSizeParsed, targetSize, allowedCategories = [], log, ingredientKey, checkLogPrefix) {
+    // If no target size is specified, or we can't parse the product size, it passes
     if (!productSizeParsed || !targetSize || !targetSize.value || !targetSize.unit) return true;
+    
+    // If units mismatch (e.g., 'g' vs 'ml'), fail
     if (productSizeParsed.unit !== targetSize.unit) {
         log(`${checkLogPrefix}: WARN (Size Unit Mismatch ${productSizeParsed.unit} vs ${targetSize.unit})`, 'DEBUG', 'CHECKLIST');
         return false;
     }
+    
     const prodValue = productSizeParsed.value;
     const targetValue = targetSize.value;
+    
+    // Set multipliers based on category
     const isPantry = PANTRY_CATEGORIES.some(c => allowedCategories?.some(ac => ac.toLowerCase() === c));
-    const maxMultiplier = isPantry ? 3.0 : 2.0;
-    const minMultiplier = 0.5;
+    const maxMultiplier = isPantry ? 3.0 : 2.0; // Allow buying larger pantry items
+    const minMultiplier = 0.5; // Don't buy less than half the target size
+    
     const lowerBound = targetValue * minMultiplier;
     const upperBound = targetValue * maxMultiplier;
 
     if (prodValue >= lowerBound && prodValue <= upperBound) return true;
 
+    // Fails size check
     log(`${checkLogPrefix}: FAIL (Size ${prodValue}${productSizeParsed.unit} outside ${lowerBound.toFixed(0)}-${upperBound.toFixed(0)}${targetSize.unit} for ${isPantry ? 'pantry' : 'perishable'})`, 'DEBUG', 'CHECKLIST');
     return false;
 }
 
+/**
+ * Runs a comprehensive checklist against a single product.
+ */
 function runSmarterChecklist(product, ingredientData, log) {
     const productNameLower = product.product_name?.toLowerCase() || '';
     if (!productNameLower) return { pass: false, score: 0 };
+    
     if (!ingredientData || typeof ingredientData !== 'object' || !ingredientData.originalIngredient) {
         log(`Checklist: Invalid/missing ingredientData for "${product.product_name}"`, 'ERROR', 'CHECKLIST');
         return { pass: false, score: 0 };
     }
+    
     const { originalIngredient, requiredWords = [], negativeKeywords = [], targetSize, allowedCategories = [] } = ingredientData;
     const checkLogPrefix = `Checklist [${originalIngredient}] for "${product.product_name}"`;
 
+    // 1. Global Banned List
     const bannedWordFound = BANNED_KEYWORDS.find(kw => productNameLower.includes(kw));
     if (bannedWordFound) {
         log(`${checkLogPrefix}: FAIL (Global Banned: '${bannedWordFound}')`, 'DEBUG', 'CHECKLIST');
         return { pass: false, score: 0 };
     }
+    
+    // 2. Negative Keywords
     if ((negativeKeywords ?? []).length > 0) {
         const negativeWordFound = negativeKeywords.find(kw => kw && productNameLower.includes(kw.toLowerCase()));
         if (negativeWordFound) {
@@ -414,18 +497,25 @@ function runSmarterChecklist(product, ingredientData, log) {
             return { pass: false, score: 0 };
         }
     }
+    
+    // 3. Required Words
     if (!passRequiredWords(productNameLower, requiredWords ?? [])) {
         log(`${checkLogPrefix}: FAIL (Required words missing: [${(requiredWords ?? []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
         return { pass: false, score: 0 };
     }
-    if (!passCategory(product, allowedCategories)) {
-         log(`${checkLogPrefix}: FAIL (Category Mismatch: "${product.product_category}" not in [${(allowedCategories || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
-         return { pass: false, score: 0 };
-    }
+
+    // 4. Category (Not yet implemented in API response)
+    // if (!passCategory(product, allowedCategories)) {
+    //      log(`${checkLogPrefix}: FAIL (Category Mismatch: "${product.product_category}" not in [${(allowedCategories || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
+    //      return { pass: false, score: 0 };
+    // }
+    
+    // 5. Size Check (skip for produce/fruit/veg)
     const isProduceOrFruit = (allowedCategories || []).some(c => c === 'fruit' || c === 'produce' || c === 'veg');
     const productSizeParsed = parseSize(product.product_size);
+    
     if (!isProduceOrFruit && !sizeOk(productSizeParsed, targetSize, allowedCategories, log, originalIngredient, checkLogPrefix)) {
-        return { pass: false, score: 0 };
+        return { pass: false, score: 0 }; // Failed size check
     } else if (isProduceOrFruit) {
          log(`${checkLogPrefix}: INFO (Bypassing size check for fruit/produce)`, 'DEBUG', 'CHECKLIST');
     }
@@ -434,6 +524,7 @@ function runSmarterChecklist(product, ingredientData, log) {
     return { pass: true, score: 1.0 }; // Simple score
 }
 
+// --- Synthesis functions ---
 function synthTight(ing, store) {
   if (!ing || !store) return null;
   const size = ing.targetSize?.value && ing.targetSize?.unit ? ` ${ing.targetSize.value}${ing.targetSize.unit}` : "";
@@ -442,6 +533,7 @@ function synthTight(ing, store) {
 }
 function synthWide(ing, store) {
   if (!ing || !store) return null;
+  // Use the first required word as the noun, or fallback to first word of original name
   const noun = (Array.isArray(ing.requiredWords) && ing.requiredWords.length > 0 && typeof ing.requiredWords[0] === 'string')
     ? ing.requiredWords[0]
     : (typeof ing.originalIngredient === 'string' ? ing.originalIngredient.split(" ")[0] : '');
@@ -453,7 +545,6 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
-// --- [MODIFIED] Reverted to single-day prompt ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
 RULES:
@@ -492,7 +583,6 @@ JSON Structure:
   ]
 }
 `;
-// --- [END MODIFICATION] ---
 
 const GROCERY_OPTIMIZER_SYSTEM_PROMPT = (store, australianTermNote) => `
 You are an expert grocery query optimizer for store: ${store}.
@@ -531,7 +621,10 @@ JSON Structure:
 }
 `;
 
-// --- tryGenerateLLMPlan with JSON Guard ---
+/**
+ * Tries to generate a plan from an LLM, retrying on failure.
+ * Includes a guard against non-JSON responses.
+ */
 async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
     log(`${logPrefix}: Attempting model: ${modelName}`, 'INFO', 'LLM');
     const apiUrl = getGeminiApiUrl(modelName);
@@ -542,10 +635,11 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
         body: JSON.stringify(payload)
     }, log, logPrefix);
 
-    const result = await response.json(); 
+    const result = await response.json(); // Safe to call .json() because of the guard in fetchLLMWithRetry
     const candidate = result.candidates?.[0];
     const finishReason = candidate?.finishReason;
 
+    // These checks are now for *after* a successful, JSON-parsed response
     if (finishReason === 'MAX_TOKENS') {
         log(`${logPrefix}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
         throw new Error(`Model ${modelName} failed: MAX_TOKENS.`);
@@ -556,43 +650,35 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
     }
 
     const content = candidate?.content;
-    if (!content || !content.parts || !content.parts.length === 0 || !content.parts[0].text) {
+    if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
         log(`${logPrefix}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
         throw new Error(`Model ${modelName} failed: Response missing content.`);
     }
 
+    // At this point, content.parts[0].text *is* the JSON string (already parsed once in fetchLLMWithRetry)
     const jsonText = content.parts[0].text;
     log(`${logPrefix} Raw JSON Text`, 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
 
     try {
-        const trimmedText = jsonText.trim();
-        // [MODIFIED] Check for { or [
-        if (trimmedText.startsWith('{')) {
-             // It's an object, check the expected shape
-            const parsed = JSON.parse(trimmedText);
-            if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
-            
-            for (const key in expectedJsonShape) {
-                if (!parsed.hasOwnProperty(key)) {
-                    throw new Error(`Parsed JSON missing required top-level key: '${key}'.`);
-                }
-                if (Array.isArray(expectedJsonShape[key]) && !Array.isArray(parsed[key])) {
-                    throw new Error(`Parsed JSON key '${key}' was not an array.`);
-                }
-            }
-            log(`${logPrefix}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
-            return parsed; // Return the parsed object
-        } else {
-            // This is the case for the single-day meal planner which might return just the array
-            // This logic is now less relevant for the new prompt, but good to keep
-             if (trimmedText.startsWith('[') && expectedJsonShape.meals) {
-                 const parsedArray = JSON.parse(trimmedText);
-                 if (!Array.isArray(parsedArray)) throw new Error("Expected an array but did not get one.");
-                 log(`${logPrefix}: Model ${modelName} succeeded (as array).`, 'SUCCESS', 'LLM');
-                 return { meals: parsedArray }; // Wrap it in the expected shape
-             }
-             throw new Error(`Response text was not a JSON object or array. (Likely a safety refusal)`);
+        // Re-parse (this is cheap) to validate shape
+        const parsed = JSON.parse(jsonText.trim());
+        
+        if (!parsed || typeof parsed !== 'object') {
+            throw new Error("Parsed response is not a valid object.");
         }
+        
+        // Check if the parsed object matches the expected structure
+        for (const key in expectedJsonShape) {
+            if (!parsed.hasOwnProperty(key)) {
+                throw new Error(`Parsed JSON missing required top-level key: '${key}'.`);
+            }
+            if (Array.isArray(expectedJsonShape[key]) && !Array.isArray(parsed[key])) {
+                throw new Error(`Parsed JSON key '${key}' was not an array.`);
+            }
+        }
+        
+        log(`${logPrefix}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
+        return parsed; // Return the parsed object
 
     } catch (parseError) {
         log(`Failed to parse/validate ${logPrefix} JSON from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
@@ -600,18 +686,24 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
     }
 }
 
-// --- [MODIFIED] Renamed to generateMealPlan_Single ---
+/**
+ * Generates a meal plan for a *single* day.
+ * This is the new, reliable replacement for the batched meal generator.
+ */
 async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets;
 
+    // 1. Check Cache
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     const cached = await cacheGet(cacheKey, log);
-    // [MODIFIED] Return the full day object { dayNumber, meals }
-    if (cached) return { dayNumber: day, meals: cached.meals }; 
+    if (cached) {
+        return { dayNumber: day, meals: cached.meals }; // Return the full day object
+    }
     log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
 
+    // 2. Prepare Prompt
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']};
     const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus: ${cuisine}.` : 'Neutral.';
@@ -637,8 +729,9 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
             temperature: 0.3, topK: 32, topP: 0.9, responseMimeType: "application/json",
         }
     };
-    // [MODIFIED] Expect { "meals": [] }
-    const expectedShape = { "meals": [] }; 
+    const expectedShape = { "meals": [] };
+    
+    // 3. Execute LLM Call
     let parsedResult;
     try {
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix, expectedShape);
@@ -652,32 +745,42 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
         }
     }
     
+    // 4. Cache and Return
     if (parsedResult && parsedResult.meals && parsedResult.meals.length > 0) {
         await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
     }
-    // [MODIFIED] Return the full day object { dayNumber, meals }
-    return { dayNumber: day, meals: parsedResult.meals || [] }; 
+    return { dayNumber: day, meals: parsedResult.meals || [] };
 }
-// --- [END MODIFICATION] ---
 
+
+/**
+ * Generates grocery query details for the *entire* aggregated list.
+ */
 async function generateGroceryQueries_Batched(aggregatedIngredients, store, log) {
     if (!aggregatedIngredients || aggregatedIngredients.length === 0) {
         log("generateGroceryQueries_Batched called with no ingredients. Returning empty.", 'WARN', 'LLM');
         return { ingredients: [] };
     }
 
+    // 1. Check Cache
     const keysHash = hashString(JSON.stringify(aggregatedIngredients));
     const cacheKey = `${CACHE_PREFIX}:queries-batched:${store}:${keysHash}`;
     const cached = await cacheGet(cacheKey, log);
     if (cached) return cached;
     log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
     
+    // 2. Prepare Prompt
     const isAustralianStore = (store === 'Coles' || store === 'Woolworths');
     const australianTermNote = isAustralianStore ? " Use common Australian terms (e.g., 'spring onion', 'capsicum')." : "";
 
     const systemPrompt = GROCERY_OPTIMIZER_SYSTEM_PROMPT(store, australianTermNote);
     
-    let userQuery = `Generate query JSON for the following ingredients:\n${JSON.stringify(aggregatedIngredients)}`;
+    // Map aggregated list to the format the LLM needs
+    const llmInput = aggregatedIngredients.map(item => ({
+        originalIngredient: item.originalIngredient,
+        requested_total_g: item.requested_total_g
+    }));
+    let userQuery = `Generate query JSON for the following ingredients:\n${JSON.stringify(llmInput)}`;
 
     const logPrefix = `GroceryOptimizerFullPlan`;
     log(`Grocery Optimizer AI Prompt`, 'INFO', 'LLM_PROMPT', {
@@ -693,6 +796,8 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
         }
     };
     const expectedShape = { "ingredients": [] };
+
+    // 3. Execute LLM Call
     let parsedResult;
     try {
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix, expectedShape);
@@ -706,7 +811,11 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
         }
     }
     
+    // 4. Post-process and Cache
     if (parsedResult && parsedResult.ingredients && parsedResult.ingredients.length > 0) {
+        // --- Sanity Check & Fix ---
+        // The LLM sometimes ignores the 'totalGramsRequired' from the prompt.
+        // We must overwrite its estimate with our *actual* aggregated total.
         const inputMap = new Map(aggregatedIngredients.map(item => [item.originalIngredient, item.requested_total_g]));
         parsedResult.ingredients.forEach(ing => {
             const requestedGrams = inputMap.get(ing.originalIngredient);
@@ -715,6 +824,7 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
                 ing.totalGramsRequired = requestedGrams;
             }
         });
+        // --- End Sanity Check ---
         
         await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
     }
@@ -744,7 +854,10 @@ JSON Structure:
 }
 `;
 
-// --- tryGenerateChefRecipe with JSON Guard ---
+/**
+ * Tries to generate a recipe from an LLM, retrying on failure.
+ * Includes a guard against non-JSON responses.
+ */
 async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
     log(`Chef AI [${mealName}]: Attempting model: ${modelName}`, 'INFO', 'LLM_CHEF');
     const apiUrl = getGeminiApiUrl(modelName);
@@ -755,7 +868,7 @@ async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
         body: JSON.stringify(payload)
     }, log, `Chef-${mealName}`);
 
-    const result = await response.json();
+    const result = await response.json(); // Safe due to guard
     const candidate = result.candidates?.[0];
     const finishReason = candidate?.finishReason;
 
@@ -772,6 +885,7 @@ async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
 
     const jsonText = content.parts[0].text;
     try {
+        // [FIX] Add JSON guard
         const trimmedText = jsonText.trim();
         if (!trimmedText.startsWith('{') || !trimmedText.endsWith('}')) {
              throw new Error(`Response text was not a JSON object. (Likely a safety refusal)`);
@@ -789,15 +903,20 @@ async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
     }
 }
 
+/**
+ * Generates recipe instructions for a single meal.
+ */
 async function generateChefInstructions(meal, store, log) {
     const mealName = meal.name || 'Unnamed Meal';
     try {
+        // 1. Check Cache
         const mealHash = hashString(JSON.stringify(meal.items || []));
         const cacheKey = `${CACHE_PREFIX}:recipe:${mealHash}`;
         const cached = await cacheGet(cacheKey, log);
-        if (cached) return { ...meal, ...cached }; // [MODIFIED] Return merged object
+        if (cached) return { ...meal, ...cached }; // Return merged object
         log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
 
+        // 2. Prepare Prompt
         const systemPrompt = CHEF_SYSTEM_PROMPT(store);
         const ingredientList = meal.items.map(item => `- ${item.qty_value}${item.qty_unit} ${item.key}`).join('\n');
         const userQuery = `Generate a recipe for "${meal.name}" using only these ingredients:\n${ingredientList}`;
@@ -815,6 +934,7 @@ async function generateChefInstructions(meal, store, log) {
             }
         };
 
+        // 3. Execute LLM Call
         let recipeResult;
         try {
             recipeResult = await tryGenerateChefRecipe(PLAN_MODEL_NAME_PRIMARY, payload, mealName, log);
@@ -824,9 +944,12 @@ async function generateChefInstructions(meal, store, log) {
                 recipeResult = await tryGenerateChefRecipe(PLAN_MODEL_NAME_FALLBACK, payload, mealName, log);
             } catch (fallbackError) {
                 log(`Chef AI [${mealName}]: FALLBACK Model ${PLAN_MODEL_NAME_FALLBACK} also failed: ${fallbackError.message}.`, 'CRITICAL', 'LLM_CHEF');
-                throw new Error(`Recipe generation failed for [${mealName}]: Both AI models failed. Last error: ${fallbackError.message}`);
+                // Don't throw; return mock data
+                recipeResult = MOCK_RECIPE_FALLBACK;
             }
         }
+        
+        // 4. Cache and Return
         if (recipeResult && recipeResult.description) {
             await cacheSet(cacheKey, recipeResult, TTL_PLAN_MS, log);
         }
@@ -842,7 +965,7 @@ async function generateChefInstructions(meal, store, log) {
 /// ===== MAIN-HANDLER-START ===== \\\\
 module.exports = async (request, response) => {
     const planStartTime = Date.now();
-    let dietitian_ms = 0, market_run_ms = 0, nutrition_ms = 0, solver_ms = 0; // Telemetry timers
+    let dietitian_ms = 0, market_run_ms = 0, nutrition_ms = 0, solver_ms = 0, writer_ms = 0; // Telemetry timers
     
     const run_id = crypto.randomUUID();
 
@@ -854,7 +977,8 @@ module.exports = async (request, response) => {
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); 
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); 
     
-    const { log, logErrorAndClose, sendFinalDataAndClose, sendEvent } = createLogger(run_id, response);
+    // [FIX] Pass `run_id` to logger
+    const { log, getLogs, logErrorAndClose, sendFinalDataAndClose, sendEvent } = createLogger(run_id, response);
     // --- End SSE Setup ---
 
     if (request.method === 'OPTIONS') {
@@ -889,13 +1013,14 @@ module.exports = async (request, response) => {
         if (!store) throw new Error("'store' missing in formData.");
 
 
-        // --- [MODIFIED] Phase 1: Generate ALL Meals (Sequentially) ---
+        // --- Phase 1: Generate ALL Meals (Sequentially) ---
         sendEvent('phase:start', { name: 'meals', description: `Generating ${numDays}-day meal plan...` });
         const dietitianStartTime = Date.now();
         const fullMealPlan = []; // This is the master list of day objects
         
         for (let day = 1; day <= numDays; day++) {
             try {
+                // Send progress *before* starting the call
                 sendEvent('plan:progress', { pct: (day / numDays) * 25, message: `Generating meal plan for Day ${day}...` });
                 const dayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log);
                 if (!dayPlan || !dayPlan.meals || dayPlan.meals.length === 0) {
@@ -916,7 +1041,6 @@ module.exports = async (request, response) => {
         if (fullMealPlan.length !== numDays) {
             throw new Error(`Meal Planner AI failed: Expected ${numDays} days, but only received ${fullMealPlan.length}.`);
         }
-        // --- [END MODIFICATION] ---
 
         // --- Phase 2: Aggregate Ingredients ---
         sendEvent('phase:start', { name: 'aggregate', description: 'Aggregating ingredient list...' });
@@ -972,11 +1096,13 @@ module.exports = async (request, response) => {
                      return { _error: true, itemKey: 'unknown_invalid', message: 'Invalid ingredient data' };
                  }
                 const ingredientKey = ingredient.originalIngredient;
-                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories) || ingredient.allowedCategories.length === 0) {
+                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories)) { // Note: allowedCategories can be empty
                      log(`[${ingredientKey}] Skipping: Missing critical fields (normalQuery/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
                      return { [ingredient.normalizedKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
                  }
                 const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
+                
+                // Synthesize queries if LLM didn't provide them
                 const qn = ingredient.normalQuery;
                 const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, store);
                 const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, store);
@@ -988,15 +1114,18 @@ module.exports = async (request, response) => {
                 let bestScore = 0;
 
                 for (const [index, { type, query }] of queriesToTry.entries()) {
-                    if (type === 'normal' && acceptedQueryType !== 'none') continue; 
+                    // --- Ladder Logic ---
+                    if (type === 'normal' && acceptedQueryType !== 'none') continue; // Already found a tight match
                     if (type === 'wide') {
-                        if (acceptedQueryType !== 'none') continue;
+                        if (acceptedQueryType !== 'none') continue; // Already found a tight or normal match
+                        // Fail-fast for categories that shouldn't use wide search
                         const isFailFastCategory = ingredient.allowedCategories.some(c => FAIL_FAST_CATEGORIES.includes(c));
                         if (isFailFastCategory) {
                             log(`[${ingredientKey}] Skipping "wide" query due to fail-fast category.`, 'DEBUG', 'MARKET_RUN');
                             continue;
                         }
                     }
+                    // --- End Ladder Logic ---
 
                     log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
                     result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
@@ -1035,10 +1164,12 @@ module.exports = async (request, response) => {
 
                     if (filteredProducts.length > 0) {
                         log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
+                        // Add new, unique products to the list
                         const currentUrls = new Set(result.allProducts.map(p => p.url));
                         filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); } });
 
                         if (result.allProducts.length > 0) {
+                             // Select the best (cheapest) product from ALL found so far
                              const foundProduct = result.allProducts.reduce((best, current) => (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best, result.allProducts[0]);
                              result.currentSelectionURL = foundProduct.url;
                              result.source = 'discovery';
@@ -1048,18 +1179,24 @@ module.exports = async (request, response) => {
                                  acceptedQueryType = type;
                                  bestScore = currentBestScore;
                              }
+                             
+                             // --- Ladder Logic ---
+                             // If it's a strong tight match, stop searching
                              if (type === 'tight' && currentBestScore >= SKIP_STRONG_MATCH_THRESHOLD) {
                                  log(`[${ingredientKey}] Skip heuristic hit (Strong tight match).`, 'INFO', 'MARKET_RUN');
                                  break; 
                              }
+                             // If it's a normal match, stop searching
                              if (type === 'normal') {
                                  log(`[${ingredientKey}] Found valid 'normal' match. Stopping search.`, 'DEBUG', 'MARKET_RUN');
                                  break;
                              }
+                             // --- End Ladder Logic ---
                         } else { currentAttemptLog.status = 'no_match_post_filter'; }
                     } else { log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA'); currentAttemptLog.status = 'no_match'; }
                 } // end query loop
                 
+                // Final status update
                 if (result.source === 'failed') { 
                     log(`[${ingredientKey}] Market Run failed after trying all queries.`, 'WARN', 'MARKET_RUN');
                     sendEvent('ingredient:failed', { key: ingredient.normalizedKey, reason: 'No product match found.' });
@@ -1068,6 +1205,7 @@ module.exports = async (request, response) => {
                     sendEvent('ingredient:found', { key: ingredient.normalizedKey, data: { ...ingredient, ...result } });
                 }
 
+                // Log telemetry
                 telemetry.used = acceptedQueryType;
                 telemetry.score = bestScore;
                 log(`[${ingredientKey}] Market Run Telemetry`, 'INFO', 'MARKET_RUN_TELEMETRY', telemetry);
@@ -1081,6 +1219,7 @@ module.exports = async (request, response) => {
             }
         };
         
+        // Map aggregated plan to full plan details
         const fullIngredientPlan = aggregatedIngredients.map(aggItem => {
             const planDetails = ingredientPlan.find(p => p.originalIngredient === aggItem.originalIngredient);
             if (!planDetails) {
@@ -1092,24 +1231,28 @@ module.exports = async (request, response) => {
                      requiredWords: aggItem.originalIngredient.split(' ').slice(0,1),
                      negativeKeywords: [],
                      allowedCategories: ['pantry', 'produce', 'meat', 'dairy', 'frozen']
+                     // targetSize will be null, which is fine
                  };
             }
             return {
-                ...planDetails,
+                ...planDetails, // Contains LLM-generated query data
                 normalizedKey: aggItem.normalizedKey,
-                totalGramsRequired: aggItem.requested_total_g, 
+                totalGramsRequired: aggItem.requested_total_g, // Overwrite LLM estimate with our sum
                 dayRefs: aggItem.dayRefs
             };
         });
         
+        // Execute market run in parallel
         const parallelResultsArray = await concurrentlyMap(fullIngredientPlan, MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
         sendEvent('plan:progress', { pct: 60, message: `Market search complete...` });
         
+        // Collate market results
         const fullResultsMap = new Map(); // Map<normalizedKey, result>
         parallelResultsArray.forEach(currentResult => {
              if (currentResult._error) {
                  log(`Market Run Item Error for "${currentResult.itemKey}": ${currentResult.message}`, 'WARN', 'MARKET_RUN');
                  const planItem = fullIngredientPlan.find(i => i.originalIngredient === currentResult.itemKey);
+                 // Ensure we have a base item even if the plan was bad
                  const baseData = planItem || { originalIngredient: currentResult.itemKey, normalizedKey: normalizeKey(currentResult.itemKey) };
                  fullResultsMap.set(baseData.normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
                  return;
@@ -1137,6 +1280,7 @@ module.exports = async (request, response) => {
         const itemsToFetchNutrition = [];
         const nutritionDataMap = new Map(); // Map<normalizedKey, nutritionData>
 
+        // 4a. Gather items that need nutrition fetching
         for (const [normalizedKey, result] of fullResultsMap.entries()) {
             if (result.source === 'discovery' && result.currentSelectionURL && Array.isArray(result.allProducts)) {
                 const selected = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
@@ -1146,9 +1290,10 @@ module.exports = async (request, response) => {
             }
         }
         
+        // 4b. Fetch in parallel
         if (itemsToFetchNutrition.length > 0) {
             log(`Fetching nutrition for ${itemsToFetchNutrition.length} items...`, 'INFO', 'HTTP');
-            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, async (item) => {
+            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, NUTRITION_CONCURRENCY, async (item) => {
                  try {
                      const nut = (item.barcode || item.query) ? await fetchNutritionData(item.barcode, item.query, log) : { status: 'not_found', source: 'no_query' };
                      return { ...item, nut };
@@ -1157,9 +1302,11 @@ module.exports = async (request, response) => {
                      return { ...item, nut: { status: 'not_found', source: 'error', error: `Nutrition fetch failed: ${err.message}` } };
                  }
              });
+            // 4c. Collate nutrition results
             nutritionResults.forEach(item => {
                  if (item && item.normalizedKey && item.nut) {
                     nutritionDataMap.set(item.normalizedKey, item.nut);
+                     // Attach nutrition data back to the *product* in the main results map
                      const result = fullResultsMap.get(item.normalizedKey);
                      if (result && result.source === 'discovery' && Array.isArray(result.allProducts)) {
                          let productToAttach = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
@@ -1169,16 +1316,19 @@ module.exports = async (request, response) => {
             });
         }
         
-        // --- Nutrition Fallback (Canonical) ---
+        // 4d. Nutrition Fallback (Canonical)
+        // For any item that failed the market run OR its nutrition fetch, try the canonical DB
         let canonicalHitsToday = 0;
         for (const [normalizedKey, result] of fullResultsMap.entries()) {
              const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
              if (!hasNutri) {
+                 // Try to get canonical data using the *original* ingredient name
                  const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log);
                  if (canonicalNutrition?.status === 'found' && canonicalNutrition.source === 'CANON') {
                      log(`[${result.originalIngredient}] Using CANONICAL fallback.`, 'DEBUG', 'CALC');
                      nutritionDataMap.set(normalizedKey, canonicalNutrition); 
                      canonicalHitsToday++;
+                     // If the item failed the market run, update its source
                      if (result.source !== 'discovery') {
                          result.source = 'canonical_fallback';
                      }
@@ -1195,10 +1345,16 @@ module.exports = async (request, response) => {
         sendEvent('phase:start', { name: 'solver', description: 'Calculating final macros...' });
         sendEvent('plan:progress', { pct: 85, message: `Calculating final macros...` });
         const solverStartTime = Date.now();
-        finalMealPlan = []; // Reset final plan
+        finalMealPlan = []; // Reset final plan, will be rebuilt here
 
+        /**
+         * Calculates the macros for a single item using the master nutrition map.
+         * This is the "Solver V1" / Deterministic Calculator.
+         */
         const computeItemMacros = (item, mealItems) => {
              const normalizedKey = item.normalizedKey; 
+             
+             // 1. Get user-facing quantity (e.g., 2 slices, 200g)
              const { value: gramsOrMl } = normalizeToGramsOrMl(item, log);
              if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0) {
                  log(`[Solver] Invalid quantity for item '${item.key}'.`, 'ERROR', 'CALC', { item, gramsOrMl });
@@ -1206,12 +1362,16 @@ module.exports = async (request, response) => {
              }
              if (gramsOrMl === 0) { return { p: 0, f: 0, c: 0, kcal: 0, key: item.key }; }
              
+             // 2. Convert to 'as_sold' (e.g., 200g cooked rice -> 67g dry rice)
              const { grams_as_sold, inferredMethod } = toAsSold(item, gramsOrMl, log);
+             
+             // 3. Get nutrition data (per 100g)
              const nutritionData = nutritionDataMap.get(normalizedKey);
              let grams = grams_as_sold;
              let p = 0, f = 0, c = 0, kcal = 0;
 
              if (nutritionData && nutritionData.status === 'found') {
+                 // Use real data
                  const proteinPer100 = Number(nutritionData.protein || nutritionData.protein_g_per_100g) || 0;
                  const fatPer100 = Number(nutritionData.fat || nutritionData.fat_g_per_100g) || 0;
                  const carbsPer100 = Number(nutritionData.carbs || nutritionData.carb_g_per_100g) || 0;
@@ -1222,13 +1382,17 @@ module.exports = async (request, response) => {
                 log(`[Solver] No nutrition for '${item.key}'. Macros set to 0.`, 'WARN', 'CALC', { normalizedKey }); 
              }
              
+             // 4. Add extras (e.g., oil absorption)
              const { absorbed_oil_g } = getAbsorbedOil(item, inferredMethod, mealItems, log);
              if (absorbed_oil_g > 0) { f += absorbed_oil_g; }
              
+             // 5. Calculate final kcal
              kcal = (p * 4) + (f * 9) + (c * 4);
              
+             // 6. Sanity Check
              if (kcal > MAX_CALORIES_PER_ITEM && !item.key.toLowerCase().includes('oil')) {
                 log(`CRITICAL: Item '${item.key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
+                // Nullify macros to prevent breaking the plan
                 kcal = 0; p = 0; f = 0; c = 0;
              }
              return { p, f, c, kcal, key: item.key }; 
@@ -1239,12 +1403,15 @@ module.exports = async (request, response) => {
             let mealsForThisDay = JSON.parse(JSON.stringify(day.meals)); // Deep copy for safety
             const targetCalories = nutritionalTargets.calories;
             
+            // Helper to calculate totals for a list of meals
             const calculateTotals = (mealList, dayNum) => {
                 let totalKcal = 0, totalP = 0, totalF = 0, totalC = 0;
                 let planHasInvalidItems = false;
                 for (const meal of mealList) {
                      let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
                      for (const item of meal.items) {
+                         // Attach normalizedKey again as it was lost in deep copy
+                         item.normalizedKey = normalizeKey(item.key); 
                          const macros = computeItemMacros(item, meal.items);
                          mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                      }
@@ -1259,18 +1426,27 @@ module.exports = async (request, response) => {
             };
 
             // --- 1. Run Solver V1 (Shadow Path) ---
-            const solverV1Meals = JSON.parse(JSON.stringify(mealsForThisDay));
+            const solverV1Meals = JSON.parse(JSON.stringify(mealsForThisDay)); // Fresh deep copy
             const solverV1Totals = calculateTotals(solverV1Meals, day.dayNumber);
 
             // --- 2. Run Reconciler V0 (Live Path by default) ---
-            const reconcilerGetItemMacros = (item) => computeItemMacros(item, mealsForThisDay.find(m => m.items.some(i => i.key === item.key))?.items || []);
+            // The `reconcileNonProtein` function needs a callback that has access to the full `nutritionDataMap`
+            const reconcilerGetItemMacros = (item) => {
+                item.normalizedKey = normalizeKey(item.key); // Ensure key is normalized
+                // Find the meal this item belongs to (for oil calculation context)
+                const mealContext = mealsForThisDay.find(m => m.items.some(i => i.key === item.key))?.items || [];
+                return computeItemMacros(item, mealContext);
+            };
+
             const { adjusted, factor, meals: scaledMeals } = reconcileNonProtein({
                 meals: mealsForThisDay.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty: i.qty_value, unit: i.qty_unit })) })),
                 targetKcal: targetCalories,
-                getItemMacros: reconcilerGetItemMacros,
+                getItemMacros: reconcilerGetItemMacros, // Use our master calculator
                 tolPct: 5
             });
-            const reconcilerV0Meals = scaledMeals.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty_value: i.qty, qty_unit: i.unit, normalizedKey: normalizeKey(i.key) })) }));
+
+            // Re-format scaled meals and calculate their *final* totals
+            const reconcilerV0Meals = scaledMeals.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty_value: i.qty, qty_unit: i.unit })) }));
             const reconcilerV0Totals = calculateTotals(reconcilerV0Meals, day.dayNumber);
 
             // --- 3. Log Comparison ---
@@ -1297,40 +1473,48 @@ module.exports = async (request, response) => {
 
 
         // --- Phase 6: Chef AI (Writer) ---
+        // This phase runs *after* the solver, so it has the *final* scaled quantities
         sendEvent('phase:start', { name: 'writer', description: 'Writing recipes...' });
         sendEvent('plan:progress', { pct: 95, message: `Writing final recipes...` });
         const writerStartTime = Date.now();
         
         const allMeals = finalMealPlan.flatMap(day => day.meals);
+        // Run recipe generation in parallel for all meals across all days
         const recipeResults = await concurrentlyMap(allMeals, 6, (meal) => generateChefInstructions(meal, store, log));
         
+        // Create a map to re-assemble the plan
         const recipeMap = new Map();
         recipeResults.forEach((result, index) => {
             if (result && !result._error) {
                 const originalMeal = allMeals[index];
+                // Find which day this meal belonged to
                 const dayNumber = finalMealPlan.find(d => d.meals.includes(originalMeal))?.dayNumber;
                 recipeMap.set(`${dayNumber}:${originalMeal.name}`, result);
             }
         });
 
+        // Re-inject recipes into the final plan
         for (const day of finalMealPlan) {
             day.meals = day.meals.map(meal => {
                 const recipe = recipeMap.get(`${day.dayNumber}:${meal.name}`);
-                return recipe || { ...meal, ...MOCK_RECIPE_FALLBACK };
+                return recipe || { ...meal, ...MOCK_RECIPE_FALLBACK }; // Fallback if chef failed
             });
         }
-        const writer_ms = Date.now() - writerStartTime;
+        writer_ms = Date.now() - writerStartTime;
         sendEvent('phase:end', { name: 'writer', duration_ms: writer_ms, recipesGenerated: recipeMap.size });
 
         // --- Phase 7: Finalize ---
         sendEvent('phase:start', { name: 'finalize', description: 'Assembling final plan...' });
         
+        // Clean up meal objects for the frontend
         finalMealPlan.forEach(day => {
             day.meals.forEach(meal => {
+                // Round macros
                 meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
                 meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
                 meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
                 meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
+                // Simplify item structure
                 meal.items = meal.items.map(item => ({
                     key: item.key,
                     qty: item.qty_value,
@@ -1341,13 +1525,14 @@ module.exports = async (request, response) => {
             });
         });
 
+        // Prepare the final payload
         const responseData = {
             message: `Successfully generated full ${numDays}-day plan.`,
             mealPlan: finalMealPlan,
             results: Object.fromEntries(fullResultsMap.entries()),
             uniqueIngredients: fullIngredientPlan.map(({ normalizedKey, dayRefs, ...rest }) => ({
                 ...rest,
-                dayRefs: Array.from(dayRefs) 
+                dayRefs: Array.from(dayRefs) // Convert Set to Array
             })),
         };
 
@@ -1370,14 +1555,16 @@ module.exports = async (request, response) => {
         log(`CRITICAL Orchestrator ERROR: ${error.message}`, 'CRITICAL', 'SYSTEM', { stack: error.stack?.substring(0, 500) });
         console.error(`FULL PLAN UNHANDLED ERROR:`, error);
         
-        const isPlanError = error.message.startsWith('Meal Planner AI failed'); // [MODIFIED] Check for the specific error
+        const isPlanError = error.message.startsWith('Meal Planner AI failed');
         const errorCode = isPlanError ? "PLAN_INVALID" : "SERVER_FAULT_PLAN";
 
         logErrorAndClose(error.message, errorCode);
         return; 
     }
     finally {
+        // Ensure the stream is closed if execution somehow reaches here
         if (response && !response.writableEnded) {
+            log('Stream not ended, forcing close.', 'WARN', 'SYSTEM');
             try { response.end(); } catch {}
         }
     }
