@@ -1095,7 +1095,8 @@ module.exports = async (request, response) => {
             };
         });
         
-        const parallelResultsArray = await concurrentlyMap(fullIngredientPlan, MAX_MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
+        // --- [FIX] Changed 'MAX_MARKET_RUN_CONCURRENCY' to 'MARKET_RUN_CONCURRENCY' ---
+        const parallelResultsArray = await concurrentlyMap(fullIngredientPlan, MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
         
         const fullResultsMap = new Map(); // Map<normalizedKey, result>
         parallelResultsArray.forEach(currentResult => {
@@ -1139,7 +1140,7 @@ module.exports = async (request, response) => {
         
         if (itemsToFetchNutrition.length > 0) {
             log(`Fetching nutrition for ${itemsToFetchNutrition.length} items...`, 'INFO', 'HTTP');
-            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, MAX_NUTRITION_CONCURRENCY, async (item) => {
+            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, NUTRITION_CONCURRENCY, async (item) => {
                  try {
                      const nut = (item.barcode || item.query) ? await fetchNutritionData(item.barcode, item.query, log) : { status: 'not_found', source: 'no_query' };
                      return { ...item, nut };
