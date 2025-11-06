@@ -897,12 +897,17 @@ module.exports = async (request, response) => {
         sendEvent('phase:start', { name: 'meals', description: `Generating ${numDays}-day meal plan...` });
         const dietitianStartTime = Date.now();
         const mealPlanBatches = [];
-        // Batch 1: Days 1-3
-        mealPlanBatches.push(generateMealPlan_Batched(1, 3, formData, nutritionalTargets, log));
+
+        // --- [FIX] Batch 1: Days 1 up to (numDays or 3, whichever is smaller) ---
+        const firstBatchEnd = Math.min(numDays, 3);
+        mealPlanBatches.push(generateMealPlan_Batched(1, firstBatchEnd, formData, nutritionalTargets, log));
+
         // Batch 2: Days 4-7 (if needed)
         if (numDays > 3) {
             mealPlanBatches.push(generateMealPlan_Batched(4, numDays, formData, nutritionalTargets, log));
         }
+        // --- [END FIX] ---
+
         const dailyMealPlansArrays = await Promise.all(mealPlanBatches);
         const fullMealPlan = dailyMealPlansArrays.flat(); // This is the master list of day objects
         
