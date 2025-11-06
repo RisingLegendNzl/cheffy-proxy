@@ -202,7 +202,8 @@ function createLogger(run_id, responseStream = null) {
         writeSseEvent(eventType, data);
     };
 
-    return { log, getLogs, logErrorAndClose, sendFinalDataAndClose, sendEvent };
+    // --- [FIX] Removed 'getLogs' which was undefined and not used ---
+    return { log, logErrorAndClose, sendFinalDataAndClose, sendEvent };
 }
 // --- End Logger ---
 
