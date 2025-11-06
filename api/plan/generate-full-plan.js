@@ -16,13 +16,12 @@ const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
 // Import cache-wrapped microservices
-// --- [FIX] Corrected path from ../ to ../../ ---
-const { fetchPriceData } = require('../../price-search.js');
-const { fetchNutritionData } = require('../../nutrition-search.js');
+// --- [FIX] Corrected path. These are in /api, so we go up ONE level. ---
+const { fetchPriceData } = require('../price-search.js');
+const { fetchNutritionData } = require('../nutrition-search.js');
 
 // Import utils
-// Note: Vercel bundles these relative to the project root, hence the `../`
-// --- [FIX] Corrected path from ../ to ../../ ---
+// --- [FIX] Corrected path. These are at the root, so we go up TWO levels. ---
 try {
     var { normalizeKey } = require('../../scripts/normalize.js');
     var { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
@@ -31,6 +30,7 @@ try {
 } catch (e) {
     console.error("CRITICAL: Failed to import utils. Using local fallbacks.", e.message);
     // Fallbacks in case relative paths fail in some environments
+    // --- [FIX] Corrected fallback paths to ../../ ---
     var { normalizeKey } = require('../../scripts/normalize.js');
     var { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
     var { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js');
@@ -1372,4 +1372,5 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
+
 
