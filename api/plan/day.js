@@ -47,17 +47,35 @@ const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 const MAX_LLM_RETRIES = 3; // Retries specifically for the LLM call
 const LLM_REQUEST_TIMEOUT_MS = 90000; // 90 seconds
-const MAX_NUTRITION_CONCURRENCY = 5;
-const MAX_MARKET_RUN_CONCURRENCY = 5;
+
+// --- [PERF] Add new performance constants ---
+const REQUIRED_WORD_SCORE_THRESHOLD = 0.60;
+const SKIP_STRONG_MATCH_THRESHOLD = 0.80;
+const MARKET_RUN_CONCURRENCY = 6;
+const NUTRITION_CONCURRENCY = 6;
+const TOKEN_BUCKET_CAPACITY = 10;
+const TOKEN_BUCKET_REFILL_PER_SEC = 10;
+const TOKEN_BUCKET_MAX_WAIT_MS = 250;
+// --- [END PERF] ---
+
+// --- [PERF] Update concurrency limits to use new constants ---
+const MAX_NUTRITION_CONCURRENCY = NUTRITION_CONCURRENCY;
+const MAX_MARKET_RUN_CONCURRENCY = MARKET_RUN_CONCURRENCY;
+// --- [END PERF] ---
+
 const BANNED_KEYWORDS = [
     'cigarette', 'capsule', 'deodorant', 'pet', 'cat', 'dog', 'bird', 'toy',
     'non-food', 'supplement', 'vitamin', 'tobacco', 'vape', 'roll-on', 'binder',
     'folder', 'stationery', 'lighter', 'shampoo', 'conditioner', 'soap', 'lotion',
     'cleaner', 'spray', 'polish', 'air freshener', 'mouthwash', 'toothpaste', 'floss', 'gum'
 ];
-const SKIP_HEURISTIC_SCORE_THRESHOLD = 1.0;
+// --- [PERF] Use new constant for score threshold ---
+const SKIP_HEURISTIC_SCORE_THRESHOLD = SKIP_STRONG_MATCH_THRESHOLD;
+// --- [END PERF] ---
 const PRICE_OUTLIER_Z_SCORE = 2.0;
 const PANTRY_CATEGORIES = ["pantry", "grains", "canned", "spreads", "condiments", "drinks"];
+// --- [PERF] Add fail-fast categories ---
+const FAIL_FAST_CATEGORIES = ["produce", "meat", "dairy", "veg", "fruit", "seafood"];
 
 // --- [NEW] Solution 2: Defensive Sanity Check Limit ---
 const MAX_CALORIES_PER_ITEM = 1200; // 1360 kcal for an egg was the bug. 1200 is a safe cap.
@@ -367,6 +385,9 @@ function sizeOk(productSizeParsed, targetSize, allowedCategories = [], log, ingr
     return false;
 }
 
+// --- [PERF] Modified runSmarterChecklist to return a score ---
+// We'll keep the logic simple: pass = 1.0, fail = 0.
+// The ladder logic will handle the thresholds.
 function runSmarterChecklist(product, ingredientData, log) {
     const productNameLower = product.product_name?.toLowerCase() || '';
     if (!productNameLower) return { pass: false, score: 0 };
@@ -406,8 +427,10 @@ function runSmarterChecklist(product, ingredientData, log) {
     }
 
     log(`${checkLogPrefix}: PASS`, 'DEBUG', 'CHECKLIST');
-    return { pass: true, score: 1.0 }; // Simplified score for now
+    // --- [PERF] Return 1.0 on pass to work with ladder logic ---
+    return { pass: true, score: 1.0 };
 }
+// --- [END PERF] ---
 
 // --- Synthesis functions (Unchanged) ---
 function synthTight(ing, store) {
@@ -807,6 +830,11 @@ function extractUniqueIngredientKeys(meals) {
 /// ===== MAIN-HANDLER-START ===== \\\\
 
 module.exports = async (request, response) => {
+    // --- [PERF] Start total plan timer ---
+    const planStartTime = Date.now();
+    let dietitian_ms = 0, market_run_ms = 0, nutrition_ms = 0;
+    // --- [END PERF] ---
+
     const run_id = crypto.randomUUID();
     const day = request.query.day ? parseInt(request.query.day, 10) : null;
 
@@ -854,30 +882,233 @@ module.exports = async (request, response) => {
         const { store } = formData;
         if (!store) throw new Error("'store' missing in formData.");
 
-        // --- Phase 1a: Generate Day Plan (Unchanged) ---
+        // --- Phase 1a: Generate Day Plan ---
         log("Phase 1: Generating Day Plan (Meal Planner AI)...", 'INFO', 'PHASE');
+        const dietitianStartTime = Date.now();
         const mealPlanResult = await generateMealPlan(day, formData, nutritionalTargets, log);
+        dietitian_ms = Date.now() - dietitianStartTime; // [PERF] Log time
+        
         const { meals: dayMeals = [] } = mealPlanResult;
         if (dayMeals.length === 0) {
             throw new Error(`Plan generation failed for Day ${day}: Meal Planner AI returned empty meals.`);
         }
         log(`Meal Planner AI success for Day ${day}: ${dayMeals.length} meals.`, 'SUCCESS', 'PHASE');
-
-        // --- Phase 1.5: Generate Recipes and Queries (Unchanged) ---
-        log("Phase 1.5: Generating Recipes (Chef) and Queries (Grocery) in parallel...", 'INFO', 'PHASE');
+        
+        // --- [PERF] Extract keys immediately for Market Run ---
         const mealKeys = extractUniqueIngredientKeys(dayMeals);
+
+        // --- [PERF] Phase 1.5: Run Chef AI and Market Run in parallel ---
+        log("Phase 1.5: Starting parallel Chef AI and Market Run...", 'INFO', 'PHASE');
+
+        // Start Chef AI promise
         const recipePromise = Promise.allSettled(
             dayMeals.map(meal => generateChefInstructions(meal, store, log))
         );
-        const groceryPromise = generateGroceryQueries(mealKeys, store, log);
-        const [recipeSettledResults, groceryResult] = await Promise.all([recipePromise, groceryPromise]);
 
-        const { ingredients: rawDayIngredients = [] } = groceryResult;
-        if (rawDayIngredients.length === 0) {
-             throw new Error(`Plan generation failed for Day ${day}: Grocery Optimizer AI returned empty ingredients.`);
-        }
-        log(`Grocery Optimizer AI success: ${rawDayIngredients.length} ingredients.`, 'SUCCESS', 'PHASE');
+        // Start Market Run promise (which itself contains the grocery query generation)
+        const marketRunPromise = (async () => {
+            const marketStartTime = Date.now();
+            log("Phase 1.5b: Generating Grocery Queries (for Market Run)...", 'INFO', 'PHASE');
+            const groceryResult = await generateGroceryQueries(mealKeys, store, log);
+            const { ingredients: rawDayIngredients = [] } = groceryResult;
+            
+            if (rawDayIngredients.length === 0) {
+                 throw new Error(`Plan generation failed for Day ${day}: Grocery Optimizer AI returned empty ingredients.`);
+            }
+            log(`Grocery Optimizer AI success: ${rawDayIngredients.length} ingredients.`, 'SUCCESS', 'PHASE');
 
+            // [MODIFIED] Normalize Ingredient Keys (Use shared normalizer)
+            const dayIngredientsPlan = rawDayIngredients.map(ing => ({
+                ...ing,
+                normalizedKey: normalizeKey(ing.originalIngredient) // <-- Use shared function
+            }));
+
+            // --- Phase 2: Market Run ---
+            log("Phase 2: Market Run (Day " + day + ")...", 'INFO', 'PHASE');
+            
+            // --- [PERF] This is the new Market Run Ladder Logic ---
+            const processSingleIngredientOptimized = async (ingredient) => {
+                // [PERF] Add telemetry object
+                let telemetry = { name: ingredient.originalIngredient, used: 'none', score: 0, page: 1 };
+                 try {
+                     if (!ingredient || !ingredient.originalIngredient) {
+                         log(`Market Run: Skipping invalid ingredient data`, 'WARN', 'MARKET_RUN', { ingredient });
+                         return { _error: true, itemKey: 'unknown_invalid', message: 'Invalid ingredient data' };
+                     }
+                    const ingredientKey = ingredient.originalIngredient;
+                     if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories) || ingredient.allowedCategories.length === 0) {
+                         log(`[${ingredientKey}] Skipping: Missing critical fields (normalQuery/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
+                         return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
+                     }
+                    const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
+                    const qn = ingredient.normalQuery;
+                    const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, store);
+                    const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, store);
+                    
+                    // --- [PERF] Define queries in order, but logic will control execution ---
+                    const queriesToTry = [ { type: 'tight', query: qt }, { type: 'normal', query: qn }, { type: 'wide', query: qw } ].filter(q => q.query && q.query.trim());
+                    
+                    log(`[${ingredientKey}] Queries: Tight (${qt ? (ingredient.tightQuery ? 'AI' : 'Synth') : 'N/A'}), Normal (AI), Wide (${qw ? (ingredient.wideQuery ? 'AI' : 'Synth') : 'N/A'})`, 'DEBUG', 'MARKET_RUN');
+                    
+                    let acceptedQueryType = 'none';
+                    let bestScore = 0;
+
+                    for (const [index, { type, query }] of queriesToTry.entries()) {
+                        
+                        // --- [PERF] Ladder Logic ---
+                        if (type === 'normal' && acceptedQueryType !== 'none') {
+                            // Already found a match (e.g., strong tight), skip 'normal'
+                            continue; 
+                        }
+                        if (type === 'wide') {
+                            if (acceptedQueryType !== 'none') continue; // Skip if 'tight' or 'normal' succeeded
+                            
+                            // Fail-fast rule for fresh items
+                            const isFailFastCategory = ingredient.allowedCategories.some(c => FAIL_FAST_CATEGORIES.includes(c));
+                            if (isFailFastCategory) {
+                                log(`[${ingredientKey}] Skipping "wide" query due to fail-fast category.`, 'DEBUG', 'MARKET_RUN');
+                                continue;
+                            }
+                        }
+                        // --- [END PERF] ---
+
+                        log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
+                        result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
+                        const currentAttemptLog = result.searchAttempts.at(-1);
+
+                        // --- [PERF] Instruction: Keep page=1 only ---
+                        const { data: priceData } = await fetchPriceData(store, query, 1, log); // Hardcoded page=1
+
+                        if (priceData.error) {
+                            log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
+                            currentAttemptLog.status = 'fetch_error'; continue;
+                        }
+                        
+                        const rawProducts = priceData.results || [];
+                        currentAttemptLog.rawCount = rawProducts.length;
+                        const validProductsOnPage = [];
+                        
+                        for (const rawProduct of rawProducts) {
+                            if (!rawProduct || !rawProduct.product_name) continue;
+                            const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
+                            if (checklistResult.pass) {
+                                validProductsOnPage.push({ 
+                                    product: { 
+                                        name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, 
+                                        size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, 
+                                        unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) 
+                                    }, 
+                                    score: checklistResult.score // Use the score from checklist
+                                });
+                            }
+                        }
+                        
+                        const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
+                        currentAttemptLog.foundCount = filteredProducts.length;
+                        const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
+                        currentAttemptLog.bestScore = currentBestScore;
+
+                        if (filteredProducts.length > 0) {
+                            log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
+                            const currentUrls = new Set(result.allProducts.map(p => p.url));
+                            filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); } });
+
+                            if (result.allProducts.length > 0) {
+                                 // Always update to the best-priced product from all found so far
+                                 const foundProduct = result.allProducts.reduce((best, current) => (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best, result.allProducts[0]);
+                                 result.currentSelectionURL = foundProduct.url;
+                                 result.source = 'discovery';
+                                 currentAttemptLog.status = 'success';
+                                 
+                                 // Update telemetry *only if* this is the first successful query type
+                                 if (acceptedQueryType === 'none') {
+                                     acceptedQueryType = type;
+                                     bestScore = currentBestScore;
+                                 }
+
+                                 // --- [PERF] Ladder Logic Stop Conditions ---
+                                 // 1. Strong tight match
+                                 if (type === 'tight' && currentBestScore >= SKIP_STRONG_MATCH_THRESHOLD) {
+                                     log(`[${ingredientKey}] Skip heuristic hit (Strong tight match).`, 'INFO', 'MARKET_RUN');
+                                     break; 
+                                 }
+                                 // 2. Any valid 'normal' match
+                                 if (type === 'normal') {
+                                     log(`[${ingredientKey}] Found valid 'normal' match. Stopping search.`, 'DEBUG', 'MARKET_RUN');
+                                     break;
+                                 }
+                                 // --- [END PERF] ---
+                            } else { currentAttemptLog.status = 'no_match_post_filter'; }
+                        } else { log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA'); currentAttemptLog.status = 'no_match'; }
+                    } // end query loop
+                    
+                    if (result.source === 'failed') { 
+                        log(`[${ingredientKey}] Market Run failed after trying all queries.`, 'WARN', 'MARKET_RUN'); 
+                    } else { 
+                        log(`[${ingredientKey}] Market Run success via '${acceptedQueryType}' query.`, 'DEBUG', 'MARKET_RUN'); 
+                    }
+
+                    // --- [PERF] Emit Telemetry ---
+                    telemetry.used = acceptedQueryType;
+                    telemetry.score = bestScore;
+                    log(`[${ingredientKey}] Market Run Telemetry`, 'INFO', 'MARKET_RUN', telemetry);
+                    // --- [END PERF] ---
+
+                    return { [ingredientKey]: result };
+
+                } catch(e) {
+                    log(`CRITICAL Error in processSingleIngredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
+                     return { _error: true, itemKey: ingredient?.originalIngredient || 'unknown_error', message: `Internal Market Run Error: ${e.message}` };
+                }
+            };
+            // --- [END PERF] Market Run Ladder Logic ---
+
+            const parallelResultsArray = await concurrentlyMap(dayIngredientsPlan, MAX_MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
+            
+            const dayResultsMap = new Map();
+            parallelResultsArray.forEach(currentResult => {
+                 if (currentResult._error) {
+                     log(`Market Run Item Error (Day ${day}) for "${currentResult.itemKey}": ${currentResult.message}`, 'WARN', 'MARKET_RUN');
+                     const planItem = dayIngredientsPlan.find(i => i.originalIngredient === currentResult.itemKey);
+                     const baseData = planItem || { originalIngredient: currentResult.itemKey, normalizedKey: normalizeKey(currentResult.itemKey) };
+                     dayResultsMap.set(baseData.normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
+                     return;
+                 }
+                 const ingredientKey = Object.keys(currentResult)[0];
+                 const resultData = currentResult[ingredientKey];
+                 const normalizedKey = normalizeKey(ingredientKey);
+                 const planItem = dayIngredientsPlan.find(i => i.normalizedKey === normalizedKey);
+                 if (!planItem) {
+                     log(`Market run key "${ingredientKey}" (norm: "${normalizedKey}") not found in day plan. Skipping.`, 'ERROR', 'SYSTEM'); return;
+                 }
+                 if (resultData && typeof resultData === 'object') {
+                     dayResultsMap.set(normalizedKey, { ...planItem, ...resultData, normalizedKey: planItem.normalizedKey });
+                 } else {
+                      log(`Invalid market result structure for "${ingredientKey}"`, 'ERROR', 'SYSTEM', { resultData });
+                      dayResultsMap.set(normalizedKey, { ...planItem, source: 'error', error: 'Invalid market result structure', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
+                 }
+            });
+            
+            market_run_ms = Date.now() - marketStartTime; // [PERF] Log time
+            log(`Market Run (Day ${day}) took ${(market_run_ms / 1000).toFixed(3)}s`, 'INFO', 'SYSTEM');
+            log(`Market Run complete for Day ${day}.`, 'SUCCESS', 'PHASE');
+            
+            // Return the results for Promise.all
+            return { dayResultsMap, dayIngredientsPlan }; 
+
+        })(); // --- [PERF] End of marketRunPromise IIFE ---
+
+
+        // --- [PERF] Wait for both parallel tracks to finish ---
+        const [recipeSettledResults, marketRunResults] = await Promise.all([
+            recipePromise, 
+            marketRunPromise
+        ]);
+        
+        // Process Market Run results
+        const { dayResultsMap, dayIngredientsPlan } = marketRunResults;
+
+        // Process Chef results
         const finalDayMeals = dayMeals.map((meal, index) => {
             const result = recipeSettledResults[index];
             if (result.status === 'fulfilled' && result.value) {
@@ -888,113 +1119,12 @@ module.exports = async (request, response) => {
             }
         });
         log(`Chef AI complete for Day ${day}.`, 'SUCCESS', 'PHASE');
-
-        // --- [MODIFIED] Normalize Ingredient Keys (Use shared normalizer) ---
-        const dayIngredientsPlan = rawDayIngredients.map(ing => ({
-            ...ing,
-            normalizedKey: normalizeKey(ing.originalIngredient) // <-- Use shared function
-        }));
-        // --- End Modification ---
-
-        // --- Phase 2: Market Run (Unchanged) ---
-        log("Phase 2: Market Run (Day " + day + ")...", 'INFO', 'PHASE');
-        const processSingleIngredientOptimized = async (ingredient) => {
-             try {
-                 if (!ingredient || !ingredient.originalIngredient) {
-                     log(`Market Run: Skipping invalid ingredient data`, 'WARN', 'MARKET_RUN', { ingredient });
-                     return { _error: true, itemKey: 'unknown_invalid', message: 'Invalid ingredient data' };
-                 }
-                const ingredientKey = ingredient.originalIngredient;
-                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories) || ingredient.allowedCategories.length === 0) {
-                     log(`[${ingredientKey}] Skipping: Missing critical fields (normalQuery/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
-                     return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
-                 }
-                const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
-                const qn = ingredient.normalQuery;
-                const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, store);
-                const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, store);
-                const queriesToTry = [ { type: 'tight', query: qt }, { type: 'normal', query: qn }, { type: 'wide', query: qw } ].filter(q => q.query && q.query.trim());
-                log(`[${ingredientKey}] Queries: Tight (${qt ? (ingredient.tightQuery ? 'AI' : 'Synth') : 'N/A'}), Normal (AI), Wide (${qw ? (ingredient.wideQuery ? 'AI' : 'Synth') : 'N/A'})`, 'DEBUG', 'MARKET_RUN');
-                let acceptedQueryType = 'none';
-                for (const [index, { type, query }] of queriesToTry.entries()) {
-                    log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
-                    result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
-                    const currentAttemptLog = result.searchAttempts.at(-1);
-                    const { data: priceData } = await fetchPriceData(store, query, 1, log);
-                    if (priceData.error) {
-                        log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
-                        currentAttemptLog.status = 'fetch_error'; continue;
-                    }
-                    const rawProducts = priceData.results || [];
-                    currentAttemptLog.rawCount = rawProducts.length;
-                    const validProductsOnPage = [];
-                    for (const rawProduct of rawProducts) {
-                        if (!rawProduct || !rawProduct.product_name) continue;
-                        const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
-                        if (checklistResult.pass) {
-                            validProductsOnPage.push({ product: { name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) }, score: checklistResult.score });
-                        }
-                    }
-                    const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
-                    currentAttemptLog.foundCount = filteredProducts.length;
-                    currentAttemptLog.bestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
-                    if (filteredProducts.length > 0) {
-                        log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
-                        const currentUrls = new Set(result.allProducts.map(p => p.url));
-                        filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); } });
-                        if (result.allProducts.length > 0) {
-                             const foundProduct = result.allProducts.reduce((best, current) => (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best, result.allProducts[0]);
-                             result.currentSelectionURL = foundProduct.url;
-                             result.source = 'discovery';
-                             currentAttemptLog.status = 'success';
-                             acceptedQueryType = type;
-                             if (type === 'tight' && currentAttemptLog.bestScore >= SKIP_HEURISTIC_SCORE_THRESHOLD) { log(`[${ingredientKey}] Skip heuristic hit (Tight query OK).`, 'INFO', 'MARKET_RUN'); break; }
-                             if (type === 'normal') { const remainingQueries = queriesToTry.slice(index + 1); if (!remainingQueries.some(q => q.type === 'wide')) { break; } }
-                        } else { currentAttemptLog.status = 'no_match_post_filter'; }
-                    } else { log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA'); currentAttemptLog.status = 'no_match'; }
-                }
-                if (result.source === 'failed') { log(`[${ingredientKey}] Market Run failed after trying all queries.`, 'WARN', 'MARKET_RUN'); } else { log(`[${ingredientKey}] Market Run success via '${acceptedQueryType}' query.`, 'DEBUG', 'MARKET_RUN'); }
-                return { [ingredientKey]: result };
-            } catch(e) {
-                log(`CRITICAL Error in processSingleIngredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
-                 return { _error: true, itemKey: ingredient?.originalIngredient || 'unknown_error', message: `Internal Market Run Error: ${e.message}` };
-            }
-        };
-        const startMarketTime = Date.now();
-        const parallelResultsArray = await concurrentlyMap(dayIngredientsPlan, MAX_MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
-        const endMarketTime = Date.now();
-        log(`Market Run (Day ${day}) took ${(endMarketTime - startMarketTime)/1000}s`, 'INFO', 'SYSTEM');
-
-        const dayResultsMap = new Map();
-        parallelResultsArray.forEach(currentResult => {
-             if (currentResult._error) {
-                 log(`Market Run Item Error (Day ${day}) for "${currentResult.itemKey}": ${currentResult.message}`, 'WARN', 'MARKET_RUN');
-                 const planItem = dayIngredientsPlan.find(i => i.originalIngredient === currentResult.itemKey);
-                 // [MODIFIED] Use shared normalizer
-                 const baseData = planItem || { originalIngredient: currentResult.itemKey, normalizedKey: normalizeKey(currentResult.itemKey) };
-                 dayResultsMap.set(baseData.normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
-                 return;
-             }
-             const ingredientKey = Object.keys(currentResult)[0];
-             const resultData = currentResult[ingredientKey];
-             // [MODIFIED] Use shared normalizer
-             const normalizedKey = normalizeKey(ingredientKey);
-             const planItem = dayIngredientsPlan.find(i => i.normalizedKey === normalizedKey);
-             if (!planItem) {
-                 log(`Market run key "${ingredientKey}" (norm: "${normalizedKey}") not found in day plan. Skipping.`, 'ERROR', 'SYSTEM'); return;
-             }
-             if (resultData && typeof resultData === 'object') {
-                 dayResultsMap.set(normalizedKey, { ...planItem, ...resultData, normalizedKey: planItem.normalizedKey });
-             } else {
-                  log(`Invalid market result structure for "${ingredientKey}"`, 'ERROR', 'SYSTEM', { resultData });
-                  dayResultsMap.set(normalizedKey, { ...planItem, source: 'error', error: 'Invalid market result structure', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
-             }
-        });
-        log(`Market Run complete for Day ${day}.`, 'SUCCESS', 'PHASE');
+        // --- [END PERF] Parallelism changes ---
 
 
-        // --- Phase 3: Nutrition Fetch (Unchanged) ---
+        // --- Phase 3: Nutrition Fetch ---
         log("Phase 3: Nutrition Fetch (Day " + day + ")...", 'INFO', 'PHASE');
+        const nutritionStartTime = Date.now(); // [PERF] Log time
         const itemsToFetchNutrition = [];
         const nutritionDataMap = new Map();
 
@@ -1017,6 +1147,7 @@ module.exports = async (request, response) => {
                      return { ...item, nut: { status: 'not_found', source: 'error', error: `Nutrition fetch failed: ${err.message}` } };
                  }
              });
+            nutrition_ms = Date.now() - nutritionStartTime; // [PERF] Log time
             log(`Nutrition fetch complete for Day ${day}.`, 'SUCCESS', 'HTTP');
             nutritionResults.forEach(item => {
                  if (item && item.normalizedKey && item.nut) {
@@ -1028,7 +1159,10 @@ module.exports = async (request, response) => {
                      }
                  } else { log(`Invalid item in nutrition results loop (Day ${day})`, 'WARN', 'CALC', {item}); }
             });
-        } else { log(`No items require nutrition fetching for Day ${day}.`, 'INFO', 'CALC'); }
+        } else { 
+            nutrition_ms = Date.now() - nutritionStartTime; // [PERF] Log time
+            log(`No items require nutrition fetching for Day ${day}.`, 'INFO', 'CALC'); 
+        }
 
 
         // --- Phase 4: Validation & Reconciliation (Unchanged) ---
@@ -1089,10 +1223,10 @@ module.exports = async (request, response) => {
              
              // --- [NEW] Solution 2: Defensive Sanity Check ---
              // Check if calculated kcal exceeds the defined limit, but ignore oils/fats
-             if (kcal > MAX_CALORIES_PER_ITEM && !key.toLowerCase().includes('oil') && !key.toLowerCase().includes('butter') && !key.toLowerCase().includes('ghee')) {
-                log(`CRITICAL: Item '${key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit of ${MAX_CALORIES_PER_ITEM}.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
+             if (kcal > MAX_CALORIES_PER_ITEM && !item.key.toLowerCase().includes('oil') && !item.key.toLowerCase().includes('butter') && !item.key.toLowerCase().includes('ghee')) {
+                log(`CRITICAL: Item '${item.key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit of ${MAX_CALORIES_PER_ITEM}.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
                 // This is a non-recoverable data error. Fail fast.
-                throw new Error(`Calculation error: Item "${key}" has an impossibly high calorie count (${kcal.toFixed(0)} kcal). Check unit conversion.`);
+                throw new Error(`Calculation error: Item "${item.key}" has an impossibly high calorie count (${kcal.toFixed(0)} kcal). Check unit conversion.`);
              }
              // --- [END NEW] ---
 
@@ -1204,7 +1338,20 @@ module.exports = async (request, response) => {
 
         // --- Phase 5: Assemble Day Response (Unchanged) ---
         log("Phase 5: Assembling Response (Day " + day + ")...", 'INFO', 'PHASE');
-        log("Day Telemetry:", 'INFO', 'SYSTEM', { canonical_hits: canonicalHitsToday, density_heuristics: densityHeuristicsToday, scaleFactor: scaleFactor ? parseFloat(scaleFactor.toFixed(3)) : null, final_deviation_pct: parseFloat(finalDeviationPct.toFixed(1)), });
+        const plan_total_ms = Date.now() - planStartTime; // [PERF] Log time
+        
+        log("Day Telemetry:", 'INFO', 'SYSTEM', { 
+            canonical_hits: canonicalHitsToday, 
+            density_heuristics: densityHeuristicsToday, 
+            scaleFactor: scaleFactor ? parseFloat(scaleFactor.toFixed(3)) : null, 
+            final_deviation_pct: parseFloat(finalDeviationPct.toFixed(1)),
+            // --- [PERF] Add final telemetry ---
+            plan_total_ms,
+            dietitian_ms,
+            market_run_ms,
+            nutrition_ms
+            // --- [END PERF] ---
+        });
 
         const responseData = {
             message: `Successfully generated plan for Day ${day}.`, day: day,
@@ -1240,5 +1387,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
