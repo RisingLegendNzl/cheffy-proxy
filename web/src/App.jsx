@@ -25,8 +25,11 @@ import RecipeModal from './components/RecipeModal';
 import EmojiIcon from './components/EmojiIcon';
 
 // --- CONFIGURATION ---
+// [MODIFIED] Add new batched endpoint and keep old ones for feature flag
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
-const ORCHESTRATOR_DAY_API_URL = '/api/plan/day';
+const ORCHESTRATOR_DAY_API_URL = '/api/plan/day'; // Old per-day endpoint
+const ORCHESTRATOR_FULL_PLAN_API_URL = '/api/plan/generate-full-plan'; // New batched endpoint
+
 const NUTRITION_API_URL = '/api/nutrition-search';
 const MAX_SUBSTITUTES = 5;
 const FIRESTORE_PROFILE_COLLECTION = 'profile';
@@ -39,18 +42,19 @@ const MOCK_PRODUCT_TEMPLATE = {
 };
 
 // --- [FIX] Firebase Config and App ID (Guarded Initialization) ---
-const firebaseConfigStr = import.meta.env.VITE_FIREBASE_CONFIG;
-const appId = import.meta.env.VITE_APP_ID || 'default-app-id';
+const firebaseConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : import.meta.env.VITE_FIREBASE_CONFIG;
+const appId = typeof __app_id !== 'undefined' ? __app_id : (import.meta.env.VITE_APP_ID || 'default-app-id');
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : import.meta.env.VITE_INITIAL_AUTH_TOKEN;
+
 
 let firebaseConfig = null;
 let firebaseInitializationError = null; // Store any init error
 
 try {
-    // This is the critical fix. We MUST check if the string exists before parsing.
     if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
         firebaseConfig = JSON.parse(firebaseConfigStr);
     } else {
-        console.warn("[FIREBASE] VITE_FIREBASE_CONFIG is not defined or is empty.");
+        console.warn("[FIREBASE] __firebase_config is not defined or is empty.");
         firebaseInitializationError = 'Firebase config environment variable is missing.';
     }
 } catch (e) {
@@ -61,31 +65,44 @@ try {
 
 
 // --- SSE Stream Parser ---
+// [MODIFIED] This function is now fully generic and reusable for both old and new endpoints.
 function processSseChunk(value, buffer, decoder) {
+    // Append new data to buffer
     const chunk = decoder.decode(value, { stream: true });
     buffer += chunk;
+    
     const events = [];
+    // Split buffer by double newline, which separates SSE messages
     let lines = buffer.split('\n\n');
+    
+    // Process all complete messages, leaving the last partial message in the buffer
     for (let i = 0; i < lines.length - 1; i++) {
         const message = lines[i];
         if (message.trim().length === 0) continue;
-        let eventType = 'message';
+        
+        let eventType = 'message'; // Default event type
         let eventData = '';
+        
+        // Process each line of the message
         message.split('\n').forEach(line => {
             if (line.startsWith('event: ')) {
                 eventType = line.substring(7).trim();
             } else if (line.startsWith('data: ')) {
+                // Append data, handling multi-line data fields
                 eventData += line.substring(6).trim();
             }
         });
+
         if (eventData) {
             try {
+                // All our events are JSON
                 const jsonData = JSON.parse(eventData);
                 events.push({ eventType, data: jsonData });
             } catch (e) {
                 console.error("SSE: Failed to parse JSON data:", eventData, e);
+                // Push a log-compatible error
                 events.push({
-                    eventType: 'message',
+                    eventType: 'log_message', // Use 'log_message' for new handler
                     data: {
                         timestamp: new Date().toISOString(),
                         level: 'CRITICAL',
@@ -97,6 +114,8 @@ function processSseChunk(value, buffer, decoder) {
             }
         }
     }
+    
+    // The last element in 'lines' is the incomplete message, so it becomes the new buffer.
     let newBuffer = lines[lines.length - 1];
     return { events, newBuffer };
 }
@@ -154,11 +173,13 @@ const App = () => {
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
     
-    // --- [NEW] State for GenerationProgressDisplay stepper ---
-    const [generationStepKey, setGenerationStepKey] = useState(null); // e.g., 'targets', 'planning', 'market', 'finalizing', 'complete', 'error'
-    const [generationStatus, setGenerationStatus] = useState("Ready to generate plan."); // Added this line
+    const [generationStepKey, setGenerationStepKey] = useState(null);
+    const [generationStatus, setGenerationStatus] = useState("Ready to generate plan."); 
 
     const [selectedMeal, setSelectedMeal] = useState(null);
+
+    // --- [NEW] Feature Flag State ---
+    const [useBatchedMode, setUseBatchedMode] = useState(true);
 
     // --- Firebase State ---
     const [auth, setAuth] = useState(null);
@@ -168,15 +189,13 @@ const App = () => {
 
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
-        // Use the error variable from the outer scope
         if (firebaseInitializationError) {
             console.error("[FIREBASE] Firebase init failed:", firebaseInitializationError);
             setStatusMessage({ text: firebaseInitializationError, type: 'error' });
-            setIsAuthReady(true); // Set auth ready even if config fails, to avoid blocking UI
+            setIsAuthReady(true);
             return;
         }
 
-        // We only proceed if firebaseConfig was successfully parsed
         if (firebaseConfig) {
             try {
                 const app = initializeApp(firebaseConfig);
@@ -195,7 +214,6 @@ const App = () => {
                         console.log("[FIREBASE] User is signed out. Attempting sign-in...");
                         setUserId(null);
                         try {
-                            const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN;
                             if (initialAuthToken) {
                                 console.log("[FIREBASE] Signing in with custom token...");
                                 await signInWithCustomToken(authInstance, initialAuthToken);
@@ -223,7 +241,7 @@ const App = () => {
                 setIsAuthReady(true);
             }
         }
-    }, [isAuthReady]); // Re-run this effect only if isAuthReady changes (which it won't, but this is fine)
+    }, [isAuthReady]); // Note: initialAuthToken is a const, so it's stable
 
 
     // --- Load Profile on Auth Ready ---
@@ -249,7 +267,7 @@ const App = () => {
                 console.log('[FIREBASE LOAD] Profile data found:', loadedData);
                 
                 if (loadedData && typeof loadedData === 'object' && Object.keys(loadedData).length > 0) {
-                     setFormData(loadedData);
+                     setFormData(prev => ({ ...prev, ...loadedData })); // [FIX] Merge, don't overwrite
                      if (!isInitialLoad) {
                          setStatusMessage({ text: 'Profile loaded successfully!', type: 'success' });
                      } else {
@@ -304,9 +322,11 @@ const App = () => {
         setTotalCost(newTotal);
     }, []);
 
-    // --- [MODIFIED] handleGeneratePlan (SSE Version) ---
+    // --- [MODIFIED] handleGeneratePlan (Now supports Batched vs Per-Day) ---
     const handleGeneratePlan = useCallback(async (e) => {
         e.preventDefault();
+        
+        // --- 1. Reset All State ---
         setLoading(true);
         setError(null);
         setDiagnosticLogs([]);
@@ -318,16 +338,13 @@ const App = () => {
         setTotalCost(0);
         setEatenMeals({});
         setFailedIngredientsHistory([]);
-        setGenerationStepKey('targets'); // <-- [NEW] Set initial step
+        setGenerationStepKey('targets'); // Set initial step
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
 
         let targets;
-        let accumulatedResults = {}; 
-        let accumulatedMealPlan = []; 
-        let accumulatedUniqueIngredients = new Map(); 
 
+        // --- 2. Fetch Nutritional Targets (Required for both modes) ---
         try {
-            // --- Step 1: Fetch Nutritional Targets ---
             const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -343,159 +360,246 @@ const App = () => {
             targets = targetsData.nutritionalTargets;
             setNutritionalTargets(targets); 
             setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
-            setGenerationStepKey('planning'); // <-- [NEW] Set next step
             
-            // --- Step 2: Loop and fetch each day (SSE) ---
-            const numDays = parseInt(formData.days, 10);
-            for (let day = 1; day <= numDays; day++) {
-                // This status is now for the main title, not the step logic
-                setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
-                
-                let dailyFailedIngredients = [];
-                let dayFetchError = null;
-
-                try {
-                    const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
-                        method: 'POST',
-                        headers: { 
-                            'Content-Type': 'application/json',
-                            'Accept': 'text/event-stream' 
-                        },
-                        body: JSON.stringify({
-                            formData,
-                            nutritionalTargets: targets
-                        }),
-                    });
-
-                    if (!dayResponse.ok) {
-                        const errorData = await dayResponse.json();
-                        throw new Error(`Day ${day} request failed: ${errorData.message || 'Unknown server error'}`);
-                    }
-
-                    const reader = dayResponse.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-                    let dayDataReceived = false;
-
-                    while (true) {
-                        const { value, done } = await reader.read();
-                        if (done) {
-                            if (!dayDataReceived && !dayFetchError) {
-                                throw new Error(`Day ${day} stream ended unexpectedly without data.`);
-                            }
-                            break;
-                        }
-                        
-                        const { events, newBuffer } = processSseChunk(value, buffer, decoder);
-                        buffer = newBuffer;
-
-                        for (const event of events) {
-                            const eventData = event.data;
-                            switch (event.eventType) {
-                                case 'message':
-                                    setDiagnosticLogs(prev => [...prev, eventData]);
-                                    
-                                    // --- [NEW] Logic to drive the stepper ---
-                                    if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
-                                        setGenerationStepKey(prevKey => (prevKey === 'planning' || prevKey === 'market') ? 'market' : prevKey);
-                                    } else if (eventData?.tag === 'LLM' || eventData?.tag === 'LLM_PROMPT') {
-                                         setGenerationStepKey(prevKey => (prevKey === 'planning' || prevKey === 'market') ? 'planning' : prevKey);
-                                    }
-                                    // --- [END NEW] ---
-                                    break;
-                                
-                                case 'error':
-                                    console.error(`[SSE Error Day ${day}]`, eventData);
-                                    dayFetchError = eventData.message || 'An error occurred during generation.';
-                                    setError(prevError => prevError ? `${prevError}\nDay ${day}: ${dayFetchError}` : `Day ${day}: ${dayFetchError}`);
-                                    setGenerationStepKey('error'); // <-- [NEW] Set error step
-                                    break;
-
-                                case 'finalData':
-                                    dayDataReceived = true;
-
-                                    if (eventData.mealPlanForDay) {
-                                        accumulatedMealPlan.push(eventData.mealPlanForDay);
-                                    }
-                                    if (eventData.dayResults) {
-                                        accumulatedResults = { ...accumulatedResults, ...eventData.dayResults };
-                                        
-                                        Object.values(eventData.dayResults).forEach(item => {
-                                            if (item && (item.source === 'failed' || item.source === 'error')) {
-                                                dailyFailedIngredients.push({
-                                                    timestamp: new Date().toISOString(),
-                                                    originalIngredient: item.originalIngredient || 'Unknown',
-                                                    tightQuery: item.tightQuery || (item.searchAttempts?.find(a=>a.queryType==='tight')?.query),
-                                                    normalQuery: item.normalQuery || (item.searchAttempts?.find(a=>a.queryType==='normal')?.query),
-                                                    wideQuery: item.wideQuery || (item.searchAttempts?.find(a=>a.queryType==='wide')?.query),
-                                                    error: item.error || 'Market run failed'
-                                                });
-                                            }
-                                        });
-                                    }
-                                    if (eventData.dayUniqueIngredients) {
-                                        eventData.dayUniqueIngredients.forEach(ing => {
-                                            if (ing && ing.originalIngredient) {
-                                                accumulatedUniqueIngredients.set(ing.originalIngredient, {
-                                                    ...(accumulatedUniqueIngredients.get(ing.originalIngredient) || {}), 
-                                                    ...ing 
-                                                });
-                                            }
-                                        });
-                                    }
-                                    
-                                    setMealPlan([...accumulatedMealPlan]);
-                                    setResults({ ...accumulatedResults }); 
-                                    setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
-                                    recalculateTotalCost(accumulatedResults);
-                                    break;
-                            }
-                        }
-                        if (dayFetchError) break;
-                    } // end while(true)
-                } catch (dayError) {
-                    console.error(`Error processing day ${day}:`, dayError);
-                    setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
-                    setGenerationStepKey('error'); // <-- [NEW] Set error step
-                    setDiagnosticLogs(prev => [...prev, {
-                        timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: dayError.message
-                    }]);
-                } finally {
-                     if (dailyFailedIngredients.length > 0) {
-                         setFailedIngredientsHistory(prev => [...prev, ...dailyFailedIngredients]);
-                     }
-                }
-            } // --- End of day loop ---
-
-            // --- [NEW] Set final step keys ---
-            if (!error) {
-                setGenerationStatus(`Plan generation finished.`);
-                setGenerationStepKey('finalizing'); // Show finalizing briefly
-                setTimeout(() => {
-                    setGenerationStepKey('complete'); // Then set to complete
-                }, 1500); // Show "finalizing" for 1.5s
-            } else {
-                 setGenerationStepKey('error');
-            }
-            // --- [END NEW] ---
-
-            setSelectedDay(1); 
-            setContentView('priceComparison'); 
-
-        } catch (err) { 
-            console.error("Plan generation failed critically:", err);
+        } catch (err) {
+            console.error("Plan generation failed critically at Targets:", err);
             setError(`Critical failure: ${err.message}`);
-            setGenerationStepKey('error'); // <-- [NEW] Set error step
+            setGenerationStepKey('error');
+            setLoading(false);
             setDiagnosticLogs(prev => [...prev, {
                 timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
             }]);
-        } finally {
-            // Hide the spinner *after* the 'complete' state has a chance to show
-             setTimeout(() => {
-                setLoading(false);
-            }, 2000); // Wait 2s total
+            return; // Stop execution
         }
-    }, [formData, isLogOpen, recalculateTotalCost]);
+
+        // --- 3. Execute based on Feature Flag ---
+        if (!useBatchedMode) {
+            // --- [LEGACY] Per-Day Loop Logic ---
+            setGenerationStatus("Generating plan (per-day mode)...");
+            let accumulatedResults = {}; 
+            let accumulatedMealPlan = []; 
+            let accumulatedUniqueIngredients = new Map(); 
+
+            try {
+                const numDays = parseInt(formData.days, 10);
+                for (let day = 1; day <= numDays; day++) {
+                    setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
+                    setGenerationStepKey('planning'); // Reset step for each day
+                    
+                    let dailyFailedIngredients = [];
+                    let dayFetchError = null;
+
+                    try {
+                        const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                            body: JSON.stringify({ formData, nutritionalTargets: targets }),
+                        });
+
+                        if (!dayResponse.ok) {
+                            const errorData = await dayResponse.json();
+                            throw new Error(`Day ${day} request failed: ${errorData.message || 'Unknown server error'}`);
+                        }
+
+                        const reader = dayResponse.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = '';
+                        let dayDataReceived = false;
+
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) {
+                                if (!dayDataReceived && !dayFetchError) {
+                                    throw new Error(`Day ${day} stream ended unexpectedly without data.`);
+                                }
+                                break;
+                            }
+                            
+                            const { events, newBuffer } = processSseChunk(value, buffer, decoder);
+                            buffer = newBuffer;
+
+                            for (const event of events) {
+                                const eventData = event.data;
+                                switch (event.eventType) {
+                                    case 'message':
+                                        setDiagnosticLogs(prev => [...prev, eventData]);
+                                        if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
+                                            setGenerationStepKey('market');
+                                        } else if (eventData?.tag === 'LLM' || eventData?.tag === 'LLM_PROMPT') {
+                                            setGenerationStepKey('planning');
+                                        }
+                                        break;
+                                    case 'error':
+                                        dayFetchError = eventData.message || 'An error occurred during generation.';
+                                        setError(prevError => prevError ? `${prevError}\nDay ${day}: ${dayFetchError}` : `Day ${day}: ${dayFetchError}`);
+                                        setGenerationStepKey('error');
+                                        break;
+                                    case 'finalData':
+                                        dayDataReceived = true;
+                                        if (eventData.mealPlanForDay) accumulatedMealPlan.push(eventData.mealPlanForDay);
+                                        if (eventData.dayResults) accumulatedResults = { ...accumulatedResults, ...eventData.dayResults };
+                                        if (eventData.dayUniqueIngredients) {
+                                            eventData.dayUniqueIngredients.forEach(ing => {
+                                                if (ing && ing.originalIngredient) accumulatedUniqueIngredients.set(ing.originalIngredient, { ...(accumulatedUniqueIngredients.get(ing.originalIngredient) || {}), ...ing });
+                                            });
+                                        }
+                                        setMealPlan([...accumulatedMealPlan]);
+                                        setResults({ ...accumulatedResults }); 
+                                        setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
+                                        recalculateTotalCost(accumulatedResults);
+                                        break;
+                                }
+                            }
+                            if (dayFetchError) break;
+                        } // end while(true)
+                    } catch (dayError) {
+                        console.error(`Error processing day ${day}:`, dayError);
+                        setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
+                        setGenerationStepKey('error');
+                        setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: dayError.message }]);
+                    } finally {
+                        if (dailyFailedIngredients.length > 0) setFailedIngredientsHistory(prev => [...prev, ...dailyFailedIngredients]);
+                    }
+                } // --- End of day loop ---
+
+                if (!error) {
+                    setGenerationStatus(`Plan generation finished.`);
+                    setGenerationStepKey('finalizing');
+                    setTimeout(() => setGenerationStepKey('complete'), 1500);
+                } else {
+                    setGenerationStepKey('error');
+                }
+            } catch (err) {
+                 console.error("Per-day plan generation failed critically:", err);
+                 setError(`Critical failure: ${err.message}`);
+                 setGenerationStepKey('error');
+            } finally {
+                 setTimeout(() => setLoading(false), 2000);
+            }
+
+        } else {
+            // --- [NEW] Batched Plan Logic ---
+            setGenerationStatus("Generating full plan (batched mode)...");
+            
+            try {
+                const planResponse = await fetch(ORCHESTRATOR_FULL_PLAN_API_URL, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Accept': 'text/event-stream' 
+                    },
+                    body: JSON.stringify({
+                        formData,
+                        nutritionalTargets: targets // Pass the targets in
+                    }),
+                });
+
+                if (!planResponse.ok) {
+                    const errorData = await planResponse.json();
+                    throw new Error(`Full plan request failed: ${errorData.message || 'Unknown server error'}`);
+                }
+
+                const reader = planResponse.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        // Check if final data was ever received
+                        if (generationStepKey !== 'complete' && generationStepKey !== 'error') {
+                            throw new Error("Stream ended unexpectedly before 'plan:complete' event.");
+                        }
+                        break;
+                    }
+                    
+                    const { events, newBuffer } = processSseChunk(value, buffer, decoder);
+                    buffer = newBuffer;
+
+                    for (const event of events) {
+                        const eventData = event.data;
+                        
+                        switch (event.eventType) {
+                            case 'log_message':
+                                setDiagnosticLogs(prev => [...prev, eventData]);
+                                break;
+                            
+                            case 'phase:start':
+                                const phaseMap = {
+                                    'meals': 'planning',
+                                    'aggregate': 'planning',
+                                    'market': 'market',
+                                    'nutrition': 'market',
+                                    'solver': 'finalizing',
+                                    'writer': 'finalizing',
+                                    'finalize': 'finalizing'
+                                };
+                                const stepKey = phaseMap[eventData.name];
+                                if (stepKey) {
+                                    setGenerationStepKey(stepKey);
+                                    if(eventData.description) setGenerationStatus(eventData.description);
+                                }
+                                break;
+
+                            case 'ingredient:found':
+                                // Progressively update results as they are found
+                                setResults(prev => ({
+                                    ...prev,
+                                    [eventData.key]: eventData.data
+                                }));
+                                break;
+
+                            case 'ingredient:failed':
+                                const failedItem = {
+                                    timestamp: new Date().toISOString(),
+                                    originalIngredient: eventData.key,
+                                    error: eventData.reason,
+                                };
+                                setFailedIngredientsHistory(prev => [...prev, failedItem]);
+                                // Also add a placeholder to results
+                                setResults(prev => ({
+                                    ...prev,
+                                    [eventData.key]: {
+                                        originalIngredient: eventData.key,
+                                        normalizedKey: eventData.key,
+                                        source: 'failed',
+                                        error: eventData.reason,
+                                        allProducts: [],
+                                        currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
+                                    }
+                                }));
+                                break;
+
+                            case 'plan:complete':
+                                // This is the new 'finalData'
+                                // It contains the *entire* plan
+                                setMealPlan(eventData.mealPlan || []);
+                                setResults(eventData.results || {});
+                                setUniqueIngredients(eventData.uniqueIngredients || []);
+                                recalculateTotalCost(eventData.results || {});
+                                
+                                setGenerationStepKey('complete');
+                                setGenerationStatus('Plan generation complete!');
+                                break;
+
+                            case 'error':
+                                throw new Error(eventData.message || 'Unknown backend error');
+                        }
+                    }
+                } // end while(true)
+                
+            } catch (err) {
+                console.error("Batched plan generation failed critically:", err);
+                setError(`Critical failure: ${err.message}`);
+                setGenerationStepKey('error');
+                setDiagnosticLogs(prev => [...prev, {
+                    timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
+                }]);
+            } finally {
+                 setTimeout(() => setLoading(false), 2000); // Wait 2s total
+            }
+        }
+    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]); // Add useBatchedMode dependency
     // --- END: handleGeneratePlan Modifications ---
 
 
@@ -683,7 +787,6 @@ const App = () => {
         );
     }, [mealPlan]); 
 
-    // --- [MODIFIED] Find latestLog to pass to stepper ---
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
 
     // --- Content Views (Progressive Rendering) ---
@@ -857,6 +960,23 @@ const App = () => {
                                 <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
                                 <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
 
+                                {/* --- [NEW] Feature Flag Toggle --- */}
+                                <div className="flex items-center justify-center mt-4 pt-4 border-t">
+                                    <input
+                                        type="checkbox"
+                                        id="batchModeToggle"
+                                        name="batchModeToggle"
+                                        checked={useBatchedMode}
+                                        onChange={(e) => setUseBatchedMode(e.target.checked)}
+                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                                    />
+                                    <label htmlFor="batchModeToggle" className="ml-2 block text-sm text-gray-900" title="Use the new batched endpoint (v2) instead of the per-day loop (v1)">
+                                        Use Batched Generation (v2)
+                                    </label>
+                                </div>
+                                {/* --- [END NEW] --- */}
+
+
                                 <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
                                     {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
                                 </button>
@@ -897,7 +1017,8 @@ const App = () => {
                                                      <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
                                                         <div className="flex-1 min-w-0">
                                                             <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
-                                                            <p className="text-sm">Est. Qty: {results[item.originalIngredient]?.quantityUnits || 'N/A'}</p>
+                                                            {/* [MODIFIED] Use totalGramsRequired from new batched endpoint */}
+                                                            <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${item.totalGramsRequired}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
                                                         </div>
                                                         <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
                                                     </div>
@@ -913,13 +1034,12 @@ const App = () => {
                                 <PlanCalculationErrorPanel />
                             ) : (
                                 <div className="p-0">
-                                    {/* --- [NEW] Render Live Stepper (only when loading) --- */}
+                                    {/* Render Live Stepper (only when loading) */}
                                     {loading && (
                                         <div className="p-4 md:p-6">
                                             <GenerationProgressDisplay
                                                 activeStepKey={generationStepKey}
                                                 errorMsg={error}
-                                                // [NEW] Pass latest log for the sub-text
                                                 latestLog={latestLog} 
                                             />
                                         </div>
@@ -935,15 +1055,9 @@ const App = () => {
                                         </div>
                                     )}
                                     
-                                    {/* These are now always rendered (unless `loading`), allowing progressive updates */}
-                                    {!loading && (
-                                        contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent
-                                    )}
+                                    {/* [MODIFIED] Always render containers, even when loading, to allow progressive population */}
+                                    {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
 
-                                    {/* [NEW] During loading, show the content containers so they can be populated */}
-                                    {loading && (
-                                         contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent
-                                    )}
                                 </div>
                             )}
                             {/* --- [END MODIFICATION] --- */}
@@ -954,7 +1068,6 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                {/* [FIX] Changed setIsOpen={setIsOpen} to setIsOpen={setIsLogOpen} */}
                 <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
@@ -971,5 +1084,4 @@ const App = () => {
 };
 
 export default App;
-
 
