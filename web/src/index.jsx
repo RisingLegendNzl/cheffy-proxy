@@ -9,10 +9,10 @@ import App from './App.jsx';
 const rootElement = document.getElementById('root');
 const root = ReactDOM.createRoot(rootElement);
 
+// [FIX] Removed React.StrictMode
+// This was causing the SSE fetch stream to be double-invoked in development,
+// leading to a "Body is disturbed or locked" error.
 root.render(
-  <React.StrictMode>
     <App />
-  </React.StrictMode>
 );
-
 
