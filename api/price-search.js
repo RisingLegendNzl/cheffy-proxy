@@ -29,9 +29,12 @@ const SWR_SEARCH_MS = 1000 * 60 * 60 * 1; // Stale While Revalidate for 1 hour
 const CACHE_PREFIX_SEARCH = 'search';
 
 // --- TOKEN BUCKET CONFIGURATION ---
+// --- [PERF] Updated BUCKET_REFILL_RATE from 8 to 10 ---
 const BUCKET_CAPACITY = 10;
-const BUCKET_REFILL_RATE = 8; // Tokens per second
+const BUCKET_REFILL_RATE = 10; // Tokens per second
 const BUCKET_RETRY_DELAY_MS = 700; // Delay after a 429 before retrying
+// --- [PERF] Added Token Bucket Max Wait ---
+const TOKEN_BUCKET_MAX_WAIT_MS = 250;
 
 const isKvConfigured = () => {
     return process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -59,6 +62,7 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
     }
 
     const endpointUrl = `https://${host}/${store.toLowerCase()}/product-search/`;
+    // --- [PERF] Instruction: Keep page=1 only. This function already only fetches one page. ---
     const apiParams = { query, page: page.toString(), page_size: '20' };
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -69,7 +73,8 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
             const rapidResp = await axios.get(endpointUrl, {
                 params: apiParams,
                 headers: { 'x-rapidapi-key': RAPID_API_KEY, 'x-rapidapi-host': host },
-                timeout: 30000
+                // --- [PERF] Reduced timeout from 30000ms to 8000ms ---
+                timeout: 8000
             });
             const attemptLatency = Date.now() - attemptStartTime;
             log(`Successfully fetched products for "${query}" (Page ${page}).`, 'SUCCESS', 'RAPID_RESPONSE', { count: rapidResp.data.results?.length || 0, status: rapidResp.status, currentPage: rapidResp.data.current_page, totalPages: rapidResp.data.total_pages, latency_ms: attemptLatency });
@@ -79,7 +84,8 @@ async function _fetchPriceDataFromApi(store, query, page = 1, log = console.log)
             const attemptLatency = Date.now() - attemptStartTime;
             const status = error.response?.status;
             const is429 = status === 429;
-            const isRetryableNetworkError = error.code === 'ECONNABORTED' || error.code === 'EAI_AGAIN';
+            // --- [PERF] Added timeout code check ---
+            const isRetryableNetworkError = error.code === 'ECONNABORTED' || error.code === 'EAI_AGAIN' || error.message.includes('timeout');
 
             log(`RapidAPI fetch failed (Attempt ${attempt + 1})`, 'WARN', 'RAPID_FAILURE', { store, query, page, status: status || 'Network/Timeout', message: error.message, is429, isRetryable: is429 || isRetryableNetworkError, latency_ms: attemptLatency });
 
@@ -124,8 +130,19 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
     const refillRatePerMs = BUCKET_REFILL_RATE / 1000;
     let waitMs = 0;
     const waitStart = Date.now();
+    // --- [PERF] Track total wait time ---
+    let totalWaitTime = 0;
 
     while (true) {
+        // --- [PERF] Check total wait time against max wait ---
+        totalWaitTime = Date.now() - waitStart;
+        if (totalWaitTime > TOKEN_BUCKET_MAX_WAIT_MS) {
+            log(`Token wait exceeded ${TOKEN_BUCKET_MAX_WAIT_MS}ms. Skipping request.`, 'WARN', 'BUCKET_SKIP', { store, query, page, totalWaitTime });
+            const errorData = { error: { message: `Rate limit wait timed out after ${totalWaitTime}ms`, status: 429, details: "Token bucket max wait exceeded" }, results: [], total_pages: 0, current_page: 1 };
+            return { data: errorData, waitMs: totalWaitTime };
+        }
+        // --- [END PERF] ---
+
         const now = Date.now();
         let bucketState = null;
 
@@ -154,13 +171,23 @@ async function fetchStoreSafe(store, query, page = 1, log = console.log) {
             } break;
         } else {
             const tokensNeeded = 1 - currentTokens;
-            const waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs));
+            let waitTime = Math.max(50, Math.ceil(tokensNeeded / refillRatePerMs));
+
+            // --- [PERF] Cap wait time to not exceed maxWait ---
+            const remainingWaitBudget = (TOKEN_BUCKET_MAX_WAIT_MS - totalWaitTime);
+            if (waitTime > remainingWaitBudget && remainingWaitBudget > 0) {
+                // Wait just enough to trigger the timeout on the next loop, plus a small buffer
+                waitTime = remainingWaitBudget + 50;
+            }
+            // --- [END PERF] ---
+
             log(`Rate limiter active. Waiting ${waitTime}ms for ${tokensNeeded.toFixed(2)} tokens...`, 'INFO', 'BUCKET_WAIT');
             await delay(waitTime);
         }
     }
 
-    waitMs = Date.now() - waitStart;
+    // --- [PERF] totalWaitTime is now calculated in the loop ---
+    waitMs = totalWaitTime;
     log(`Acquired token for ${store} (waited ${waitMs}ms)`, 'DEBUG', 'BUCKET_TAKE', { bucket_wait_ms: waitMs });
 
     try {
