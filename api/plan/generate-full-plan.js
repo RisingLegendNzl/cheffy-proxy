@@ -889,7 +889,8 @@ module.exports = async (request, response) => {
 
         // --- Input Validation ---
         if (!formData || typeof formData !== 'object' || Object.keys(formData).length < 5) {
-            throw.new Error("Missing or invalid 'formData' in request body.");
+            // --- [FIX] Corrected 'throw.new' to 'throw new' ---
+            throw new Error("Missing or invalid 'formData' in request body.");
         }
         if (!nutritionalTargets || typeof nutritionalTargets !== 'object' || !nutritionalTargets.calories) {
             throw new Error("Missing or invalid 'nutritionalTargets' in request body.");
