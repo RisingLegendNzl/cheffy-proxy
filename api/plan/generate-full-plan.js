@@ -1,5 +1,5 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
-// [NEW] Batched Orchestrator (V13.1 - Shadow Mode)
+// [NEW] Batched Orchestrator (V13.2 - JSON Guard)
 // Implements the "full plan" architecture:
 // 1. Compute Targets (passed in)
 // 2. Generate ALL meals (batched)
@@ -48,7 +48,7 @@ const USE_SOLVER_V1 = process.env.CHEFFY_USE_SOLVER === '1'; // Default to false
 const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
 const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro';
 
-const getGeminiApiUrl = (modelName) => `https://generativelanguage
+const getGeminiApiUrl = (modelName) = `https://generativelanguage
 .googleapis.com/v1beta/models/${modelName}:generateContent`;
 
 // --- Vercel KV Client ---
@@ -126,17 +126,11 @@ function hashString(str) {
 function createLogger(run_id, responseStream = null) {
     const logs = [];
     
-    /**
-     * Writes a Server-Sent Event (SSE) to the response stream.
-     * @param {string} eventType - The event type (e.g., 'phase:start', 'ingredient:found').
-     * @param {object} data - The JSON-serializable data payload.
-     */
     const writeSseEvent = (eventType, data) => {
         if (!responseStream || responseStream.writableEnded) {
-            return; // Can't write to a closed or non-existent stream
+            return; 
         }
         try {
-            // Ensure data is an object, default to { message } if string
             const payload = (typeof data === 'string') ? { message: data } : data;
             const dataString = JSON.stringify(payload);
             responseStream.write(`event: ${eventType}\n`);
@@ -162,10 +156,8 @@ function createLogger(run_id, responseStream = null) {
             };
             logs.push(logEntry);
             
-            // Send *all* logs as a generic 'log_message' event
             writeSseEvent('log_message', logEntry);
 
-            // Also log to console for server visibility
              const time = new Date(logEntry.timestamp).toLocaleTimeString('en-AU', { hour12: false, timeZone: 'Australia/Brisbane' });
              console.log(`${time} [${logEntry.level}] [${logEntry.tag}] ${logEntry.message}`);
              if (data && (level !== 'DEBUG' || ['ERROR', 'CRITICAL', 'WARN'].includes(level))) {
@@ -203,7 +195,6 @@ function createLogger(run_id, responseStream = null) {
         }
     };
     
-    // Specific phase/event helper
     const sendEvent = (eventType, data) => {
         writeSseEvent(eventType, data);
     };
@@ -247,7 +238,6 @@ async function concurrentlyMap(array, limit, asyncMapper) {
     return Promise.all(results).then(res => res.filter(r => r != null));
 }
 
-// --- fetchLLMWithRetry (Unchanged) ---
 async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
     for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
         const controller = new AbortController();
@@ -258,7 +248,34 @@ async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
             const response = await fetch(url, { ...options, signal: controller.signal });
             clearTimeout(timeout);
 
-            if (response.ok) return response;
+            if (response.ok) {
+                // --- [SOLUTION 2 START] ---
+                // We must read the response as text first to check for non-JSON body
+                // This prevents response.json() from throwing on a 200 OK with text/html
+                const rawText = await response.text();
+                if (!rawText || rawText.trim() === "") {
+                    throw new Error("Response was 200 OK but body was empty.");
+                }
+                
+                // Check if it's likely JSON before parsing
+                const trimmedText = rawText.trim();
+                if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+                    // It looks like JSON, return a new "mock" response object
+                    // with a .json() method that parses the text we already read.
+                    return {
+                        ok: true,
+                        status: response.status,
+                        json: () => Promise.resolve(JSON.parse(trimmedText)), // This can still throw, but it's now caught below
+                        text: () => Promise.resolve(trimmedText)
+                    };
+                } else {
+                    // It's text, not JSON. This is an API error (e.g., rate limit, safety)
+                    log(`${attemptPrefix} Attempt ${attempt}: 200 OK with non-JSON body. Retrying...`, 'WARN', 'HTTP', { body: trimmedText.substring(0, 100) });
+                    // Throw an error to trigger the retry logic
+                    throw new Error(`200 OK with non-JSON body: ${trimmedText.substring(0, 100)}`);
+                }
+                // --- [SOLUTION 2 END] ---
+            }
 
             if (response.status === 429 || response.status >= 500) {
                 log(`${attemptPrefix} Attempt ${attempt}: Received retryable error ${response.status}. Retrying...`, 'WARN', 'HTTP');
@@ -271,6 +288,9 @@ async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
              clearTimeout(timeout);
              if (error.name === 'AbortError') {
                  log(`${attemptPrefix} Attempt ${attempt}: Fetch timed out after ${LLM_REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
+             } else if (error instanceof SyntaxError) {
+                // This catches JSON.parse() errors from our new mock response
+                log(`${attemptPrefix} Attempt ${attempt}: Failed to parse response as JSON. Retrying...`, 'WARN', 'HTTP', { error: error.message });
              } else if (!error.message?.startsWith(`${attemptPrefix} call failed with status`)) {
                 log(`${attemptPrefix} Attempt ${attempt}: Fetch failed: ${error.message}. Retrying...`, 'WARN', 'HTTP');
              } else {
@@ -446,7 +466,6 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
-// [NEW] Batched Meal Planner Prompt
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, dayStart, dayEnd) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for multiple days (Day ${dayStart} to Day ${dayEnd}).
 RULES:
@@ -485,7 +504,6 @@ JSON Structure:
 }
 `;
 
-// [NEW] Batched Grocery Optimizer Prompt (Now includes ALL required fields)
 const GROCERY_OPTIMIZER_SYSTEM_PROMPT = (store, australianTermNote) => `
 You are an expert grocery query optimizer for store: ${store}.
 Your SOLE task is to take a JSON array of ingredient names and generate the full query/validation JSON for each.
@@ -523,7 +541,68 @@ JSON Structure:
 }
 `;
 
-// --- [NEW] Batched Meal Planner ---
+// --- [MODIFIED] tryGenerateLLMPlan with JSON Guard ---
+async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
+    log(`${logPrefix}: Attempting model: ${modelName}`, 'INFO', 'LLM');
+    const apiUrl = getGeminiApiUrl(modelName);
+
+    // fetchLLMWithRetry now returns a response object with a .json() method
+    const response = await fetchLLMWithRetry(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify(payload)
+    }, log, logPrefix);
+
+    const result = await response.json(); // This .json() is now safe from non-JSON 200 OKs
+    const candidate = result.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+
+    if (finishReason === 'MAX_TOKENS') {
+        log(`${logPrefix}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
+        throw new Error(`Model ${modelName} failed: MAX_TOKENS.`);
+    }
+    if (finishReason !== 'STOP') {
+         log(`${logPrefix}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
+         throw new Error(`Model ${modelName} failed: FinishReason was ${finishReason}.`);
+    }
+
+    const content = candidate?.content;
+    if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
+        log(`${logPrefix}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
+        throw new Error(`Model ${modelName} failed: Response missing content.`);
+    }
+
+    const jsonText = content.parts[0].text;
+    log(`${logPrefix} Raw JSON Text`, 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
+
+    try {
+        // --- [SOLUTION 2 START] ---
+        // Add a guard before parsing the *text* from the LLM, in case it refused.
+        const trimmedText = jsonText.trim();
+        if (!trimmedText.startsWith('{') || !trimmedText.endsWith('}')) {
+             throw new Error(`Response text was not a JSON object. (Likely a safety refusal)`);
+        }
+        // --- [SOLUTION 2 END] ---
+
+        const parsed = JSON.parse(trimmedText); // Use trimmedText
+        if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
+        
+        for (const key in expectedJsonShape) {
+            if (!parsed.hasOwnProperty(key)) {
+                throw new Error(`Parsed JSON missing required top-level key: '${key}'.`);
+            }
+            if (Array.isArray(expectedJsonShape[key]) && !Array.isArray(parsed[key])) {
+                throw new Error(`Parsed JSON key '${key}' was not an array.`);
+            }
+        }
+        log(`${logPrefix}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
+        return parsed;
+    } catch (parseError) {
+        log(`Failed to parse/validate ${logPrefix} JSON from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
+        throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
+    }
+}
+
 async function generateMealPlan_Batched(dayStart, dayEnd, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets;
@@ -578,7 +657,6 @@ async function generateMealPlan_Batched(dayStart, dayEnd, formData, nutritionalT
     return parsedResult.days || []; // Return just the array of days
 }
 
-// --- [NEW] Batched Grocery Query Generator ---
 async function generateGroceryQueries_Batched(aggregatedIngredients, store, log) {
     if (!aggregatedIngredients || aggregatedIngredients.length === 0) {
         log("generateGroceryQueries_Batched called with no ingredients. Returning empty.", 'WARN', 'LLM');
@@ -596,7 +674,6 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
 
     const systemPrompt = GROCERY_OPTIMIZER_SYSTEM_PROMPT(store, australianTermNote);
     
-    // Pass the aggregated list as the user query
     let userQuery = `Generate query JSON for the following ingredients:\n${JSON.stringify(aggregatedIngredients)}`;
 
     const logPrefix = `GroceryOptimizerFullPlan`;
@@ -626,7 +703,6 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
         }
     }
     
-    // [NEW] Post-processing to ensure totalGramsRequired is correct
     if (parsedResult && parsedResult.ingredients && parsedResult.ingredients.length > 0) {
         const inputMap = new Map(aggregatedIngredients.map(item => [item.originalIngredient, item.requested_total_g]));
         parsedResult.ingredients.forEach(ing => {
@@ -643,7 +719,6 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
     return parsedResult;
 }
 
-// --- Chef AI Prompts (Unchanged) ---
 const CHEF_SYSTEM_PROMPT = (store) => `
 You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
 RULES:
@@ -666,6 +741,7 @@ JSON Structure:
 }
 `;
 
+// --- [MODIFIED] tryGenerateChefRecipe with JSON Guard ---
 async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
     log(`Chef AI [${mealName}]: Attempting model: ${modelName}`, 'INFO', 'LLM_CHEF');
     const apiUrl = getGeminiApiUrl(modelName);
@@ -693,7 +769,15 @@ async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
 
     const jsonText = content.parts[0].text;
     try {
-        const parsed = JSON.parse(jsonText);
+        // --- [SOLUTION 2 START] ---
+        // Add a guard before parsing the *text* from the LLM, in case it refused.
+        const trimmedText = jsonText.trim();
+        if (!trimmedText.startsWith('{') || !trimmedText.endsWith('}')) {
+             throw new Error(`Response text was not a JSON object. (Likely a safety refusal)`);
+        }
+        // --- [SOLUTION 2 END] ---
+        
+        const parsed = JSON.parse(trimmedText); // Use trimmedText
         if (!parsed || typeof parsed.description !== 'string' || !Array.isArray(parsed.instructions) || parsed.instructions.length === 0) {
              throw new Error("Invalid JSON structure: 'description' (string) or 'instructions' (array) missing/empty.");
         }
@@ -970,7 +1054,7 @@ module.exports = async (request, response) => {
                     sendEvent('ingredient:failed', { key: ingredient.normalizedKey, reason: 'No product match found.' });
                 } else { 
                     log(`[${ingredientKey}] Market Run success via '${acceptedQueryType}' query.`, 'DEBUG', 'MARKET_RUN');
-                    sendEvent('ingredient:found', { key: ingredient.normalizedKey, productId: result.currentSelectionURL });
+                    sendEvent('ingredient:found', { key: ingredient.normalizedKey, data: { ...ingredient, ...result } });
                 }
 
                 telemetry.used = acceptedQueryType;
@@ -986,7 +1070,6 @@ module.exports = async (request, response) => {
             }
         };
         
-        // Find the full ingredient plan for each item in the map
         const fullIngredientPlan = aggregatedIngredients.map(aggItem => {
             const planDetails = ingredientPlan.find(p => p.originalIngredient === aggItem.originalIngredient);
             if (!planDetails) {
@@ -1000,11 +1083,10 @@ module.exports = async (request, response) => {
                      allowedCategories: ['pantry', 'produce', 'meat', 'dairy', 'frozen']
                  };
             }
-            // Merge the requested_total_g from aggregator with the plan details from the LLM
             return {
                 ...planDetails,
                 normalizedKey: aggItem.normalizedKey,
-                totalGramsRequired: aggItem.requested_total_g, // This is the TRUE total
+                totalGramsRequired: aggItem.requested_total_g, 
                 dayRefs: aggItem.dayRefs
             };
         });
@@ -1065,7 +1147,6 @@ module.exports = async (request, response) => {
             nutritionResults.forEach(item => {
                  if (item && item.normalizedKey && item.nut) {
                     nutritionDataMap.set(item.normalizedKey, item.nut);
-                     // Attach nutrition data back to the *product* inside the fullResultsMap
                      const result = fullResultsMap.get(item.normalizedKey);
                      if (result && result.source === 'discovery' && Array.isArray(result.allProducts)) {
                          let productToAttach = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
@@ -1098,14 +1179,12 @@ module.exports = async (request, response) => {
 
 
         // --- Phase 5: Solver (Calculate Final Macros) ---
-        // This phase implements the "Shadow Mode" logic
         sendEvent('phase:start', { name: 'solver', description: 'Calculating final macros...' });
         const solverStartTime = Date.now();
         finalMealPlan = []; // Reset final plan
 
-        // This is the core "Solver" logic (V1), which is a deterministic calculator
         const computeItemMacros = (item, mealItems) => {
-             const normalizedKey = item.normalizedKey; // Already normalized
+             const normalizedKey = item.normalizedKey; 
              const { value: gramsOrMl } = normalizeToGramsOrMl(item, log);
              if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0) {
                  log(`[Solver] Invalid quantity for item '${item.key}'.`, 'ERROR', 'CALC', { item, gramsOrMl });
@@ -1146,7 +1225,6 @@ module.exports = async (request, response) => {
             let mealsForThisDay = JSON.parse(JSON.stringify(day.meals)); // Deep copy for safety
             const targetCalories = nutritionalTargets.calories;
             
-            // --- Helper to calculate totals for a given meal list ---
             const calculateTotals = (mealList, dayNum) => {
                 let totalKcal = 0, totalP = 0, totalF = 0, totalC = 0;
                 let planHasInvalidItems = false;
@@ -1157,8 +1235,8 @@ module.exports = async (request, response) => {
                          mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                      }
                      meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC;
-                     if (meal.subtotal_kcal <= 0) {
-                         log(`[Solver] Meal "${meal.name}" (Day ${dayNum}) has zero/negative kcal.`, 'WARN', 'CALC');
+                     if (meal.subtotal_kcal <= 0 && meal.items.length > 0) { // Only log if not an empty meal
+                         log(`[Solver] Meal "${meal.name}" (Day ${dayNum}) has zero/negative kcal.`, 'WARN', 'CALC', { items: meal.items.map(i => i.key) });
                          planHasInvalidItems = true;
                      }
                      totalKcal += mealKcal; totalP += mealP; totalF += mealF; totalC += mealC;
@@ -1167,12 +1245,10 @@ module.exports = async (request, response) => {
             };
 
             // --- 1. Run Solver V1 (Shadow Path) ---
-            // This just calculates totals based on real data, no scaling.
             const solverV1Meals = JSON.parse(JSON.stringify(mealsForThisDay));
             const solverV1Totals = calculateTotals(solverV1Meals, day.dayNumber);
 
             // --- 2. Run Reconciler V0 (Live Path by default) ---
-            // This uses the old scaling logic from `reconcileNonProtein`.
             const reconcilerGetItemMacros = (item) => computeItemMacros(item, mealsForThisDay.find(m => m.items.some(i => i.key === item.key))?.items || []);
             const { adjusted, factor, meals: scaledMeals } = reconcileNonProtein({
                 meals: mealsForThisDay.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty: i.qty_value, unit: i.qty_unit })) })),
@@ -1234,15 +1310,12 @@ module.exports = async (request, response) => {
         // --- Phase 7: Finalize ---
         sendEvent('phase:start', { name: 'finalize', description: 'Assembling final plan...' });
         
-        // Clean up meal items for the frontend
         finalMealPlan.forEach(day => {
             day.meals.forEach(meal => {
-                // Round final macros
                 meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
                 meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
                 meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
                 meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
-                // Clean up items
                 meal.items = meal.items.map(item => ({
                     key: item.key,
                     qty: item.qty_value,
@@ -1253,14 +1326,13 @@ module.exports = async (request, response) => {
             });
         });
 
-        // Assemble final response object
         const responseData = {
             message: `Successfully generated full ${numDays}-day plan.`,
-            mealPlan: finalMealPlan, // This is an array of day objects
+            mealPlan: finalMealPlan,
             results: Object.fromEntries(fullResultsMap.entries()),
             uniqueIngredients: fullIngredientPlan.map(({ normalizedKey, dayRefs, ...rest }) => ({
                 ...rest,
-                dayRefs: Array.from(dayRefs) // Convert Set to Array
+                dayRefs: Array.from(dayRefs) 
             })),
         };
 
@@ -1289,7 +1361,6 @@ module.exports = async (request, response) => {
         logErrorAndClose(error.message, errorCode);
         return; 
     }
-    // Ensure the stream is closed if execution somehow reaches here
     finally {
         if (response && !response.writableEnded) {
             try { response.end(); } catch {}
