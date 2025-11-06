@@ -25,7 +25,6 @@ import RecipeModal from './components/RecipeModal';
 import EmojiIcon from './components/EmojiIcon';
 
 // --- CONFIGURATION ---
-// [MODIFIED] Add new batched endpoint and keep old ones for feature flag
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
 const ORCHESTRATOR_DAY_API_URL = '/api/plan/day'; // Old per-day endpoint
 const ORCHESTRATOR_FULL_PLAN_API_URL = '/api/plan/generate-full-plan'; // New batched endpoint
@@ -41,68 +40,47 @@ const MOCK_PRODUCT_TEMPLATE = {
     url: "#api_down_mock_product", unit_price_per_100: 1.59,
 };
 
-// --- [FIX] Firebase Config and App ID (Guarded Initialization) ---
-const firebaseConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : import.meta.env.VITE_FIREBASE_CONFIG;
-const appId = typeof __app_id !== 'undefined' ? __app_id : (import.meta.env.VITE_APP_ID || 'default-app-id');
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : import.meta.env.VITE_INITIAL_AUTH_TOKEN;
 
-
+// --- [MODIFIED] Firebase Config variables moved inside useEffect ---
+// We no longer define firebaseConfigStr, appId, or initialAuthToken here
+// They will be read at runtime inside the useEffect hook.
 let firebaseConfig = null;
-let firebaseInitializationError = null; // Store any init error
-
-try {
-    if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
-        firebaseConfig = JSON.parse(firebaseConfigStr);
-    } else {
-        console.warn("[FIREBASE] __firebase_config is not defined or is empty.");
-        firebaseInitializationError = 'Firebase config environment variable is missing.';
-    }
-} catch (e) {
-    console.error("CRITICAL: Failed to parse Firebase config:", e);
-    firebaseInitializationError = `Failed to parse Firebase config: ${e.message}`;
-}
-// --- [END FIX] ---
+let firebaseInitializationError = null;
+let globalAppId = 'default-app-id'; // Provide a default
+// --- [END MODIFICATION] ---
 
 
 // --- SSE Stream Parser ---
-// [MODIFIED] This function is now fully generic and reusable for both old and new endpoints.
 function processSseChunk(value, buffer, decoder) {
-    // Append new data to buffer
     const chunk = decoder.decode(value, { stream: true });
     buffer += chunk;
     
     const events = [];
-    // Split buffer by double newline, which separates SSE messages
     let lines = buffer.split('\n\n');
     
-    // Process all complete messages, leaving the last partial message in the buffer
     for (let i = 0; i < lines.length - 1; i++) {
         const message = lines[i];
         if (message.trim().length === 0) continue;
         
-        let eventType = 'message'; // Default event type
+        let eventType = 'message';
         let eventData = '';
         
-        // Process each line of the message
         message.split('\n').forEach(line => {
             if (line.startsWith('event: ')) {
                 eventType = line.substring(7).trim();
             } else if (line.startsWith('data: ')) {
-                // Append data, handling multi-line data fields
                 eventData += line.substring(6).trim();
             }
         });
 
         if (eventData) {
             try {
-                // All our events are JSON
                 const jsonData = JSON.parse(eventData);
                 events.push({ eventType, data: jsonData });
             } catch (e) {
                 console.error("SSE: Failed to parse JSON data:", eventData, e);
-                // Push a log-compatible error
                 events.push({
-                    eventType: 'log_message', // Use 'log_message' for new handler
+                    eventType: 'log_message', 
                     data: {
                         timestamp: new Date().toISOString(),
                         level: 'CRITICAL',
@@ -115,7 +93,6 @@ function processSseChunk(value, buffer, decoder) {
         }
     }
     
-    // The last element in 'lines' is the incomplete message, so it becomes the new buffer.
     let newBuffer = lines[lines.length - 1];
     return { events, newBuffer };
 }
@@ -178,7 +155,6 @@ const App = () => {
 
     const [selectedMeal, setSelectedMeal] = useState(null);
 
-    // --- [NEW] Feature Flag State ---
     const [useBatchedMode, setUseBatchedMode] = useState(true);
 
     // --- Firebase State ---
@@ -187,8 +163,40 @@ const App = () => {
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
 
+    // --- [MODIFIED] Moved App ID to state ---
+    const [appId, setAppId] = useState('default-app-id');
+
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
+        // --- [MODIFIED] Read global config variables at RUNTIME ---
+        const firebaseConfigStr = typeof __firebase_config !== 'undefined' 
+            ? __firebase_config 
+            : import.meta.env.VITE_FIREBASE_CONFIG;
+            
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' 
+            ? __initial_auth_token 
+            : import.meta.env.VITE_INITIAL_AUTH_TOKEN;
+
+        const currentAppId = typeof __app_id !== 'undefined' 
+            ? __app_id 
+            : (import.meta.env.VITE_APP_ID || 'default-app-id');
+        
+        setAppId(currentAppId); // Set app ID for the rest of the app
+        globalAppId = currentAppId; // Also set the global fallback
+        // --- [END MODIFICATION] ---
+        
+        try {
+            if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
+                firebaseConfig = JSON.parse(firebaseConfigStr);
+            } else {
+                console.warn("[FIREBASE] __firebase_config is not defined or is empty.");
+                firebaseInitializationError = 'Firebase config environment variable is missing.';
+            }
+        } catch (e) {
+            console.error("CRITICAL: Failed to parse Firebase config:", e);
+            firebaseInitializationError = `Failed to parse Firebase config: ${e.message}`;
+        }
+        
         if (firebaseInitializationError) {
             console.error("[FIREBASE] Firebase init failed:", firebaseInitializationError);
             setStatusMessage({ text: firebaseInitializationError, type: 'error' });
@@ -214,6 +222,7 @@ const App = () => {
                         console.log("[FIREBASE] User is signed out. Attempting sign-in...");
                         setUserId(null);
                         try {
+                            // Use the token read at runtime
                             if (initialAuthToken) {
                                 console.log("[FIREBASE] Signing in with custom token...");
                                 await signInWithCustomToken(authInstance, initialAuthToken);
@@ -241,15 +250,16 @@ const App = () => {
                 setIsAuthReady(true);
             }
         }
-    }, [isAuthReady]); // Note: initialAuthToken is a const, so it's stable
+    }, [isAuthReady]); // This effect now runs only once, correctly.
 
 
     // --- Load Profile on Auth Ready ---
     const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
-        if (!isAuthReady || !userId || !db) {
-            const msg = 'Firebase not ready. Cannot load profile.';
+        // [MODIFIED] Read appId from state
+        if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
+            const msg = 'Firebase not ready or App ID is missing. Cannot load profile.';
             if (!isInitialLoad) setStatusMessage({ text: msg, type: 'error' });
-            console.error(`[FIREBASE LOAD] ${msg}`);
+            console.error(`[FIREBASE LOAD] ${msg}`, { isAuthReady, userId: !!userId, db: !!db, appId });
             return;
         }
         if (!isInitialLoad) {
@@ -267,7 +277,7 @@ const App = () => {
                 console.log('[FIREBASE LOAD] Profile data found:', loadedData);
                 
                 if (loadedData && typeof loadedData === 'object' && Object.keys(loadedData).length > 0) {
-                     setFormData(prev => ({ ...prev, ...loadedData })); // [FIX] Merge, don't overwrite
+                     setFormData(prev => ({ ...prev, ...loadedData }));
                      if (!isInitialLoad) {
                          setStatusMessage({ text: 'Profile loaded successfully!', type: 'success' });
                      } else {
@@ -298,13 +308,13 @@ const App = () => {
                 }, 3000);
             }
         }
-    }, [isAuthReady, userId, db, appId]);
+    }, [isAuthReady, userId, db, appId]); // [MODIFIED] Added appId dependency
 
     useEffect(() => {
-        if (isAuthReady && userId && db) {
+        if (isAuthReady && userId && db && appId) {
             handleLoadProfile(true);
         }
-    }, [isAuthReady, userId, db, handleLoadProfile]);
+    }, [isAuthReady, userId, db, appId, handleLoadProfile]); // [MODIFIED] Added appId dependency
 
 
     // --- Handlers ---
@@ -420,8 +430,10 @@ const App = () => {
 
                             for (const event of events) {
                                 const eventData = event.data;
+                                // [MODIFIED] Handle both 'message' (old) and 'log_message' (new)
                                 switch (event.eventType) {
                                     case 'message':
+                                    case 'log_message':
                                         setDiagnosticLogs(prev => [...prev, eventData]);
                                         if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
                                             setGenerationStepKey('market');
@@ -447,6 +459,13 @@ const App = () => {
                                         setResults({ ...accumulatedResults }); 
                                         setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
                                         recalculateTotalCost(accumulatedResults);
+                                        break;
+                                    // [NEW] Handle new event types gracefully, even if they show up
+                                    case 'phase:start':
+                                    case 'ingredient:found':
+                                    case 'ingredient:failed':
+                                        // Just log them
+                                        setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'DEBUG', tag: 'SSE_UNHANDLED', message: `Received unhandled v2 event '${event.eventType}' in v1 loop.`}]);
                                         break;
                                 }
                             }
@@ -495,20 +514,29 @@ const App = () => {
                 });
 
                 if (!planResponse.ok) {
-                    const errorData = await planResponse.json();
-                    throw new Error(`Full plan request failed: ${errorData.message || 'Unknown server error'}`);
+                    // Try to parse error response as JSON, fallback to text
+                    let errorMsg = 'Unknown server error';
+                    try {
+                        const errorData = await planResponse.json();
+                        errorMsg = errorData.message || JSON.stringify(errorData);
+                    } catch (e) {
+                        errorMsg = await planResponse.text();
+                    }
+                    throw new Error(`Full plan request failed (${planResponse.status}): ${errorMsg}`);
                 }
+
 
                 const reader = planResponse.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
+                let planComplete = false;
 
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) {
-                        // Check if final data was ever received
-                        if (generationStepKey !== 'complete' && generationStepKey !== 'error') {
-                            throw new Error("Stream ended unexpectedly before 'plan:complete' event.");
+                        if (!planComplete && !error) {
+                            console.error("Stream ended unexpectedly before 'plan:complete' event.");
+                            throw new Error("Stream ended unexpectedly. The plan may be incomplete.");
                         }
                         break;
                     }
@@ -540,7 +568,7 @@ const App = () => {
                                     if(eventData.description) setGenerationStatus(eventData.description);
                                 }
                                 break;
-
+                            
                             case 'ingredient:found':
                                 // Progressively update results as they are found
                                 setResults(prev => ({
@@ -556,7 +584,6 @@ const App = () => {
                                     error: eventData.reason,
                                 };
                                 setFailedIngredientsHistory(prev => [...prev, failedItem]);
-                                // Also add a placeholder to results
                                 setResults(prev => ({
                                     ...prev,
                                     [eventData.key]: {
@@ -571,8 +598,7 @@ const App = () => {
                                 break;
 
                             case 'plan:complete':
-                                // This is the new 'finalData'
-                                // It contains the *entire* plan
+                                planComplete = true; // Mark as complete
                                 setMealPlan(eventData.mealPlan || []);
                                 setResults(eventData.results || {});
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
@@ -596,7 +622,7 @@ const App = () => {
                     timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
                 }]);
             } finally {
-                 setTimeout(() => setLoading(false), 2000); // Wait 2s total
+                 setTimeout(() => setLoading(false), 2000);
             }
         }
     }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]); // Add useBatchedMode dependency
@@ -701,9 +727,10 @@ const App = () => {
     }, [diagnosticLogs]); 
 
     const handleSaveProfile = useCallback(async () => {
-        if (!isAuthReady || !userId || !db) {
-            setStatusMessage({ text: 'Firebase not ready. Cannot save profile.', type: 'error' });
-            console.error('[FIREBASE SAVE] Auth not ready or DB/userId missing.');
+        // [MODIFIED] Read appId from state
+        if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
+            setStatusMessage({ text: 'Firebase not ready or App ID missing. Cannot save profile.', type: 'error' });
+            console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
             return;
         }
         setStatusMessage({ text: 'Saving profile...', type: 'info' });
@@ -721,7 +748,7 @@ const App = () => {
                  setStatusMessage(prev => prev.text === 'Saving profile...' ? { text: '', type: '' } : prev);
              }, 3000);
         }
-    }, [isAuthReady, userId, db, formData, appId]); 
+    }, [isAuthReady, userId, db, formData, appId]); // [MODIFIED] Added appId dependency
 
 
     const handleChange = (e) => {
@@ -792,7 +819,6 @@ const App = () => {
     // --- Content Views (Progressive Rendering) ---
     const priceComparisonContent = (
         <div className="space-y-0 p-4">
-            {/* Show final/critical error only when not loading */}
             {error && !loading && (
                  <div className="p-4 bg-red-50 text-red-800 rounded-lg">
                     <AlertTriangle className="inline w-6 h-6 mr-2" />
@@ -801,7 +827,6 @@ const App = () => {
                  </div>
             )}
 
-            {/* Cost summary is hidden until loading is false */}
             {!loading && Object.keys(results).length > 0 && (
                 <>
                     <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600 mb-6">
@@ -846,7 +871,6 @@ const App = () => {
                     </div>
                 </>
             )}
-            {/* Show 'Generate plan' message only if not loading, no results, and no critical error */}
             {!loading && Object.keys(results).length === 0 && !error && (
                 <div className="p-6 text-center text-gray-500">Generate a plan to see results.</div>
             )}
@@ -960,7 +984,6 @@ const App = () => {
                                 <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
                                 <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
 
-                                {/* --- [NEW] Feature Flag Toggle --- */}
                                 <div className="flex items-center justify-center mt-4 pt-4 border-t">
                                     <input
                                         type="checkbox"
@@ -974,7 +997,6 @@ const App = () => {
                                         Use Batched Generation (v2)
                                     </label>
                                 </div>
-                                {/* --- [END NEW] --- */}
 
 
                                 <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
@@ -988,7 +1010,6 @@ const App = () => {
 
                         {/* --- RESULTS VIEW --- */}
                         <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
-                            {/* Mobile Menu Button */}
                             <div className="p-4 md:hidden flex justify-end">
                                 <button className="bg-indigo-600 text-white p-2 rounded-full shadow" onClick={() => setIsMenuOpen(true)}><Menu /></button>
                             </div>
@@ -1017,8 +1038,7 @@ const App = () => {
                                                      <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
                                                         <div className="flex-1 min-w-0">
                                                             <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
-                                                            {/* [MODIFIED] Use totalGramsRequired from new batched endpoint */}
-                                                            <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${item.totalGramsRequired}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
+                                                            <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGramsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
                                                         </div>
                                                         <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
                                                     </div>
@@ -1029,12 +1049,10 @@ const App = () => {
                                 </div>
                             </div>
 
-                            {/* --- [MODIFIED] Main Content Area (Progressive Rendering) --- */}
                             {hasInvalidMeals ? (
                                 <PlanCalculationErrorPanel />
                             ) : (
                                 <div className="p-0">
-                                    {/* Render Live Stepper (only when loading) */}
                                     {loading && (
                                         <div className="p-4 md:p-6">
                                             <GenerationProgressDisplay
@@ -1045,7 +1063,6 @@ const App = () => {
                                         </div>
                                     )}
 
-                                    {/* View Toggles (only show if plan data exists AND not loading) */}
                                     {(results && Object.keys(results).length > 0 && !loading) && (
                                         <div className="flex space-x-2 p-4">
                                             <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
@@ -1055,12 +1072,10 @@ const App = () => {
                                         </div>
                                     )}
                                     
-                                    {/* [MODIFIED] Always render containers, even when loading, to allow progressive population */}
                                     {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
 
                                 </div>
                             )}
-                            {/* --- [END MODIFICATION] --- */}
                         </div>
                     </div>
                 </div>
@@ -1084,4 +1099,5 @@ const App = () => {
 };
 
 export default App;
+
 
