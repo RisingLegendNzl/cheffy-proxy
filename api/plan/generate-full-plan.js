@@ -613,8 +613,10 @@ async function generateMealPlan_Batched(dayStart, dayEnd, formData, nutritionalT
 
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:days${dayStart}-${dayEnd}:${profileHash}`;
+    
+    // --- [FIX 1] Check cache and return the array from the object if it exists ---
     const cached = await cacheGet(cacheKey, log);
-    if (cached) return cached;
+    if (cached) return cached; // We will now cache *only* the array
     log(`Cache MISS for key: ${cacheKey.split(':').pop()}`, 'INFO', 'CACHE');
 
     const mealTypesMap = {'3':['B','L','D'],'4':['B','L','D','S1'],'5':['B','L','D','S1','S2']};
@@ -655,10 +657,13 @@ async function generateMealPlan_Batched(dayStart, dayEnd, formData, nutritionalT
             throw new Error(`Meal Plan generation failed for Days ${dayStart}-${dayEnd}: Both AI models failed. Last error: ${fallbackError.message}`);
         }
     }
-    if (parsedResult && parsedResult.days && parsedResult.days.length > 0) {
-        await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
+    
+    // --- [FIX 1] Cache *only* the days array ---
+    const daysArray = parsedResult.days || [];
+    if (daysArray.length > 0) {
+        await cacheSet(cacheKey, daysArray, TTL_PLAN_MS, log);
     }
-    return parsedResult.days || []; // Return just the array of days
+    return daysArray; // Return just the array of days
 }
 
 async function generateGroceryQueries_Batched(aggregatedIngredients, store, log) {
@@ -884,7 +889,7 @@ module.exports = async (request, response) => {
 
         // --- Input Validation ---
         if (!formData || typeof formData !== 'object' || Object.keys(formData).length < 5) {
-            throw new Error("Missing or invalid 'formData' in request body.");
+            throw.new Error("Missing or invalid 'formData' in request body.");
         }
         if (!nutritionalTargets || typeof nutritionalTargets !== 'object' || !nutritionalTargets.calories) {
             throw new Error("Missing or invalid 'nutritionalTargets' in request body.");
@@ -912,7 +917,10 @@ module.exports = async (request, response) => {
         const fullMealPlan = dailyMealPlansArrays.flat(); // This is the master list of day objects
         
         dietitian_ms = Date.now() - dietitianStartTime;
-        sendEvent('phase:end', { name: 'meals', duration_ms: dietitian_ms, mealCount: fullMealPlan.reduce((acc, day) => acc + day.meals.length, 0) });
+        
+        // --- [FIX 2] Add optional chaining to safely count meals ---
+        const mealCount = fullMealPlan.reduce((acc, day) => acc + (day?.meals?.length || 0), 0);
+        sendEvent('phase:end', { name: 'meals', duration_ms: dietitian_ms, mealCount: mealCount });
         
         if (fullMealPlan.length !== numDays) {
             throw new Error(`Meal Planner AI failed: Expected ${numDays} days, but only received ${fullMealPlan.length}.`);
@@ -924,6 +932,9 @@ module.exports = async (request, response) => {
         const ingredientMap = new Map(); // Use normalizedKey as the key
 
         for (const day of fullMealPlan) {
+            // --- [FIX 2] Add optional chaining safety check ---
+            if (!day || !day.meals) continue; 
+            
             for (const meal of day.meals) {
                 // Add normalizedKey to all items *early*
                 meal.items.forEach(item => { if(item && item.key) { item.normalizedKey = normalizeKey(item.key); } });
@@ -1240,12 +1251,15 @@ module.exports = async (request, response) => {
                 let planHasInvalidItems = false;
                 for (const meal of mealList) {
                      let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
-                     for (const item of meal.items) {
-                         const macros = computeItemMacros(item, meal.items);
-                         mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
+                     // --- [FIX 2] Add optional chaining safety check ---
+                     if (meal && meal.items) {
+                         for (const item of meal.items) {
+                             const macros = computeItemMacros(item, meal.items);
+                             mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
+                         }
                      }
                      meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC;
-                     if (meal.subtotal_kcal <= 0 && meal.items.length > 0) { // Only log if not an empty meal
+                     if (meal.subtotal_kcal <= 0 && meal.items?.length > 0) { // Only log if not an empty meal
                          log(`[Solver] Meal "${meal.name}" (Day ${dayNum}) has zero/negative kcal.`, 'WARN', 'CALC', { items: meal.items.map(i => i.key) });
                          planHasInvalidItems = true;
                      }
@@ -1261,7 +1275,8 @@ module.exports = async (request, response) => {
             // --- 2. Run Reconciler V0 (Live Path by default) ---
             const reconcilerGetItemMacros = (item) => computeItemMacros(item, mealsForThisDay.find(m => m.items.some(i => i.key === item.key))?.items || []);
             const { adjusted, factor, meals: scaledMeals } = reconcileNonProtein({
-                meals: mealsForThisDay.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty: i.qty_value, unit: i.qty_unit })) })),
+                // --- [FIX 2] Add optional chaining safety check ---
+                meals: mealsForThisDay.map(m => ({ ...m, items: (m.items || []).map(i => ({ ...i, qty: i.qty_value, unit: i.qty_unit })) })),
                 targetKcal: targetCalories,
                 getItemMacros: reconcilerGetItemMacros,
                 tolPct: 5
@@ -1296,23 +1311,30 @@ module.exports = async (request, response) => {
         sendEvent('phase:start', { name: 'writer', description: 'Writing recipes...' });
         const writerStartTime = Date.now();
         
-        const allMeals = finalMealPlan.flatMap(day => day.meals);
+        // --- [FIX 2] Add optional chaining safety check ---
+        const allMeals = finalMealPlan.flatMap(day => day?.meals || []);
         const recipeResults = await concurrentlyMap(allMeals, 6, (meal) => generateChefInstructions(meal, store, log));
         
         const recipeMap = new Map();
         recipeResults.forEach((result, index) => {
             if (result && !result._error) {
                 const originalMeal = allMeals[index];
-                const dayNumber = finalMealPlan.find(d => d.meals.includes(originalMeal))?.dayNumber;
-                recipeMap.set(`${dayNumber}:${originalMeal.name}`, result);
+                // --- [FIX 2] Add optional chaining safety check ---
+                const dayNumber = finalMealPlan.find(d => d?.meals?.includes(originalMeal))?.dayNumber;
+                if (dayNumber) {
+                    recipeMap.set(`${dayNumber}:${originalMeal.name}`, result);
+                }
             }
         });
 
         for (const day of finalMealPlan) {
-            day.meals = day.meals.map(meal => {
-                const recipe = recipeMap.get(`${day.dayNumber}:${meal.name}`);
-                return recipe || { ...meal, ...MOCK_RECIPE_FALLBACK };
-            });
+            // --- [FIX 2] Add optional chaining safety check ---
+            if (day && day.meals) {
+                day.meals = day.meals.map(meal => {
+                    const recipe = recipeMap.get(`${day.dayNumber}:${meal.name}`);
+                    return recipe || { ...meal, ...MOCK_RECIPE_FALLBACK };
+                });
+            }
         }
         const writer_ms = Date.now() - writerStartTime;
         sendEvent('phase:end', { name: 'writer', duration_ms: writer_ms, recipesGenerated: recipeMap.size });
@@ -1321,19 +1343,23 @@ module.exports = async (request, response) => {
         sendEvent('phase:start', { name: 'finalize', description: 'Assembling final plan...' });
         
         finalMealPlan.forEach(day => {
-            day.meals.forEach(meal => {
-                meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
-                meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
-                meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
-                meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
-                meal.items = meal.items.map(item => ({
-                    key: item.key,
-                    qty: item.qty_value,
-                    unit: item.qty_unit,
-                    stateHint: item.stateHint,
-                    methodHint: item.methodHint
-                }));
-            });
+            // --- [FIX 2] Add optional chaining safety check ---
+            if (day && day.meals) {
+                day.meals.forEach(meal => {
+                    meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
+                    meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
+                    meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
+                    meal.subtotal_carbs = Math.round(meal.subtotal_carbs || 0);
+                    // --- [FIX 2] Add optional chaining safety check ---
+                    meal.items = (meal.items || []).map(item => ({
+                        key: item.key,
+                        qty: item.qty_value,
+                        unit: item.qty_unit,
+                        stateHint: item.stateHint,
+                        methodHint: item.methodHint
+                    }));
+                });
+            }
         });
 
         const responseData = {
