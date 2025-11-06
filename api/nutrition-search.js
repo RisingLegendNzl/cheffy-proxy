@@ -36,11 +36,12 @@ const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
 // --- [MODIFIED] Cache key now includes CANON_VERSION ---
 const CACHE_PREFIX = `nutri:v7:cv:${CANON_VERSION}`;
-const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;
-const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;
-const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 * 30;
-const TTL_NAME_MS  = 1000 * 60 * 60 * 24 * 7;
-const TTL_BAR_MS   = 1000 * 60 * 60 * 24 * 30;
+// --- [PERF] TTLs match instructions (7d name, 30d barcode) ---
+const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
+const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
+const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const TTL_NAME_MS  = 1000 * 60 * 60 * 24 * 7;  // 7 days
+const TTL_BAR_MS   = 1000 * 60 * 60 * 24 * 30; // 30 days
 const KJ_TO_KCAL   = 4.184;
 
 // ---------- KV + Memory cache ----------
@@ -67,7 +68,10 @@ async function cacheSet(key, val, ttl) {
 // --- [DELETED] Old local normalizeKey function (now imported) ---
 const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
-function withTimeout(promise, ms) { return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); }
+// --- [PERF] Reduced default timeout to 8000ms ---
+function withTimeout(promise, ms = 8000) { 
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); 
+}
 function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
 
 // --- [DELETED] Old CANON object and canonical() function ---
@@ -115,11 +119,12 @@ async function avocavoIngredient(q) {
   const key = `${CACHE_PREFIX}:avq:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
+    // --- [PERF] Use default 8000ms timeout ---
     const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/ingredient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
       body: JSON.stringify({ ingredient: q })
-    }), 10000);
+    }));
     const j = await res.json().catch(() => null);
     const n = j?.nutrition || j?.result?.nutrition || j?.results?.[0]?.nutrition || null;
     const out = extractAvocavoNutrition(n, j);
@@ -133,11 +138,12 @@ async function avocavoUPC(barcode) {
   const key = `${CACHE_PREFIX}:avupc:${normalizeKey(barcode)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
+    // --- [PERF] Use default 8000ms timeout ---
     const res = await withTimeout(fetch(`${AVOCAVO_URL}/upc/ingredient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
       body: JSON.stringify({ upc: String(barcode) })
-    }), 10000);
+    }));
     const j = await res.json().catch(() => null);
     const n = j?.product?.nutrition || j?.nutrition || null;
     const out = extractAvocavoNutrition(n, j);
@@ -147,7 +153,10 @@ async function avocavoUPC(barcode) {
   } catch { softLog('avocavo:upc timeout', barcode); return null; }
 }
 async function tryAvocavo(arg, isUPC) {
-  try { return await withTimeout(isUPC ? avocavoUPC(arg) : avocavoIngredient(arg), 3500); }
+  try { 
+    // --- [PERF] Keep shorter 3.5s timeout for Promise.race ---
+    return await withTimeout(isUPC ? avocavoUPC(arg) : avocavoIngredient(arg), 3500); 
+  }
   catch { return null; }
 }
 
@@ -157,7 +166,8 @@ async function offByBarcode(barcode) {
   const c = await cacheGet(key); if (c) return c;
   try {
     const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json`;
-    const res = await withTimeout(fetch(url), 12000);
+    // --- [PERF] Use default 8000ms timeout ---
+    const res = await withTimeout(fetch(url));
     if (!res.ok) return null;
     const json = await res.json().catch(() => null);
     if (!json || !json.product) return null;
@@ -180,7 +190,8 @@ async function offByQuery(q) {
   const c = await cacheGet(key); if (c) return c;
   try {
     const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=3`;
-    const res = await withTimeout(fetch(url), 12000);
+    // --- [PERF] Use default 8000ms timeout ---
+    const res = await withTimeout(fetch(url));
     if (!res.ok) return null;
     const json = await res.json().catch(() => null);
     const items = json?.products || [];
@@ -223,7 +234,8 @@ async function usdaByQuery(q) {
   const c = await cacheGet(key); if (c) return c;
   try {
     const sURL = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_KEY}&query=${encodeURIComponent(q)}&pageSize=7`;
-    const sres = await withTimeout(fetch(sURL), 12000);
+    // --- [PERF] Use default 8000ms timeout ---
+    const sres = await withTimeout(fetch(sURL));
     if (!sres.ok) return null;
     const sjson = await sres.json().catch(() => null);
     const foods = sjson?.foods || [];
@@ -231,7 +243,8 @@ async function usdaByQuery(q) {
     const best = pickBestFdc(foods, q) || foods[0];
     const id = best.fdcId;
     const dURL = `https://api.nal.usda.gov/fdc/v1/food/${id}?api_key=${USDA_KEY}`;
-    const dres = await withTimeout(fetch(dURL), 12000);
+    // --- [PERF] Use default 8000ms timeout ---
+    const dres = await withTimeout(fetch(dURL));
     if (!dres.ok) return null;
     const food = await dres.json().catch(() => null);
     const arr = food?.foodNutrients || [];
@@ -340,5 +353,4 @@ module.exports = async (req, res) => {
 
 module.exports.fetchNutritionData = fetchNutritionData;
 /// ========= NUTRITION-SEARCH-END ========= \\\\
-
 
