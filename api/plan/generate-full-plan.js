@@ -16,16 +16,18 @@ const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
 // Import cache-wrapped microservices
-const { fetchPriceData } = require('../price-search.js');
-const { fetchNutritionData } = require('../nutrition-search.js');
+// --- [FIX] Corrected path from ../ to ../../ ---
+const { fetchPriceData } = require('../../price-search.js');
+const { fetchNutritionData } = require('../../nutrition-search.js');
 
 // Import utils
 // Note: Vercel bundles these relative to the project root, hence the `../`
+// --- [FIX] Corrected path from ../ to ../../ ---
 try {
-    var { normalizeKey } = require('../scripts/normalize.js');
-    var { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../utils/transforms.js');
+    var { normalizeKey } = require('../../scripts/normalize.js');
+    var { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
     // --- [PERF] Re-importing reconcileNonProtein for shadow mode ---
-    var { reconcileNonProtein } = require('../utils/reconcileNonProtein.js');
+    var { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js');
 } catch (e) {
     console.error("CRITICAL: Failed to import utils. Using local fallbacks.", e.message);
     // Fallbacks in case relative paths fail in some environments
@@ -48,7 +50,8 @@ const USE_SOLVER_V1 = process.env.CHEFFY_USE_SOLVER === '1'; // Default to false
 const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
 const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro';
 
-const getGeminiApiUrl = (modelName) = `https://generativelanguage
+// --- [FIX] Added missing '=>' arrow for the function definition ---
+const getGeminiApiUrl = (modelName) => `https://generativelanguage
 .googleapis.com/v1beta/models/${modelName}:generateContent`;
 
 // --- Vercel KV Client ---
@@ -1369,5 +1372,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
