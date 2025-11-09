@@ -1022,7 +1022,7 @@ const App = () => {
                                         <p className="flex items-center"><Tag className="w-4 h-4 mr-2"/> Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span></p>
                                         
                                         {/* --- 3. REMOVED OLD TARGETS DISPLAY --- */}
-                                        {/* The nutritional targets are now shown in the ProfileTab component */}
+                                        {/* This block was removed as it's now in ProfileTab.jsx */}
                                         
                                     </div>
                                     {uniqueIngredients.length > 0 && !hasInvalidMeals && (
@@ -1116,4 +1116,5 @@ const App = () => {
 };
 
 export default App;
+
 
