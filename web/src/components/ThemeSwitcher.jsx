@@ -1,64 +1,45 @@
+// web/src/components/ThemeSwitcher.jsx
 import React from 'react';
 import { useTheme } from '../context/ThemeContext';
-import { BarChart3, Star, Heart } from 'lucide-react';
+import { BarChart, Gem, Smile } from 'lucide-react'; // Using icons for a cleaner look
 
-// An array defining the themes
-const themes = [
-  { id: 'data-driven', name: 'Data-Driven', icon: BarChart3 },
-  { id: 'gamified', name: 'Gamified', icon: Star },
-  { id: 'mindful', name: 'Mindful', icon: Heart },
-];
-
-/**
- * A component that allows the user to switch between available themes.
- * It uses the ThemeContext to get and set the active theme.
- */
+// This is a NAMED export
 export const ThemeSwitcher = () => {
-  const { theme, setTheme } = useTheme();
+  const { activeTheme, setActiveTheme } = useTheme();
+
+  const themes = [
+    { name: 'data-driven', label: 'Data', icon: <BarChart size={16} /> },
+    { name: 'gamified', label: 'Game', icon: <Gem size={16} /> },
+    { name: 'mindful', label: 'Mindful', icon: <Smile size={16} /> },
+  ];
 
   return (
-    <div className="p-4 bg-gray-100 rounded-lg">
-      <label
-        htmlFor="theme-select"
-        className="block text-sm font-medium text-gray-700 mb-2"
-      >
-        Tracker Theme
-      </label>
-      
-      {/* Segmented Control Style */}
-      <div className="flex w-full rounded-md bg-gray-300 p-1">
-        {themes.map((themeOption) => (
+    <div className="p-1 bg-gray-100 rounded-lg flex space-x-1">
+      {themes.map((theme) => {
+        const isActive = activeTheme === theme.name;
+        return (
           <button
-            key={themeOption.id}
-            onClick={() => setTheme(themeOption.id)}
-            className={`flex-1 flex items-center justify-center px-3 py-2 text-sm font-medium rounded ${
-              theme === themeOption.id
-                ? 'bg-white text-blue-600 shadow'
-                : 'text-gray-600 hover:bg-gray-200'
-            } transition-all duration-200`}
-            aria-pressed={theme === themeOption.id}
+            key={theme.name}
+            onClick={() => setActiveTheme(theme.name)}
+            className={`
+              flex-1 py-2 px-3 rounded-md text-sm font-medium
+              flex items-center justify-center space-x-1.5
+              transition-all duration-200
+              ${
+                isActive
+                  ? 'bg-white text-indigo-700 shadow-sm'
+                  : 'text-gray-600 hover:bg-gray-100 hover:text-gray-800'
+              }
+            `}
+            aria-pressed={isActive}
           >
-            <themeOption.icon size={16} className="mr-2" />
-            {themeOption.name}
+            {theme.icon}
+            <span>{theme.label}</span>
           </button>
-        ))}
-      </div>
-
-      {/* Alternative: Dropdown Style (if you prefer) */}
-      {/* <select
-        id="theme-select"
-        value={theme}
-        onChange={(e) => setTheme(e.target.value)}
-        className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-      >
-        {themes.map((themeOption) => (
-          <option key={themeOption.id} value={themeOption.id}>
-            {themeOption.name}
-          </option>
-        ))}
-      </select>
-      */}
+        );
+      })}
     </div>
   );
 };
+
 
