@@ -823,17 +823,6 @@ const App = () => {
             setSelectedDay(value);
         }
     };
-    
-    // [LOGIC-FIX] This prop is no longer used by MealPlanDisplay directly for logic, 
-    // but can be used to pass the 'isEaten' status
-    const onToggleMealEaten_DEPRECATED = useCallback((day, mealName) => {
-        setEatenMeals(prev => {
-            const dayKey = `day${day}`;
-            const dayMeals = { ...(prev[dayKey] || {}) };
-            dayMeals[mealName] = !dayMeals[mealName];
-            return { ...prev, [dayKey]: dayMeals };
-        });
-    }, []); 
 
     const categorizedResults = useMemo(() => {
         const groups = {};
@@ -895,7 +884,8 @@ const App = () => {
                         <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
                     </div>
 
-                    <div className.="bg-white rounded-xl shadow-lg border overflow-hidden">
+                    {/* --- [TYPO FIX] className. removed --- */}
+                    <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
                         {Object.keys(categorizedResults).map((category, index) => (
                             <CollapsibleSection
                                 key={category}
