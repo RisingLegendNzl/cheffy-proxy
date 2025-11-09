@@ -7,11 +7,6 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, setLogLevel } from 'firebase/firestore';
 
-// --- [NEW] Theme Imports ---
-import { ThemeProvider } from './context/ThemeContext';
-import { ThemeSwitcher } from './components/ThemeSwitcher'; // Named import
-// --- [END NEW] Theme Imports ---
-
 // --- Component Imports ---
 import InputField from './components/InputField';
 import DaySlider from './components/DaySlider';
@@ -20,7 +15,7 @@ import ProductCard from './components/ProductCard';
 import CollapsibleSection from './components/CollapsibleSection';
 import SubstituteMenu from './components/SubstituteMenu';
 import GenerationProgressDisplay from './components/GenerationProgressDisplay';
-// import NutritionalInfo from './components/NutritionalInfo'; // No longer rendered directly
+import NutritionalInfo from './components/NutritionalInfo';
 import IngredientResultBlock from './components/IngredientResultBlock';
 import MealPlanDisplay from './components/MealPlanDisplay';
 import LogEntry from './components/LogEntry';
@@ -46,10 +41,13 @@ const MOCK_PRODUCT_TEMPLATE = {
 };
 
 
-// --- Firebase Config variables moved inside useEffect ---
+// --- [MODIFIED] Firebase Config variables moved inside useEffect ---
+// We no longer define firebaseConfigStr, appId, or initialAuthToken here
+// They will be read at runtime inside the useEffect hook.
 let firebaseConfig = null;
 let firebaseInitializationError = null;
 let globalAppId = 'default-app-id'; // Provide a default
+// --- [END MODIFICATION] ---
 
 
 // --- SSE Stream Parser ---
@@ -133,11 +131,6 @@ const App = () => {
     // --- State ---
     const [formData, setFormData] = useState({ name: '', height: '180', weight: '75', age: '30', gender: 'male', activityLevel: 'moderate', goal: 'cut_moderate', dietary: 'None', days: 7, store: 'Woolworths', eatingOccasions: '3', costPriority: 'Best Value', mealVariety: 'Balanced Variety', cuisine: '', bodyFat: '' });
     const [nutritionalTargets, setNutritionalTargets] = useState({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-    
-    // --- [NEW] State for daily tracker ---
-    const [actual, setActual] = useState({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-    // --- [END NEW] State ---
-    
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
     const [mealPlan, setMealPlan] = useState([]);
@@ -170,10 +163,12 @@ const App = () => {
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
 
+    // --- [MODIFIED] Moved App ID to state ---
     const [appId, setAppId] = useState('default-app-id');
 
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
+        // --- [MODIFIED] Read global config variables at RUNTIME ---
         const firebaseConfigStr = typeof __firebase_config !== 'undefined' 
             ? __firebase_config 
             : import.meta.env.VITE_FIREBASE_CONFIG;
@@ -186,8 +181,9 @@ const App = () => {
             ? __app_id 
             : (import.meta.env.VITE_APP_ID || 'default-app-id');
         
-        setAppId(currentAppId);
-        globalAppId = currentAppId;
+        setAppId(currentAppId); // Set app ID for the rest of the app
+        globalAppId = currentAppId; // Also set the global fallback
+        // --- [END MODIFICATION] ---
         
         try {
             if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
@@ -226,6 +222,7 @@ const App = () => {
                         console.log("[FIREBASE] User is signed out. Attempting sign-in...");
                         setUserId(null);
                         try {
+                            // Use the token read at runtime
                             if (initialAuthToken) {
                                 console.log("[FIREBASE] Signing in with custom token...");
                                 await signInWithCustomToken(authInstance, initialAuthToken);
@@ -253,11 +250,12 @@ const App = () => {
                 setIsAuthReady(true);
             }
         }
-    }, [isAuthReady]);
+    }, [isAuthReady]); // This effect now runs only once, correctly.
 
 
     // --- Load Profile on Auth Ready ---
     const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
+        // [MODIFIED] Read appId from state
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
             const msg = 'Firebase not ready or App ID is missing. Cannot load profile.';
             if (!isInitialLoad) setStatusMessage({ text: msg, type: 'error' });
@@ -310,76 +308,16 @@ const App = () => {
                 }, 3000);
             }
         }
-    }, [isAuthReady, userId, db, appId]);
+    }, [isAuthReady, userId, db, appId]); // [MODIFIED] Added appId dependency
 
     useEffect(() => {
         if (isAuthReady && userId && db && appId) {
             handleLoadProfile(true);
         }
-    }, [isAuthReady, userId, db, appId, handleLoadProfile]);
+    }, [isAuthReady, userId, db, appId, handleLoadProfile]); // [MODIFIED] Added appId dependency
 
 
     // --- Handlers ---
-
-    // --- [LOGIC-FIX] handleToggleMealLog ---
-    // This is now the single source of truth for logging meals
-    const handleToggleMealLog = useCallback((day, mealName) => {
-        // 1. Update the 'eatenMeals' checkmark state
-        const newEatenMeals = { ...eatenMeals };
-        const dayKey = `day${day}`;
-        const dayMeals = { ...(newEatenMeals[dayKey] || {}) };
-        dayMeals[mealName] = !dayMeals[mealName]; // Toggle the state
-        newEatenMeals[dayKey] = dayMeals;
-        setEatenMeals(newEatenMeals);
-
-        // 2. Recalculate the 'actual' totals based on the *new* state
-        const dayData = mealPlan[day - 1];
-        if (!dayData || !Array.isArray(dayData.meals)) return;
-
-        let newActual = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-        dayData.meals.forEach(meal => {
-            // Check if this meal is in our *newly updated* newEatenMeals state
-            if (meal && meal.name && newEatenMeals[dayKey]?.[meal.name]) {
-                newActual.calories += (meal.subtotal_kcal || 0);
-                newActual.protein += (meal.subtotal_protein || 0);
-                newActual.fat += (meal.subtotal_fat || 0);
-                newActual.carbs += (meal.subtotal_carbs || 0);
-            }
-        });
-        
-        // 3. Set the new 'actual' state
-        setActual(newActual);
-        
-    }, [eatenMeals, mealPlan]);
-    // --- [END LOGIC-FIX] ---
-
-    // --- Reset 'actual' state when day changes ---
-    useEffect(() => {
-        // When the selectedDay changes, recalculate 'actual' based on the *stored*
-        // 'eatenMeals' state for that day.
-        const dayKey = `day${selectedDay}`;
-        const dayData = mealPlan[selectedDay - 1];
-        const dayMealsEatenState = eatenMeals[dayKey] || {};
-
-        if (!dayData || !Array.isArray(dayData.meals)) {
-             setActual({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-             return;
-        }
-
-        let newActual = { calories: 0, protein: 0, fat: 0, carbs: 0 };
-        dayData.meals.forEach(meal => {
-            if (meal && meal.name && dayMealsEatenState[meal.name]) {
-                newActual.calories += (meal.subtotal_kcal || 0);
-                newActual.protein += (meal.subtotal_protein || 0);
-                newActual.fat += (meal.subtotal_fat || 0);
-                newActual.carbs += (meal.subtotal_carbs || 0);
-            }
-        });
-        setActual(newActual);
-        
-    }, [selectedDay, mealPlan, eatenMeals]);
-    // --- [END NEW] ---
-
     const recalculateTotalCost = useCallback((currentResults) => {
         let newTotal = 0;
         Object.values(currentResults).forEach(item => {
@@ -394,6 +332,7 @@ const App = () => {
         setTotalCost(newTotal);
     }, []);
 
+    // --- [MODIFIED] handleGeneratePlan (Now supports Batched vs Per-Day) ---
     const handleGeneratePlan = useCallback(async (e) => {
         e.preventDefault();
         
@@ -403,19 +342,18 @@ const App = () => {
         setDiagnosticLogs([]);
         setNutritionCache({});
         setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-        setActual({ calories: 0, protein: 0, fat: 0, carbs: 0 }); // [NEW] Reset 'actual'
         setResults({});
         setUniqueIngredients([]);
         setMealPlan([]);
         setTotalCost(0);
         setEatenMeals({});
         setFailedIngredientsHistory([]);
-        setGenerationStepKey('targets');
+        setGenerationStepKey('targets'); // Set initial step
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
 
         let targets;
 
-        // --- 2. Fetch Nutritional Targets ---
+        // --- 2. Fetch Nutritional Targets (Required for both modes) ---
         try {
             const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
                 method: 'POST',
@@ -441,7 +379,7 @@ const App = () => {
             setDiagnosticLogs(prev => [...prev, {
                 timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
             }]);
-            return;
+            return; // Stop execution
         }
 
         // --- 3. Execute based on Feature Flag ---
@@ -456,7 +394,7 @@ const App = () => {
                 const numDays = parseInt(formData.days, 10);
                 for (let day = 1; day <= numDays; day++) {
                     setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
-                    setGenerationStepKey('planning');
+                    setGenerationStepKey('planning'); // Reset step for each day
                     
                     let dailyFailedIngredients = [];
                     let dayFetchError = null;
@@ -492,6 +430,7 @@ const App = () => {
 
                             for (const event of events) {
                                 const eventData = event.data;
+                                // [MODIFIED] Handle both 'message' (old) and 'log_message' (new)
                                 switch (event.eventType) {
                                     case 'message':
                                     case 'log_message':
@@ -521,9 +460,11 @@ const App = () => {
                                         setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
                                         recalculateTotalCost(accumulatedResults);
                                         break;
+                                    // [NEW] Handle new event types gracefully, even if they show up
                                     case 'phase:start':
                                     case 'ingredient:found':
                                     case 'ingredient:failed':
+                                        // Just log them
                                         setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'DEBUG', tag: 'SSE_UNHANDLED', message: `Received unhandled v2 event '${event.eventType}' in v1 loop.`}]);
                                         break;
                                 }
@@ -568,11 +509,12 @@ const App = () => {
                     },
                     body: JSON.stringify({
                         formData,
-                        nutritionalTargets: targets
+                        nutritionalTargets: targets // Pass the targets in
                     }),
                 });
 
                 if (!planResponse.ok) {
+                    // Try to parse error response as JSON, fallback to text
                     let errorMsg = 'Unknown server error';
                     try {
                         const errorData = await planResponse.json();
@@ -628,6 +570,7 @@ const App = () => {
                                 break;
                             
                             case 'ingredient:found':
+                                // Progressively update results as they are found
                                 setResults(prev => ({
                                     ...prev,
                                     [eventData.key]: eventData.data
@@ -655,7 +598,7 @@ const App = () => {
                                 break;
 
                             case 'plan:complete':
-                                planComplete = true;
+                                planComplete = true; // Mark as complete
                                 setMealPlan(eventData.mealPlan || []);
                                 setResults(eventData.results || {});
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
@@ -682,7 +625,8 @@ const App = () => {
                  setTimeout(() => setLoading(false), 2000);
             }
         }
-    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]);
+    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]); // Add useBatchedMode dependency
+    // --- END: handleGeneratePlan Modifications ---
 
 
     const handleFetchNutrition = useCallback(async (product) => {
@@ -783,8 +727,9 @@ const App = () => {
     }, [diagnosticLogs]); 
 
     const handleSaveProfile = useCallback(async () => {
+        // [MODIFIED] Read appId from state
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            setStatusMessage({ text: 'Firebase not ready or App ID is missing. Cannot save profile.', type: 'error' });
+            setStatusMessage({ text: 'Firebase not ready or App ID missing. Cannot save profile.', type: 'error' });
             console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
             return;
         }
@@ -803,7 +748,7 @@ const App = () => {
                  setStatusMessage(prev => prev.text === 'Saving profile...' ? { text: '', type: '' } : prev);
              }, 3000);
         }
-    }, [isAuthReady, userId, db, formData, appId]);
+    }, [isAuthReady, userId, db, formData, appId]); // [MODIFIED] Added appId dependency
 
 
     const handleChange = (e) => {
@@ -823,6 +768,14 @@ const App = () => {
             setSelectedDay(value);
         }
     };
+    const onToggleMealEaten = useCallback((day, mealName) => {
+        setEatenMeals(prev => {
+            const dayKey = `day${day}`;
+            const dayMeals = { ...(prev[dayKey] || {}) };
+            dayMeals[mealName] = !dayMeals[mealName];
+            return { ...prev, [dayKey]: dayMeals };
+        });
+    }, []); 
 
     const categorizedResults = useMemo(() => {
         const groups = {};
@@ -884,7 +837,6 @@ const App = () => {
                         <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
                     </div>
 
-                    {/* --- [TYPO FIX] className. removed --- */}
                     <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
                         {Object.keys(categorizedResults).map((category, index) => (
                             <CollapsibleSection
@@ -937,13 +889,10 @@ const App = () => {
                     key={selectedDay}
                     mealPlan={mealPlan}
                     selectedDay={selectedDay}
-                    nutritionalTargets={nutritionalTargets} // Pass targets
-                    actualMacros={actual} // Pass actual
+                    nutritionalTargets={nutritionalTargets}
                     eatenMeals={eatenMeals}
-                    onToggleMealLog={handleToggleMealLog} // Pass new handler
-                    onViewRecipe={setSelectedMeal}
-                    // onLogMeal prop removed
-                    // onToggleMealEaten prop renamed to onToggleMealLog
+                    onToggleMealEaten={onToggleMealEaten}
+                    onViewRecipe={setSelectedMeal} 
                 />
             ) : (
                 <div className="flex-1 text-center p-8 text-gray-500">
@@ -975,10 +924,8 @@ const App = () => {
         }
     };
 
-    // --- [MODIFIED] Added ThemeProvider Wrapper ---
     return (
-      <ThemeProvider>
-        <React.Fragment>
+        <>
             <div className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" style={{ paddingBottom: `${Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight}px` }}>
                 <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1>
 
@@ -1001,7 +948,7 @@ const App = () => {
                         <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
                             <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
-                                <div className="flex space-x-2 items-center">
+                                <div className="flex space-x-2">
                                     <button
                                         onClick={() => handleLoadProfile(false)} 
                                         disabled={!isAuthReady || !userId || !db} 
@@ -1050,7 +997,8 @@ const App = () => {
                                         Use Batched Generation (v2)
                                     </label>
                                 </div>
-                                
+
+
                                 <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
                                     {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
                                 </button>
@@ -1071,8 +1019,6 @@ const App = () => {
                                     <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border">
                                         <p className="flex items-center"><Users className="w-4 h-4 mr-2"/> Goal: <span className='font-semibold ml-1'>{formData.goal.toUpperCase()}</span> | Dietary: <span className='font-semibold ml-1'>{formData.dietary}</span></p>
                                         <p className="flex items-center"><Tag className="w-4 h-4 mr-2"/> Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span></p>
-                                        
-                                        {/* --- [REVERTED] This is the original summary block --- */}
                                         {nutritionalTargets.calories > 0 && (
                                             <div className="pt-2 mt-2 border-t">
                                                 <h4 className="font-bold mb-2 text-center">Daily Nutritional Targets</h4>
@@ -1084,8 +1030,6 @@ const App = () => {
                                                 </div>
                                             </div>
                                         )}
-                                        {/* --- [END REVERT] --- */}
-                                        
                                     </div>
                                     {uniqueIngredients.length > 0 && !hasInvalidMeals && (
                                         <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
@@ -1120,20 +1064,11 @@ const App = () => {
                                     )}
 
                                     {(results && Object.keys(results).length > 0 && !loading) && (
-                                        <div className="p-4 space-y-4">
-                                            {/* --- [MOVED] ThemeSwitcher moved here --- */}
-                                            <div>
-                                                <label className="text-sm font-medium text-gray-700 mb-1 block">Tracker Theme</label>
-                                                <ThemeSwitcher />
-                                            </div>
-                                            {/* --- End Move --- */}
-                                            
-                                            <div className="flex space-x-2">
-                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
-                                                {mealPlan.length > 0 && (
-                                                    <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
-                                                )}
-                                            </div>
+                                        <div className="flex space-x-2 p-4">
+                                            <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
+                                            {mealPlan.length > 0 && (
+                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
+                                            )}
                                         </div>
                                     )}
                                     
@@ -1148,7 +1083,7 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
@@ -1159,8 +1094,7 @@ const App = () => {
                     onClose={() => setSelectedMeal(null)} 
                 />
             )}
-        </React.Fragment>
-      </ThemeProvider>
+        </>
     );
 };
 
