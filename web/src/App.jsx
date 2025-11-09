@@ -42,13 +42,10 @@ const MOCK_PRODUCT_TEMPLATE = {
 };
 
 
-// --- [MODIFIED] Firebase Config variables moved inside useEffect ---
-// We no longer define firebaseConfigStr, appId, or initialAuthToken here
-// They will be read at runtime inside the useEffect hook.
+// --- Firebase Config variables moved inside useEffect ---
 let firebaseConfig = null;
 let firebaseInitializationError = null;
 let globalAppId = 'default-app-id'; // Provide a default
-// --- [END MODIFICATION] ---
 
 
 // --- SSE Stream Parser ---
@@ -164,12 +161,10 @@ const App = () => {
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
 
-    // --- [MODIFIED] Moved App ID to state ---
     const [appId, setAppId] = useState('default-app-id');
 
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
-        // --- [MODIFIED] Read global config variables at RUNTIME ---
         const firebaseConfigStr = typeof __firebase_config !== 'undefined' 
             ? __firebase_config 
             : import.meta.env.VITE_FIREBASE_CONFIG;
@@ -182,9 +177,8 @@ const App = () => {
             ? __app_id 
             : (import.meta.env.VITE_APP_ID || 'default-app-id');
         
-        setAppId(currentAppId); // Set app ID for the rest of the app
-        globalAppId = currentAppId; // Also set the global fallback
-        // --- [END MODIFICATION] ---
+        setAppId(currentAppId);
+        globalAppId = currentAppId;
         
         try {
             if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
@@ -223,7 +217,6 @@ const App = () => {
                         console.log("[FIREBASE] User is signed out. Attempting sign-in...");
                         setUserId(null);
                         try {
-                            // Use the token read at runtime
                             if (initialAuthToken) {
                                 console.log("[FIREBASE] Signing in with custom token...");
                                 await signInWithCustomToken(authInstance, initialAuthToken);
@@ -251,12 +244,11 @@ const App = () => {
                 setIsAuthReady(true);
             }
         }
-    }, [isAuthReady]); // This effect now runs only once, correctly.
+    }, [isAuthReady]);
 
 
     // --- Load Profile on Auth Ready ---
     const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
-        // [MODIFIED] Read appId from state
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
             const msg = 'Firebase not ready or App ID is missing. Cannot load profile.';
             if (!isInitialLoad) setStatusMessage({ text: msg, type: 'error' });
@@ -309,13 +301,13 @@ const App = () => {
                 }, 3000);
             }
         }
-    }, [isAuthReady, userId, db, appId]); // [MODIFIED] Added appId dependency
+    }, [isAuthReady, userId, db, appId]);
 
     useEffect(() => {
         if (isAuthReady && userId && db && appId) {
             handleLoadProfile(true);
         }
-    }, [isAuthReady, userId, db, appId, handleLoadProfile]); // [MODIFIED] Added appId dependency
+    }, [isAuthReady, userId, db, appId, handleLoadProfile]);
 
 
     // --- Handlers ---
@@ -333,7 +325,7 @@ const App = () => {
         setTotalCost(newTotal);
     }, []);
 
-    // --- [MODIFIED] handleGeneratePlan (Now supports Batched vs Per-Day) ---
+    // --- handleGeneratePlan ---
     const handleGeneratePlan = useCallback(async (e) => {
         e.preventDefault();
         
@@ -431,7 +423,6 @@ const App = () => {
 
                             for (const event of events) {
                                 const eventData = event.data;
-                                // [MODIFIED] Handle both 'message' (old) and 'log_message' (new)
                                 switch (event.eventType) {
                                     case 'message':
                                     case 'log_message':
@@ -461,11 +452,9 @@ const App = () => {
                                         setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
                                         recalculateTotalCost(accumulatedResults);
                                         break;
-                                    // [NEW] Handle new event types gracefully, even if they show up
                                     case 'phase:start':
                                     case 'ingredient:found':
                                     case 'ingredient:failed':
-                                        // Just log them
                                         setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'DEBUG', tag: 'SSE_UNHANDLED', message: `Received unhandled v2 event '${event.eventType}' in v1 loop.`}]);
                                         break;
                                 }
@@ -515,7 +504,6 @@ const App = () => {
                 });
 
                 if (!planResponse.ok) {
-                    // Try to parse error response as JSON, fallback to text
                     let errorMsg = 'Unknown server error';
                     try {
                         const errorData = await planResponse.json();
@@ -571,7 +559,6 @@ const App = () => {
                                 break;
                             
                             case 'ingredient:found':
-                                // Progressively update results as they are found
                                 setResults(prev => ({
                                     ...prev,
                                     [eventData.key]: eventData.data
@@ -626,7 +613,7 @@ const App = () => {
                  setTimeout(() => setLoading(false), 2000);
             }
         }
-    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]); // Add useBatchedMode dependency
+    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]);
     // --- END: handleGeneratePlan Modifications ---
 
 
@@ -728,7 +715,6 @@ const App = () => {
     }, [diagnosticLogs]); 
 
     const handleSaveProfile = useCallback(async () => {
-        // [MODIFIED] Read appId from state
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
             setStatusMessage({ text: 'Firebase not ready or App ID missing. Cannot save profile.', type: 'error' });
             console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
@@ -749,7 +735,7 @@ const App = () => {
                  setStatusMessage(prev => prev.text === 'Saving profile...' ? { text: '', type: '' } : prev);
              }, 3000);
         }
-    }, [isAuthReady, userId, db, formData, appId]); // [MODIFIED] Added appId dependency
+    }, [isAuthReady, userId, db, formData, appId]);
 
 
     const handleChange = (e) => {
@@ -1100,7 +1086,7 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
