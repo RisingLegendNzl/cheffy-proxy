@@ -9,8 +9,9 @@ import { getFirestore, doc, setDoc, getDoc, setLogLevel } from 'firebase/firesto
 
 // --- [NEW] Theme Imports ---
 import { ThemeProvider } from './context/ThemeContext';
-import ThemeSwitcher from './components/ThemeSwitcher';
-// --- [END NEW] Theme Imports ---
+// --- [FIX] Use a named import { ThemeSwitcher } instead of a default import ---
+import { ThemeSwitcher } from './components/ThemeSwitcher';
+// --- [END FIX] ---
 
 // --- Component Imports ---
 import InputField from './components/InputField';
