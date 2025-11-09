@@ -1,6 +1,6 @@
-// web/src/components/MealPlanDisplay.js
+// web/src/components/MealPlanDisplay.jsx
 import React, { useMemo } from 'react';
-import { BookOpen, Target, CheckCircle, AlertTriangle } from 'lucide-react';
+import { BookOpen, Target, CheckCircle, AlertTriangle, Flame, Soup, Droplet, Wheat } from 'lucide-react'; // Added macro icons
 
 // --- [MODIFIED] MealPlanDisplay Component ---
 const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe }) => {
@@ -48,75 +48,71 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                     return null;
                 }
                 const mealName = meal.name || `Unnamed Meal ${index + 1}`;
-                const mealDesc = meal.description || ""; // <-- This now displays the new description
+                const mealDesc = meal.description || "No description available."; // <-- This will display the new description
                 const mealType = meal.type || "Meal";
                 const mealCalories = typeof meal.subtotal_kcal === 'number' ? `${Math.round(meal.subtotal_kcal)} kcal` : 'N/A';
                 const isEaten = eatenMeals[`day${selectedDay}`]?.[mealName] || false;
+                
+                // --- NEW: Data for macros (from mockup) ---
+                const mealMacros = {
+                    p: Math.round(meal.subtotal_protein || 0),
+                    f: Math.round(meal.subtotal_fat || 0),
+                    c: Math.round(meal.subtotal_carbs || 0)
+                };
+
                 return (
                     <div 
                         key={index} 
                         // --- [MODIFIED] Added onClick, cursor-pointer, and hover effect ---
-                        className={`p-6 border-l-4 bg-white rounded-lg shadow-md ${isEaten ? 'border-green-500 opacity-60' : 'border-indigo-500'} cursor-pointer hover:shadow-lg transition-all duration-200`}
-                        onClick={() => onViewRecipe(meal)}
+                        className={`p-5 border-l-4 bg-white rounded-lg shadow-md ${isEaten ? 'border-green-500 opacity-60' : 'border-indigo-500'} cursor-pointer hover:shadow-lg transition-shadow`}
+                        onClick={() => onViewRecipe(meal)} // <-- This makes the whole card clickable
                     >
-                        <div className="flex justify-between items-start mb-3">
+                        <div className="flex justify-between items-start">
                             <div>
                                 <p className="text-sm font-bold uppercase text-indigo-600">{mealType}</p>
-                                <h4 className="text-2xl font-semibold">{mealName}</h4>
+                                <h4 className="text-xl font-semibold">{mealName}</h4>
+                                <p className="text-xl font-bold text-red-600 mt-1">{mealCalories}</p>
                             </div>
-                            <span className="text-2xl font-bold text-red-600">{mealCalories}</span>
-                        </div>
-
-                        {/* This line correctly displays the new meal.description */}
-                        <p className="text-gray-600 leading-relaxed mt-2">{mealDesc}</p>
-                        
-                        {/* --- [NEW] Macro Breakout Section --- */}
-                        <div className="grid grid-cols-3 gap-2 mt-4">
-                            <div className="bg-green-50 p-3 rounded-lg text-center">
-                                <span className="text-xs font-semibold text-green-700">Protein</span>
-                                <p className="text-lg font-bold">{Math.round(meal.subtotal_protein || 0)}g</p>
-                            </div>
-                            <div className="bg-yellow-50 p-3 rounded-lg text-center">
-                                <span className="text-xs font-semibold text-yellow-700">Fat</span>
-                                <p className="text-lg font-bold">{Math.round(meal.subtotal_fat || 0)}g</p>
-                            </div>
-                            <div className="bg-orange-50 p-3 rounded-lg text-center">
-                                <span className="text-xs font-semibold text-orange-700">Carbs</span>
-                                <p className="text-lg font-bold">{Math.round(meal.subtotal_carbs || 0)}g</p>
-                            </div>
-                        </div>
-                        {/* --- [END] Macro Breakout Section --- */}
-
-                        {/* --- [NEW] Ingredient Pills Section --- */}
-                        {meal.items && meal.items.length > 0 && (
-                            <div className="mt-4">
-                                <h5 className="text-sm font-semibold mb-2 text-gray-700">Ingredients:</h5>
-                                <div className="flex flex-wrap gap-2">
-                                    {meal.items.map((item, idx) => (
-                                    <span 
-                                        key={idx} 
-                                        className="bg-gray-200 text-gray-700 text-xs font-medium px-3 py-1 rounded-full"
-                                    >
-                                        {item.qty}{item.unit} {item.key}
-                                    </span>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                        {/* --- [END] Ingredient Pills Section --- */}
-
-                        {/* --- "Mark as Eaten" button moved to the bottom for better layout --- */}
-                        <div className="text-center mt-6">
                             <button 
                                 // --- [MODIFIED] Added stopPropagation to prevent modal from opening ---
                                 onClick={(e) => {
                                     e.stopPropagation(); // <-- This is the key change
                                     onToggleMealEaten(selectedDay, mealName);
                                 }} 
-                                className={`flex items-center justify-center w-full text-xs py-2 px-3 rounded-full ${isEaten ? 'bg-green-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+                                className={`flex items-center text-xs py-1 px-3 rounded-full ${isEaten ? 'bg-green-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
                             >
                                 <CheckCircle className="w-4 h-4 mr-1" /> {isEaten ? 'Eaten' : 'Mark as Eaten'}
                             </button>
+                        </div>
+                        
+                        <p className="text-gray-600 leading-relaxed mt-2">{mealDesc}</p>
+
+                        {/* --- NEW: Macro Breakout Section (from mockup) --- */}
+                        <div className="grid grid-cols-3 gap-2 mt-4 text-center">
+                            <div className="bg-green-50 p-2 rounded-lg">
+                                <p className="text-sm font-semibold text-green-800">Protein</p>
+                                <p className="text-lg font-bold">{mealMacros.p}g</p>
+                            </div>
+                            <div className="bg-yellow-50 p-2 rounded-lg">
+                                <p className="text-sm font-semibold text-yellow-800">Fat</p>
+                                <p className="text-lg font-bold">{mealMacros.f}g</p>
+                            </div>
+                            <div className="bg-orange-50 p-2 rounded-lg">
+                                <p className="text-sm font-semibold text-orange-800">Carbs</p>
+                                <p className="text-lg font-bold">{mealMacros.c}g</p>
+                            </div>
+                        </div>
+
+                        {/* --- NEW: Ingredient Pills Section (from mockup) --- */}
+                        <div className="mt-4">
+                            <h5 className="text-sm font-semibold mb-2 text-gray-700">Ingredients:</h5>
+                            <div className="flex flex-wrap gap-2">
+                                {meal.items && meal.items.map((item, i) => (
+                                    <span key={i} className="bg-gray-200 text-gray-800 text-xs font-medium px-3 py-1 rounded-full">
+                                        {item.qty}{item.unit} {item.key}
+                                    </span>
+                                ))}
+                            </div>
                         </div>
                     </div>
                 );
@@ -127,4 +123,5 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
 // --- END: MealPlanDisplay Modifications ---
 
 export default MealPlanDisplay;
+
 
