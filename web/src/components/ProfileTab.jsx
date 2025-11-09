@@ -1,13 +1,13 @@
-// src/components/ProfileTab.jsx
+// web/src/components/ProfileTab.jsx
 import React from 'react';
-import { Target, Flame, Soup, Droplet, Wheat } from 'lucide-react';
+import { Target, Flame, Soup, Droplet, Wheat, User as UserIcon } from 'lucide-react'; // Renamed User to UserIcon to avoid conflict
 
 // A simple display card for the User Profile
 const ProfileCard = ({ formData }) => (
   <div className="bg-white rounded-xl shadow-lg border p-6">
     <h3 className="text-xl font-bold text-indigo-700 flex items-center mb-4">
-      <Target className="w-5 h-5 mr-2" />
-      User Profile & Targets
+      <UserIcon className="w-5 h-5 mr-2" />
+      User Profile
     </h3>
     <div className="grid grid-cols-2 gap-4">
       <div className="bg-gray-50 p-3 rounded-lg">
@@ -34,8 +34,7 @@ const ProfileCard = ({ formData }) => (
   </div>
 );
 
-[cite_start]// This is the *exact* logic from your App.jsx "Plan Summary" [cite: 260-267]
-// moved into its own component.
+// This component displays the calculated nutritional targets
 const TargetsCard = ({ nutritionalTargets }) => (
   <div className="bg-white rounded-xl shadow-lg border p-6">
     <h3 className="text-xl font-bold text-indigo-700 text-center mb-4">
@@ -83,3 +82,5 @@ const ProfileTab = ({ formData, nutritionalTargets }) => {
 };
 
 export default ProfileTab;
+
+
