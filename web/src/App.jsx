@@ -7,8 +7,10 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, setLogLevel } from 'firebase/firestore';
 
-// --- [NEW] Theme Context Import ---
+// --- [NEW] Theme Imports ---
 import { ThemeProvider } from './context/ThemeContext';
+import ThemeSwitcher from './components/ThemeSwitcher';
+// --- [END NEW] Theme Imports ---
 
 // --- Component Imports ---
 import InputField from './components/InputField';
@@ -18,7 +20,7 @@ import ProductCard from './components/ProductCard';
 import CollapsibleSection from './components/CollapsibleSection';
 import SubstituteMenu from './components/SubstituteMenu';
 import GenerationProgressDisplay from './components/GenerationProgressDisplay';
-// import NutritionalInfo from './components/NutritionalInfo'; // [REMOVED] Replaced by CalorieTracker
+// import NutritionalInfo from './components/NutritionalInfo'; // No longer rendered directly here
 import IngredientResultBlock from './components/IngredientResultBlock';
 import MealPlanDisplay from './components/MealPlanDisplay';
 import LogEntry from './components/LogEntry';
@@ -26,11 +28,6 @@ import DiagnosticLogViewer from './components/DiagnosticLogViewer';
 import FailedIngredientLogViewer from './components/FailedIngredientLogViewer';
 import RecipeModal from './components/RecipeModal';
 import EmojiIcon from './components/EmojiIcon';
-
-// --- [NEW] Theme Component Imports ---
-import { ThemeSwitcher } from './components/ThemeSwitcher';
-import { CalorieTracker } from './components/CalorieTracker';
-
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -130,8 +127,6 @@ const categoryIconMap = {
 };
 // --- END: Category Icon Map ---
 
-// --- [NEW] Empty macro template ---
-const emptyMacros = { calories: 0, protein: 0, fat: 0, carbs: 0 };
 
 // --- MAIN APP COMPONENT ---
 const App = () => {
@@ -139,9 +134,10 @@ const App = () => {
     const [formData, setFormData] = useState({ name: '', height: '180', weight: '75', age: '30', gender: 'male', activityLevel: 'moderate', goal: 'cut_moderate', dietary: 'None', days: 7, store: 'Woolworths', eatingOccasions: '3', costPriority: 'Best Value', mealVariety: 'Balanced Variety', cuisine: '', bodyFat: '' });
     const [nutritionalTargets, setNutritionalTargets] = useState({ calories: 0, protein: 0, fat: 0, carbs: 0 });
     
-    // --- [NEW] State for "Actual" logged macros ---
-    const [actual, setActual] = useState(emptyMacros);
-
+    // --- [NEW] State for daily tracker ---
+    const [actual, setActual] = useState({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+    // --- [END NEW] State ---
+    
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
     const [mealPlan, setMealPlan] = useState([]);
@@ -173,6 +169,7 @@ const App = () => {
     const [db, setDb] = useState(null);
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
+
     const [appId, setAppId] = useState('default-app-id');
 
     // --- Firebase Initialization and Auth Effect ---
@@ -321,45 +318,40 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, appId, handleLoadProfile]);
 
-    
-    // --- [NEW] Calculate "Planned" Macros for the selected day ---
-    const plannedMacros = useMemo(() => {
-        const dayPlan = mealPlan.find(day => day.dayNumber === selectedDay);
-        if (!dayPlan || !dayPlan.meals) {
-            return emptyMacros;
-        }
-
-        return dayPlan.meals.reduce((totals, meal) => {
-            return {
-                calories: totals.calories + (meal.subtotal_kcal || 0),
-                protein: totals.protein + (meal.subtotal_protein || 0),
-                fat: totals.fat + (meal.subtotal_fat || 0),
-                carbs: totals.carbs + (meal.subtotal_carbs || 0),
-            };
-        }, { ...emptyMacros });
-
-    }, [mealPlan, selectedDay]);
-
-    // --- [NEW] Reset "Actual" macros when the day changes ---
-    useEffect(() => {
-        setActual(emptyMacros);
-        // We could also load saved 'actual' data for the day from Firestore here
-    }, [selectedDay]);
-
 
     // --- Handlers ---
 
-    // --- [NEW] Handler for logging a meal ---
+    // --- [NEW] handleLogMeal ---
+    // This function will be passed to MealPlanDisplay to update the 'actual' (eaten) state
     const handleLogMeal = useCallback((mealMacros) => {
         if (!mealMacros) return;
-        setActual((prevActual) => ({
-            calories: prevActual.calories + (mealMacros.subtotal_kcal || 0),
-            protein: prevActual.protein + (mealMacros.subtotal_protein || 0),
-            fat: prevActual.fat + (mealMacros.subtotal_fat || 0),
-            carbs: prevActual.carbs + (mealMacros.subtotal_carbs || 0),
+        
+        // This function should handle both logging and un-logging a meal.
+        // For simplicity, this implementation only *adds* macros.
+        // A full implementation would need to know if the meal is being "checked" or "unchecked".
+        // For now, let's assume it just adds.
+        
+        // A better approach: reset 'actual' when the day changes.
+        // We will reset 'actual' when 'selectedDay' changes.
+        
+        setActual(prevActual => ({
+            calories: (prevActual.calories || 0) + (mealMacros.subtotal_kcal || 0),
+            protein: (prevActual.protein || 0) + (mealMacros.subtotal_protein || 0),
+            fat: (prevActual.fat || 0) + (mealMacros.subtotal_fat || 0),
+            carbs: (prevActual.carbs || 0) + (mealMacros.subtotal_carbs || 0),
         }));
-        // We could also save the 'actual' state to Firestore here
     }, []);
+
+    // --- [NEW] Reset 'actual' state when day changes ---
+    useEffect(() => {
+        setActual({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+        // We'll also reset the 'eatenMeals' checkmarks for the new day
+        setEatenMeals(prev => ({
+            ...prev,
+            [`day${selectedDay}`]: {}
+        }));
+    }, [selectedDay]);
+    // --- [END NEW] ---
 
     const recalculateTotalCost = useCallback((currentResults) => {
         let newTotal = 0;
@@ -378,25 +370,25 @@ const App = () => {
     const handleGeneratePlan = useCallback(async (e) => {
         e.preventDefault();
         
-        // 1. Reset All State
+        // --- 1. Reset All State ---
         setLoading(true);
         setError(null);
         setDiagnosticLogs([]);
         setNutritionCache({});
         setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-        setActual(emptyMacros); // [NEW] Reset actual tracker
+        setActual({ calories: 0, protein: 0, fat: 0, carbs: 0 }); // [NEW] Reset 'actual'
         setResults({});
         setUniqueIngredients([]);
         setMealPlan([]);
         setTotalCost(0);
         setEatenMeals({});
         setFailedIngredientsHistory([]);
-        setGenerationStepKey('targets'); 
+        setGenerationStepKey('targets');
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
 
         let targets;
 
-        // 2. Fetch Nutritional Targets
+        // --- 2. Fetch Nutritional Targets ---
         try {
             const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
                 method: 'POST',
@@ -422,12 +414,12 @@ const App = () => {
             setDiagnosticLogs(prev => [...prev, {
                 timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
             }]);
-            return; 
+            return;
         }
 
-        // 3. Execute based on Feature Flag
+        // --- 3. Execute based on Feature Flag ---
         if (!useBatchedMode) {
-            // [LEGACY] Per-Day Loop Logic
+            // --- [LEGACY] Per-Day Loop Logic ---
             setGenerationStatus("Generating plan (per-day mode)...");
             let accumulatedResults = {}; 
             let accumulatedMealPlan = []; 
@@ -437,7 +429,7 @@ const App = () => {
                 const numDays = parseInt(formData.days, 10);
                 for (let day = 1; day <= numDays; day++) {
                     setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
-                    setGenerationStepKey('planning'); 
+                    setGenerationStepKey('planning');
                     
                     let dailyFailedIngredients = [];
                     let dayFetchError = null;
@@ -549,7 +541,7 @@ const App = () => {
                     },
                     body: JSON.stringify({
                         formData,
-                        nutritionalTargets: targets 
+                        nutritionalTargets: targets
                     }),
                 });
 
@@ -563,6 +555,7 @@ const App = () => {
                     }
                     throw new Error(`Full plan request failed (${planResponse.status}): ${errorMsg}`);
                 }
+
 
                 const reader = planResponse.body.getReader();
                 const decoder = new TextDecoder();
@@ -635,7 +628,7 @@ const App = () => {
                                 break;
 
                             case 'plan:complete':
-                                planComplete = true; 
+                                planComplete = true;
                                 setMealPlan(eventData.mealPlan || []);
                                 setResults(eventData.results || {});
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
@@ -662,7 +655,7 @@ const App = () => {
                  setTimeout(() => setLoading(false), 2000);
             }
         }
-    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]); 
+    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode]);
 
 
     const handleFetchNutrition = useCallback(async (product) => {
@@ -924,11 +917,12 @@ const App = () => {
                     key={selectedDay}
                     mealPlan={mealPlan}
                     selectedDay={selectedDay}
-                    nutritionalTargets={nutritionalTargets}
+                    nutritionalTargets={nutritionalTargets} // [NEW] Pass targets
+                    actualMacros={actual} // [NEW] Pass actual
                     eatenMeals={eatenMeals}
                     onToggleMealEaten={onToggleMealEaten}
-                    onViewRecipe={setSelectedMeal} 
-                    onLogMeal={handleLogMeal} // [NEW] Pass the logging handler
+                    onViewRecipe={setSelectedMeal}
+                    onLogMeal={handleLogMeal} // [NEW] Pass log handler
                 />
             ) : (
                 <div className="flex-1 text-center p-8 text-gray-500">
@@ -960,194 +954,185 @@ const App = () => {
         }
     };
 
+    // --- [MODIFIED] Added ThemeProvider Wrapper ---
     return (
-        // [NEW] 1. Wrap entire app in ThemeProvider
-        <ThemeProvider>
-            {/* [FIX] 2. Add the <React.Fragment> wrapper as the single child */}
-            <>
-                <div className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" style={{ paddingBottom: `${Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight}px` }}>
-                    <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1>
+      <ThemeProvider>
+        <React.Fragment>
+            <div className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" style={{ paddingBottom: `${Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight}px` }}>
+                <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1>
 
-                    {statusMessage.text && (
-                        <div className={`p-3 mb-4 rounded-lg text-sm font-medium text-center max-w-xl mx-auto ${getStatusColor(statusMessage.type)}`}>
-                            {statusMessage.text}
-                        </div>
-                    )}
+                {statusMessage.text && (
+                    <div className={`p-3 mb-4 rounded-lg text-sm font-medium text-center max-w-xl mx-auto ${getStatusColor(statusMessage.type)}`}>
+                        {statusMessage.text}
+                    </div>
+                )}
 
-                     {userId && isAuthReady && (
-                        <div className="text-center text-xs text-gray-500 mb-4 flex items-center justify-center">
-                            <User size={12} className="mr-1" /> User ID: <span className="font-mono ml-1">{userId}</span>
-                        </div>
-                     )}
+                 {userId && isAuthReady && (
+                    <div className="text-center text-xs text-gray-500 mb-4 flex items-center justify-center">
+                        <User size={12} className="mr-1" /> User ID: <span className="font-mono ml-1">{userId}</span>
+                    </div>
+                 )}
 
 
-                    <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
-                        <div className="flex flex-col md:flex-row">
-                            {/* --- SETUP FORM --- */}
-                            <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
-                                <div className="flex justify-between items-center mb-6">
-                                    <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
-                                    <div className="flex space-x-2">
-                                        <button
-                                            onClick={() => handleLoadProfile(false)} 
-                                            disabled={!isAuthReady || !userId || !db} 
-                                            className="flex items-center px-3 py-1.5 bg-blue-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                                            title="Load Saved Profile"
-                                        >
-                                            <FolderDown size={14} className="mr-1" /> Load
-                                        </button>
-                                         <button
-                                            onClick={handleSaveProfile}
-                                            disabled={!isAuthReady || !userId || !db} 
-                                            className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                                            title="Save Current Profile"
-                                        >
-                                            <Save size={14} className="mr-1" /> Save
-                                        </button>
-                                        <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
-                                    </div>
-                                </div>
-                                <form onSubmit={handleGeneratePlan}>
-                                    <InputField label="Name" name="name" value={formData.name} onChange={handleChange} />
-                                    <div className="grid grid-cols-2 gap-4"><InputField label="Height (cm)" name="height" type="number" value={formData.height} onChange={handleChange} required /><InputField label="Weight (kg)" name="weight" type="number" value={formData.weight} onChange={handleChange} required /></div>
-                                    <div className="grid grid-cols-2 gap-4"><InputField label="Age" name="age" type="number" value={formData.age} onChange={handleChange} required /><InputField label="Body Fat % (Optional)" name="bodyFat" type="number" value={formData.bodyFat} onChange={handleChange} placeholder="e.g., 15" /></div>
-                                    <InputField label="Gender" name="gender" type="select" value={formData.gender} onChange={handleChange} options={[{ value: 'male', label: 'Male' }, { value: 'female', label: 'Female' }]} required />
-                                    <InputField label="Activity Level" name="activityLevel" type="select" value={formData.activityLevel} onChange={handleChange} options={[ { value: 'sedentary', label: 'Sedentary' }, { value: 'light', label: 'Light Activity' }, { value: 'moderate', label: 'Moderate Activity' }, { value: 'active', label: 'Active' }, { value: 'veryActive', label: 'Very Active' } ]} required />
-                                    <InputField label="Fitness Goal" name="goal" type="select" value={formData.goal} onChange={handleChange} options={[ { value: 'maintain', label: 'Maintain' }, { value: 'cut_moderate', label: 'Moderate Cut (~15% Deficit)' }, { value: 'cut_aggressive', label: 'Aggressive Cut (~25% Deficit)' }, { value: 'bulk_lean', label: 'Lean Bulk (~15% Surplus)' }, { value: 'bulk_aggressive', label: 'Aggressive Bulk (~25% Surplus)' } ]} />
-                                    <InputField label="Dietary Preference" name="dietary" type="select" value={formData.dietary} onChange={handleChange} options={[{ value: 'None', label: 'None' }, { value: 'Vegetarian', label: 'Vegetarian' }]} />
-                                    <DaySlider label="Plan Days" name="days" value={formData.days} onChange={handleSliderChange} />
-                                    <InputField label="Store" name="store" type="select" value={formData.store} onChange={handleChange} options={[{ value: 'Coles', label: 'Coles' }, { value: 'Woolworths', label: 'Woolworths' }]} />
-                                    
-                                    <h3 className="text-lg font-bold mt-6 mb-3 border-t pt-3">Customization</h3>
-                                    
-                                    {/* [NEW] 3. Add the ThemeSwitcher component */}
-                                    <div className="mb-4">
-                                        <label className="block text-sm font-medium text-gray-700 mb-2">Tracker Theme</label>
-                                        <ThemeSwitcher />
-                                    </div>
-
-                                    <InputField label="Meals Per Day" name="eatingOccasions" type="select" value={formData.eatingOccasions} onChange={handleChange} options={[ { value: '3', label: '3 Meals' }, { value: '4', label: '4 Meals' }, { value: '5', label: '5 Meals' } ]} />
-                                    <InputField label="Spending Priority" name="costPriority" type="select" value={formData.costPriority} onChange={handleChange} options={[ { value: 'Extreme Budget', label: 'Extreme Budget' }, { value: 'Best Value', label: 'Best Value' }, { value: 'Quality Focus', label: 'Quality Focus' } ]} />
-                                    <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
-                                    <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
-
-                                    <div className="flex items-center justify-center mt-4 pt-4 border-t">
-                                        <input
-                                            type="checkbox"
-                                            id="batchModeToggle"
-                                            name="batchModeToggle"
-                                            checked={useBatchedMode}
-                                            onChange={(e) => setUseBatchedMode(e.target.checked)}
-                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
-                                        />
-                                        <label htmlFor="batchModeToggle" className="ml-2 block text-sm text-gray-900" title="Use the new batched endpoint (v2) instead of the per-day loop (v1)">
-                                            Use Batched Generation (v2)
-                                        </label>
-                                    </div>
-
-
-                                    <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
-                                        {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
+                <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
+                    <div className="flex flex-col md:flex-row">
+                        {/* --- SETUP FORM --- */}
+                        <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
+                            <div className="flex justify-between items-center mb-6">
+                                <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
+                                <div className="flex space-x-2 items-center">
+                                    <button
+                                        onClick={() => handleLoadProfile(false)} 
+                                        disabled={!isAuthReady || !userId || !db} 
+                                        className="flex items-center px-3 py-1.5 bg-blue-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        title="Load Saved Profile"
+                                    >
+                                        <FolderDown size={14} className="mr-1" /> Load
                                     </button>
-                                    {(!isAuthReady || !firebaseConfig) && <p className="text-xs text-center text-red-600 mt-2">
-                                        {firebaseInitializationError ? firebaseInitializationError : 'Initializing Firebase auth...'}
-                                    </p>}
-                                </form>
-                            </div>
-
-                            {/* --- RESULTS VIEW --- */}
-                            <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
-                                <div className="p-4 md:hidden flex justify-end">
-                                    <button className="bg-indigo-600 text-white p-2 rounded-full shadow" onClick={() => setIsMenuOpen(true)}><Menu /></button>
+                                     <button
+                                        onClick={handleSaveProfile}
+                                        disabled={!isAuthReady || !userId || !db} 
+                                        className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        title="Save Current Profile"
+                                    >
+                                        <Save size={14} className="mr-1" /> Save
+                                    </button>
+                                    {/* --- [FIXED] ThemeSwitcher moved here --- */}
+                                    <ThemeSwitcher />
+                                    <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
                                 </div>
-                                <div className="border-b">
-                                    <div className="p-6 md:p-8">
-                                        <h2 className="text-xl font-bold mb-4 flex items-center"><Calendar className="w-5 h-5 mr-2" /> Plan Summary ({formData.days} Days)</h2>
-                                        <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border">
-                                            <p className="flex items-center"><Users className="w-4 h-4 mr-2"/> Goal: <span className='font-semibold ml-1'>{formData.goal.toUpperCase()}</span> | Dietary: <span className='font-semibold ml-1'>{formData.dietary}</span></p>
-                                            <p className="flex items-center"><Tag className="w-4 h-4 mr-2"/> Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span></p>
-                                            
-                                            {/* [NEW] 4. Replace the nutrition grid with the CalorieTracker wrapper */}
+                            </div>
+                            <form onSubmit={handleGeneratePlan}>
+                                <InputField label="Name" name="name" value={formData.name} onChange={handleChange} />
+                                <div className="grid grid-cols-2 gap-4"><InputField label="Height (cm)" name="height" type="number" value={formData.height} onChange={handleChange} required /><InputField label="Weight (kg)" name="weight" type="number" value={formData.weight} onChange={handleChange} required /></div>
+                                <div className="grid grid-cols-2 gap-4"><InputField label="Age" name="age" type="number" value={formData.age} onChange={handleChange} required /><InputField label="Body Fat % (Optional)" name="bodyFat" type="number" value={formData.bodyFat} onChange={handleChange} placeholder="e.g., 15" /></div>
+                                <InputField label="Gender" name="gender" type="select" value={formData.gender} onChange={handleChange} options={[{ value: 'male', label: 'Male' }, { value: 'female', label: 'Female' }]} required />
+                                <InputField label="Activity Level" name="activityLevel" type="select" value={formData.activityLevel} onChange={handleChange} options={[ { value: 'sedentary', label: 'Sedentary' }, { value: 'light', label: 'Light Activity' }, { value: 'moderate', label: 'Moderate Activity' }, { value: 'active', label: 'Active' }, { value: 'veryActive', label: 'Very Active' } ]} required />
+                                <InputField label="Fitness Goal" name="goal" type="select" value={formData.goal} onChange={handleChange} options={[ { value: 'maintain', label: 'Maintain' }, { value: 'cut_moderate', label: 'Moderate Cut (~15% Deficit)' }, { value: 'cut_aggressive', label: 'Aggressive Cut (~25% Deficit)' }, { value: 'bulk_lean', label: 'Lean Bulk (~15% Surplus)' }, { value: 'bulk_aggressive', label: 'Aggressive Bulk (~25% Surplus)' } ]} />
+                                <InputField label="Dietary Preference" name="dietary" type="select" value={formData.dietary} onChange={handleChange} options={[{ value: 'None', label: 'None' }, { value: 'Vegetarian', label: 'Vegetarian' }]} />
+                                <DaySlider label="Plan Days" name="days" value={formData.days} onChange={handleSliderChange} />
+                                <InputField label="Store" name="store" type="select" value={formData.store} onChange={handleChange} options={[{ value: 'Coles', label: 'Coles' }, { value: 'Woolworths', label: 'Woolworths' }]} />
+                                <h3 className="text-lg font-bold mt-6 mb-3 border-t pt-3">Customization</h3>
+                                <InputField label="Meals Per Day" name="eatingOccasions" type="select" value={formData.eatingOccasions} onChange={handleChange} options={[ { value: '3', label: '3 Meals' }, { value: '4', label: '4 Meals' }, { value: '5', label: '5 Meals' } ]} />
+                                <InputField label="Spending Priority" name="costPriority" type="select" value={formData.costPriority} onChange={handleChange} options={[ { value: 'Extreme Budget', label: 'Extreme Budget' }, { value: 'Best Value', label: 'Best Value' }, { value: 'Quality Focus', label: 'Quality Focus' } ]} />
+                                <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
+                                <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
+
+                                <div className="flex items-center justify-center mt-4 pt-4 border-t">
+                                    <input
+                                        type="checkbox"
+                                        id="batchModeToggle"
+                                        name="batchModeToggle"
+                                        checked={useBatchedMode}
+                                        onChange={(e) => setUseBatchedMode(e.target.checked)}
+                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                                    />
+                                    <label htmlFor="batchModeToggle" className="ml-2 block text-sm text-gray-900" title="Use the new batched endpoint (v2) instead of the per-day loop (v1)">
+                                        Use Batched Generation (v2)
+                                    </label>
+                                </div>
+                                
+                                <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
+                                    {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
+                                </button>
+                                {(!isAuthReady || !firebaseConfig) && <p className="text-xs text-center text-red-600 mt-2">
+                                    {firebaseInitializationError ? firebaseInitializationError : 'Initializing Firebase auth...'}
+                                </p>}
+                            </form>
+                        </div>
+
+                        {/* --- RESULTS VIEW --- */}
+                        <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
+                            <div className="p-4 md:hidden flex justify-end">
+                                <button className="bg-indigo-600 text-white p-2 rounded-full shadow" onClick={() => setIsMenuOpen(true)}><Menu /></button>
+                            </div>
+                            <div className="border-b">
+                                <div className="p-6 md:p-8">
+                                    <h2 className="text-xl font-bold mb-4 flex items-center"><Calendar className="w-5 h-5 mr-2" /> Plan Summary ({formData.days} Days)</h2>
+                                    <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border">
+                                        <p className="flex items-center"><Users className="w-4 h-4 mr-2"/> Goal: <span className='font-semibold ml-1'>{formData.goal.toUpperCase()}</span> | Dietary: <span className='font-semibold ml-1'>{formData.dietary}</span></p>
+                                        <p className="flex items-center"><Tag className="w-4 h-4 mr-2"/> Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span></p>
+                                        
+                                        {/* --- [REVERTED] This is the original summary block --- */}
+                                        {nutritionalTargets.calories > 0 && (
                                             <div className="pt-2 mt-2 border-t">
                                                 <h4 className="font-bold mb-2 text-center">Daily Nutritional Targets</h4>
-                                                {/* This component will now render one of the 3 themes */}
-                                                <CalorieTracker
-                                                    isLoading={loading && generationStepKey === 'targets'}
-                                                    targets={nutritionalTargets}
-                                                    planned={plannedMacros} // Pass the calculated planned macros for the day
-                                                    actual={actual} // Pass the logged actual macros
-                                                />
-                                            </div>
-                                            {/* [END OF REPLACEMENT] */}
-
-                                        </div>
-                                        {uniqueIngredients.length > 0 && !hasInvalidMeals && (
-                                            <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
-                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                    {uniqueIngredients.map((item, index) => (
-                                                         <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
-                                                            <div className="flex-1 min-w-0">
-                                                                <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
-                                                                <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGramsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
-                                                            </div>
-                                                            <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
-                                                        </div>
-                                                    ))}
+                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
+                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Flame size={14} className="mr-1 text-red-500" /> Cals</p><p className="text-lg font-extrabold">{nutritionalTargets.calories}</p></div>
+                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Soup size={14} className="mr-1 text-green-500" /> Protein</p><p className="text-lg font-extrabold">{nutritionalTargets.protein}g</p></div>
+                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Droplet size={14} className="mr-1 text-yellow-500" /> Fat</p><p className="text-lg font-extrabold">{nutritionalTargets.fat}g</p></div>
+                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Wheat size={14} className="mr-1 text-orange-500" /> Carbs</p><p className="text-lg font-extrabold">{nutritionalTargets.carbs}g</p></div>
                                                 </div>
-                                            </CollapsibleSection>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {hasInvalidMeals ? (
-                                    <PlanCalculationErrorPanel />
-                                ) : (
-                                    <div className="p-0">
-                                        {loading && (
-                                            <div className="p-4 md:p-6">
-                                                <GenerationProgressDisplay
-                                                    activeStepKey={generationStepKey}
-                                                    errorMsg={error}
-                                                    latestLog={latestLog} 
-                                                />
                                             </div>
                                         )}
-
-                                        {(results && Object.keys(results).length > 0 && !loading) && (
-                                            <div className="flex space-x-2 p-4">
-                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
-                                                {mealPlan.length > 0 && (
-                                                    <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
-                                                )}
-                                            </div>
-                                        )}
+                                        {/* --- [END REVERT] --- */}
                                         
-                                        {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
-
                                     </div>
-                                )}
+                                    {uniqueIngredients.length > 0 && !hasInvalidMeals && (
+                                        <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                {uniqueIngredients.map((item, index) => (
+                                                     <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
+                                                            <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGramsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
+                                                        </div>
+                                                        <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </CollapsibleSection>
+                                    )}
+                                </div>
                             </div>
+
+                            {hasInvalidMeals ? (
+                                <PlanCalculationErrorPanel />
+                            ) : (
+                                <div className="p-0">
+                                    {loading && (
+                                        <div className="p-4 md:p-6">
+                                            <GenerationProgressDisplay
+                                                activeStepKey={generationStepKey}
+                                                errorMsg={error}
+                                                latestLog={latestLog} 
+                                            />
+                                        </div>
+                                    )}
+
+                                    {(results && Object.keys(results).length > 0 && !loading) && (
+                                        <div className="flex space-x-2 p-4">
+                                            <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
+                                            {mealPlan.length > 0 && (
+                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
+                                            )}
+                                        </div>
+                                    )}
+                                    
+                                    {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
+
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
+            </div>
 
-                 {/* --- Log Viewers (Fixed at bottom) --- */}
-                <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
-                    <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
-                </div>
+             {/* --- Log Viewers (Fixed at bottom) --- */}
+            <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
+            </div>
 
-                {/* --- Render the modal conditionally --- */}
-                {selectedMeal && (
-                    <RecipeModal 
-                        meal={selectedMeal} 
-                        onClose={() => setSelectedMeal(null)} 
-                    />
-                )}
-            {/* [FIX] 5. Close the fragment */}
-            </>
-        {/* [FIX] 6. Close the ThemeProvider */}
-        </ThemeProvider>
+            {/* --- Render the modal conditionally --- */}
+            {selectedMeal && (
+                <RecipeModal 
+                    meal={selectedMeal} 
+                    onClose={() => setSelectedMeal(null)} 
+                />
+            )}
+        </React.Fragment>
+      </ThemeProvider>
     );
 };
 
