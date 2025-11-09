@@ -9,9 +9,8 @@ import { getFirestore, doc, setDoc, getDoc, setLogLevel } from 'firebase/firesto
 
 // --- [NEW] Theme Imports ---
 import { ThemeProvider } from './context/ThemeContext';
-// --- [FIX] Use a named import { ThemeSwitcher } instead of a default import ---
-import { ThemeSwitcher } from './components/ThemeSwitcher';
-// --- [END FIX] ---
+import { ThemeSwitcher } from './components/ThemeSwitcher'; // Named import
+// --- [END NEW] Theme Imports ---
 
 // --- Component Imports ---
 import InputField from './components/InputField';
@@ -21,7 +20,7 @@ import ProductCard from './components/ProductCard';
 import CollapsibleSection from './components/CollapsibleSection';
 import SubstituteMenu from './components/SubstituteMenu';
 import GenerationProgressDisplay from './components/GenerationProgressDisplay';
-// import NutritionalInfo from './components/NutritionalInfo'; // No longer rendered directly here
+// import NutritionalInfo from './components/NutritionalInfo'; // No longer rendered directly
 import IngredientResultBlock from './components/IngredientResultBlock';
 import MealPlanDisplay from './components/MealPlanDisplay';
 import LogEntry from './components/LogEntry';
@@ -758,7 +757,7 @@ const App = () => {
 
     const handleSaveProfile = useCallback(async () => {
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            setStatusMessage({ text: 'Firebase not ready or App ID missing. Cannot save profile.', type: 'error' });
+            setStatusMessage({ text: 'Firebase not ready or App ID is missing. Cannot save profile.', type: 'error' });
             console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
             return;
         }
@@ -998,8 +997,7 @@ const App = () => {
                                     >
                                         <Save size={14} className="mr-1" /> Save
                                     </button>
-                                    {/* --- [FIXED] ThemeSwitcher moved here --- */}
-                                    <ThemeSwitcher />
+                                    {/* --- [MOVED] ThemeSwitcher removed from here --- */}
                                     <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
                                 </div>
                             </div>
@@ -1102,11 +1100,20 @@ const App = () => {
                                     )}
 
                                     {(results && Object.keys(results).length > 0 && !loading) && (
-                                        <div className="flex space-x-2 p-4">
-                                            <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
-                                            {mealPlan.length > 0 && (
-                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
-                                            )}
+                                        <div className="p-4 space-y-4">
+                                            {/* --- [NEW] ThemeSwitcher moved here --- */}
+                                            <div>
+                                                <label className="text-sm font-medium text-gray-700 mb-1 block">Tracker Theme</label>
+                                                <ThemeSwitcher />
+                                            </div>
+                                            {/* --- End Move --- */}
+                                            
+                                            <div className="flex space-x-2">
+                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
+                                                {mealPlan.length > 0 && (
+                                                    <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
+                                                )}
+                                            </div>
                                         </div>
                                     )}
                                     
