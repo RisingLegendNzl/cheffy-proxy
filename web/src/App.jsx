@@ -23,7 +23,7 @@ import DiagnosticLogViewer from './components/DiagnosticLogViewer';
 import FailedIngredientLogViewer from './components/FailedIngredientLogViewer';
 import RecipeModal from './components/RecipeModal';
 import EmojiIcon from './components/EmojiIcon';
-import ProfileTab from './components/ProfileTab'; // <-- 1. IMPORTED NEW COMPONENT
+import ProfileTab from './components/ProfileTab'; // <-- Import new component
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -116,7 +116,7 @@ const categoryIconMap = {
     'condiments': <EmojiIcon code="1f9c2" alt="condiments" />,
     'bakery': <EmojiIcon code="1f370" alt="bakery" />,
     'frozen': <EmojiIcon code="2744" alt="frozen" />,
-    'snacks': <EmojiIcon code-="1f36b" alt="snacks" />,
+    'snacks': <EmojiIcon code="1f36b" alt="snacks" />, // <-- *** THE FIX IS HERE *** (was `code-=`)
     'misc': <EmojiIcon code="1f36b" alt="snacks" />,
     'uncategorized': <EmojiIcon code="1f6cd" alt="shopping" />,
     'default': <EmojiIcon code="1f6cd" alt="shopping" />
@@ -137,7 +137,7 @@ const App = () => {
     const [error, setError] = useState(null);
     const [eatenMeals, setEatenMeals] = useState({});
     const [selectedDay, setSelectedDay] = useState(1);
-    const [contentView, setContentView] = useState('profile'); // <-- 2. CHANGED DEFAULT TAB
+    const [contentView, setContentView] = useState('profile'); // <-- Set default tab
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [diagnosticLogs, setDiagnosticLogs] = useState([]);
     const [nutritionCache, setNutritionCache] = useState({});
@@ -716,7 +716,7 @@ const App = () => {
 
     const handleSaveProfile = useCallback(async () => {
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            setStatusMessage({ text: 'Firebase not ready or App ID missing. Cannot save profile.', type: 'error' });
+            setStatusMessage({ text: 'Firebase not ready or App ID is missing. Cannot save profile.', type: 'error' });
             console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
             return;
         }
@@ -851,7 +851,7 @@ const App = () => {
                                                 isLoadingNutrition={isLoading}
                                             />
                                         );
-loca    })}
+                                    })}
                                 </div>
                             </CollapsibleSection>
                         ))}
@@ -1008,7 +1008,6 @@ loca    })}
                                         <p className="flex items-center"><Tag className="w-4 h-4 mr-2"/> Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span></p>
                                         
                                         {/* --- 3. REMOVED OLD TARGETS DISPLAY --- */}
-                                        {/* This block was removed as it's now in ProfileTab.jsx */}
                                         
                                     </div>
                                     {uniqueIngredients.length > 0 && !hasInvalidMeals && (
@@ -1086,7 +1085,7 @@ loca    })}
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
