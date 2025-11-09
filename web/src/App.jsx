@@ -8,6 +8,8 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, doc, setDoc, getDoc, setLogLevel } from 'firebase/firestore';
 
 // --- Component Imports ---
+import MacroRing from './components/MacroRing';
+import MacroBar from './components/MacroBar';
 import InputField from './components/InputField';
 import DaySlider from './components/DaySlider';
 import DaySidebar from './components/DaySidebar';
