@@ -1086,7 +1086,7 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
