@@ -321,36 +321,63 @@ const App = () => {
 
     // --- Handlers ---
 
-    // --- [NEW] handleLogMeal ---
-    // This function will be passed to MealPlanDisplay to update the 'actual' (eaten) state
-    const handleLogMeal = useCallback((mealMacros) => {
-        if (!mealMacros) return;
-        
-        // This function should handle both logging and un-logging a meal.
-        // For simplicity, this implementation only *adds* macros.
-        // A full implementation would need to know if the meal is being "checked" or "unchecked".
-        // For now, let's assume it just adds.
-        
-        // A better approach: reset 'actual' when the day changes.
-        // We will reset 'actual' when 'selectedDay' changes.
-        
-        setActual(prevActual => ({
-            calories: (prevActual.calories || 0) + (mealMacros.subtotal_kcal || 0),
-            protein: (prevActual.protein || 0) + (mealMacros.subtotal_protein || 0),
-            fat: (prevActual.fat || 0) + (mealMacros.subtotal_fat || 0),
-            carbs: (prevActual.carbs || 0) + (mealMacros.subtotal_carbs || 0),
-        }));
-    }, []);
+    // --- [LOGIC-FIX] handleToggleMealLog ---
+    // This is now the single source of truth for logging meals
+    const handleToggleMealLog = useCallback((day, mealName) => {
+        // 1. Update the 'eatenMeals' checkmark state
+        const newEatenMeals = { ...eatenMeals };
+        const dayKey = `day${day}`;
+        const dayMeals = { ...(newEatenMeals[dayKey] || {}) };
+        dayMeals[mealName] = !dayMeals[mealName]; // Toggle the state
+        newEatenMeals[dayKey] = dayMeals;
+        setEatenMeals(newEatenMeals);
 
-    // --- [NEW] Reset 'actual' state when day changes ---
+        // 2. Recalculate the 'actual' totals based on the *new* state
+        const dayData = mealPlan[day - 1];
+        if (!dayData || !Array.isArray(dayData.meals)) return;
+
+        let newActual = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+        dayData.meals.forEach(meal => {
+            // Check if this meal is in our *newly updated* newEatenMeals state
+            if (meal && meal.name && newEatenMeals[dayKey]?.[meal.name]) {
+                newActual.calories += (meal.subtotal_kcal || 0);
+                newActual.protein += (meal.subtotal_protein || 0);
+                newActual.fat += (meal.subtotal_fat || 0);
+                newActual.carbs += (meal.subtotal_carbs || 0);
+            }
+        });
+        
+        // 3. Set the new 'actual' state
+        setActual(newActual);
+        
+    }, [eatenMeals, mealPlan]);
+    // --- [END LOGIC-FIX] ---
+
+    // --- Reset 'actual' state when day changes ---
     useEffect(() => {
-        setActual({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-        // We'll also reset the 'eatenMeals' checkmarks for the new day
-        setEatenMeals(prev => ({
-            ...prev,
-            [`day${selectedDay}`]: {}
-        }));
-    }, [selectedDay]);
+        // When the selectedDay changes, recalculate 'actual' based on the *stored*
+        // 'eatenMeals' state for that day.
+        const dayKey = `day${selectedDay}`;
+        const dayData = mealPlan[selectedDay - 1];
+        const dayMealsEatenState = eatenMeals[dayKey] || {};
+
+        if (!dayData || !Array.isArray(dayData.meals)) {
+             setActual({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+             return;
+        }
+
+        let newActual = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+        dayData.meals.forEach(meal => {
+            if (meal && meal.name && dayMealsEatenState[meal.name]) {
+                newActual.calories += (meal.subtotal_kcal || 0);
+                newActual.protein += (meal.subtotal_protein || 0);
+                newActual.fat += (meal.subtotal_fat || 0);
+                newActual.carbs += (meal.subtotal_carbs || 0);
+            }
+        });
+        setActual(newActual);
+        
+    }, [selectedDay, mealPlan, eatenMeals]);
     // --- [END NEW] ---
 
     const recalculateTotalCost = useCallback((currentResults) => {
@@ -796,7 +823,10 @@ const App = () => {
             setSelectedDay(value);
         }
     };
-    const onToggleMealEaten = useCallback((day, mealName) => {
+    
+    // [LOGIC-FIX] This prop is no longer used by MealPlanDisplay directly for logic, 
+    // but can be used to pass the 'isEaten' status
+    const onToggleMealEaten_DEPRECATED = useCallback((day, mealName) => {
         setEatenMeals(prev => {
             const dayKey = `day${day}`;
             const dayMeals = { ...(prev[dayKey] || {}) };
@@ -865,7 +895,7 @@ const App = () => {
                         <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
                     </div>
 
-                    <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
+                    <div className.="bg-white rounded-xl shadow-lg border overflow-hidden">
                         {Object.keys(categorizedResults).map((category, index) => (
                             <CollapsibleSection
                                 key={category}
@@ -917,12 +947,13 @@ const App = () => {
                     key={selectedDay}
                     mealPlan={mealPlan}
                     selectedDay={selectedDay}
-                    nutritionalTargets={nutritionalTargets} // [NEW] Pass targets
-                    actualMacros={actual} // [NEW] Pass actual
+                    nutritionalTargets={nutritionalTargets} // Pass targets
+                    actualMacros={actual} // Pass actual
                     eatenMeals={eatenMeals}
-                    onToggleMealEaten={onToggleMealEaten}
+                    onToggleMealLog={handleToggleMealLog} // Pass new handler
                     onViewRecipe={setSelectedMeal}
-                    onLogMeal={handleLogMeal} // [NEW] Pass log handler
+                    // onLogMeal prop removed
+                    // onToggleMealEaten prop renamed to onToggleMealLog
                 />
             ) : (
                 <div className="flex-1 text-center p-8 text-gray-500">
@@ -997,7 +1028,6 @@ const App = () => {
                                     >
                                         <Save size={14} className="mr-1" /> Save
                                     </button>
-                                    {/* --- [MOVED] ThemeSwitcher removed from here --- */}
                                     <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
                                 </div>
                             </div>
@@ -1101,7 +1131,7 @@ const App = () => {
 
                                     {(results && Object.keys(results).length > 0 && !loading) && (
                                         <div className="p-4 space-y-4">
-                                            {/* --- [NEW] ThemeSwitcher moved here --- */}
+                                            {/* --- [MOVED] ThemeSwitcher moved here --- */}
                                             <div>
                                                 <label className="text-sm font-medium text-gray-700 mb-1 block">Tracker Theme</label>
                                                 <ThemeSwitcher />
@@ -1128,7 +1158,7 @@ const App = () => {
 
              {/* --- Log Viewers (Fixed at bottom) --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                 <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
             </div>
 
