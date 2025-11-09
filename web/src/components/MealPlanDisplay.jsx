@@ -3,7 +3,8 @@ import React from 'react'; // Removed useMemo, no longer needed
 import { BookOpen, Target, CheckCircle, AlertTriangle } from 'lucide-react';
 
 // --- [NEW] Import the theme-aware tracker ---
-import CalorieTracker from './CalorieTracker';
+// --- [FIX] Corrected to be a named import ---
+import { CalorieTracker } from './CalorieTracker';
 
 // --- [MODIFIED] MealPlanDisplay Component ---
 // Updated props: removed onToggleMealEaten, added actualMacros and onToggleMealLog
