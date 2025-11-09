@@ -7,19 +7,15 @@ import { Loader2 } from 'lucide-react';
 
 /**
  * The main wrapper component for the calorie tracker.
- * This component reads the active theme from context and
- * renders the correct theme component, passing down the data props.
- *
- * It also handles the loading and error/empty states.
- *
+ * ...
  * Props:
  * - targets (object): { calories, protein, fat, carbs }
- * - planned (object): { calories, protein, fat, carbs }
  * - actual (object): { calories, protein, fat, carbs }
  * - isLoading (boolean): True if data is still being fetched.
+ * - planned (object): [REMOVED from requirements, but still accepted]
  */
 export const CalorieTracker = ({ targets, planned, actual, isLoading }) => {
-  const { theme } = useTheme();
+  const { activeTheme } = useTheme();
 
   // 1. Handle Loading State
   if (isLoading) {
@@ -32,7 +28,11 @@ export const CalorieTracker = ({ targets, planned, actual, isLoading }) => {
   }
 
   // 2. Handle Empty/Error State
-  if (!targets || !planned || !actual) {
+  // --- [FIX] ---
+  // Removed the '!planned' check. The 'planned' prop is no longer
+  // required for the component to render, as it's not used by the themes.
+  if (!targets || !actual) {
+  // --- [END FIX] ---
     return (
       <div className="w-full p-6 bg-gray-50 rounded-xl shadow-lg flex justify-center items-center min-h-[200px] border border-dashed">
         <span className="text-gray-500">No data available for tracker.</span>
@@ -42,7 +42,7 @@ export const CalorieTracker = ({ targets, planned, actual, isLoading }) => {
 
   // 3. Render the correct theme based on context
   const renderTheme = () => {
-    switch (theme) {
+    switch (activeTheme) {
       case 'gamified':
         return <GamifiedTracker targets={targets} planned={planned} actual={actual} />;
       case 'mindful':
@@ -60,4 +60,5 @@ export const CalorieTracker = ({ targets, planned, actual, isLoading }) => {
     </div>
   );
 };
+
 
