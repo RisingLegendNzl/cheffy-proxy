@@ -116,7 +116,7 @@ const categoryIconMap = {
     'condiments': <EmojiIcon code="1f9c2" alt="condiments" />,
     'bakery': <EmojiIcon code="1f370" alt="bakery" />,
     'frozen': <EmojiIcon code="2744" alt="frozen" />,
-    'snacks': <EmojiIcon code="1f36b" alt="snacks" />,
+    'snacks': <EmojiIcon code-="1f36b" alt="snacks" />,
     'misc': <EmojiIcon code="1f36b" alt="snacks" />,
     'uncategorized': <EmojiIcon code="1f6cd" alt="shopping" />,
     'default': <EmojiIcon code="1f6cd" alt="shopping" />
@@ -851,7 +851,7 @@ const App = () => {
                                                 isLoadingNutrition={isLoading}
                                             />
                                         );
-                                    })}
+loca    })}
                                 </div>
                             </CollapsibleSection>
                         ))}
