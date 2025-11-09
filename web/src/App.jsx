@@ -23,6 +23,7 @@ import DiagnosticLogViewer from './components/DiagnosticLogViewer';
 import FailedIngredientLogViewer from './components/FailedIngredientLogViewer';
 import RecipeModal from './components/RecipeModal';
 import EmojiIcon from './components/EmojiIcon';
+import ProfileTab from './components/ProfileTab'; // <-- 1. IMPORTED NEW COMPONENT
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -139,7 +140,7 @@ const App = () => {
     const [error, setError] = useState(null);
     const [eatenMeals, setEatenMeals] = useState({});
     const [selectedDay, setSelectedDay] = useState(1);
-    const [contentView, setContentView] = useState('priceComparison');
+    const [contentView, setContentView] = useState('profile'); // <-- 2. CHANGED DEFAULT TAB
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [diagnosticLogs, setDiagnosticLogs] = useState([]);
     const [nutritionCache, setNutritionCache] = useState({});
@@ -1019,17 +1020,10 @@ const App = () => {
                                     <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border">
                                         <p className="flex items-center"><Users className="w-4 h-4 mr-2"/> Goal: <span className='font-semibold ml-1'>{formData.goal.toUpperCase()}</span> | Dietary: <span className='font-semibold ml-1'>{formData.dietary}</span></p>
                                         <p className="flex items-center"><Tag className="w-4 h-4 mr-2"/> Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span></p>
-                                        {nutritionalTargets.calories > 0 && (
-                                            <div className="pt-2 mt-2 border-t">
-                                                <h4 className="font-bold mb-2 text-center">Daily Nutritional Targets</h4>
-                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
-                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Flame size={14} className="mr-1 text-red-500" /> Cals</p><p className="text-lg font-extrabold">{nutritionalTargets.calories}</p></div>
-                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Soup size={14} className="mr-1 text-green-500" /> Protein</p><p className="text-lg font-extrabold">{nutritionalTargets.protein}g</p></div>
-                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Droplet size={14} className="mr-1 text-yellow-500" /> Fat</p><p className="text-lg font-extrabold">{nutritionalTargets.fat}g</p></div>
-                                                    <div className="p-2 bg-white rounded-lg shadow-sm"><p className="font-bold flex items-center justify-center"><Wheat size={14} className="mr-1 text-orange-500" /> Carbs</p><p className="text-lg font-extrabold">{nutritionalTargets.carbs}g</p></div>
-                                                </div>
-                                            </div>
-                                        )}
+                                        
+                                        {/* --- 3. REMOVED OLD TARGETS DISPLAY --- */}
+                                        {/* The nutritional targets are now shown in the ProfileTab component */}
+                                        
                                     </div>
                                     {uniqueIngredients.length > 0 && !hasInvalidMeals && (
                                         <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
@@ -1063,16 +1057,39 @@ const App = () => {
                                         </div>
                                     )}
 
+                                    {/* --- 4. REPLACED BUTTONS WITH TAB NAVIGATION --- */}
                                     {(results && Object.keys(results).length > 0 && !loading) && (
-                                        <div className="flex space-x-2 p-4">
-                                            <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'priceComparison' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('priceComparison')}>Ingredients</button>
-                                            {mealPlan.length > 0 && (
-                                                <button className={`flex-1 py-3 px-5 text-center font-medium rounded-lg transition-all ${ contentView === 'mealPlan' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-100' }`} onClick={() => setContentView('mealPlan')}>Meal Plan</button>
-                                            )}
+                                        <div className="flex space-x-2 p-4 bg-gray-100 border-b">
+                                            <button 
+                                                className={`flex-1 py-2 px-4 text-center font-semibold rounded-lg ${contentView === 'profile' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-200'}`}
+                                                onClick={() => setContentView('profile')}
+                                            >
+                                                Profile
+                                            </button>
+                                            <button 
+                                                className={`flex-1 py-2 px-4 text-center font-semibold rounded-lg ${contentView === 'meals' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-200'}`}
+                                                onClick={() => setContentView('meals')}
+                                            >
+                                                Meals
+                                            </button>
+                                            <button 
+                                                className={`flex-1 py-2 px-4 text-center font-semibold rounded-lg ${contentView === 'ingredients' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-200'}`}
+                                                onClick={() => setContentView('ingredients')}
+                                            >
+                                                Ingredients
+                                            </button>
                                         </div>
                                     )}
                                     
-                                    {contentView === 'priceComparison' ? priceComparisonContent : mealPlanContent}
+                                    {/* --- 5. UPDATED CONTENT RENDER LOGIC --- */}
+                                    {contentView === 'profile' && (
+                                        <ProfileTab 
+                                            formData={formData} 
+                                            nutritionalTargets={nutritionalTargets} 
+                                        />
+                                    )}
+                                    {contentView === 'meals' && mealPlanContent}
+                                    {contentView === 'ingredients' && priceComparisonContent}
 
                                 </div>
                             )}
@@ -1099,5 +1116,4 @@ const App = () => {
 };
 
 export default App;
-
 
