@@ -1,91 +1,88 @@
-</details>
-
----
-
-## **Step 2: Create MacroBar Component (NEW)**
-
-<details>
-<summary><b>📄 web/src/components/MacroBar.jsx</b> (Click to expand)</summary>
-```jsx
-// web/src/components/MacroBar.jsx
+// web/src/components/MacroRing.jsx
 import React from 'react';
 
 /**
- * A horizontal progress bar for displaying macro progress.
- * Shows current/target values with color coding.
+ * A reusable circular progress ring component for displaying macro progress.
+ * Inspired by fitness apps like MyFitnessPal.
  * 
- * @param {string} label - Label for the macro (e.g., "Protein")
- * @param {number} current - Current amount consumed
- * @param {number} target - Target amount
- * @param {string} unit - Unit (e.g., "g")
- * @param {string} color - Tailwind color name (e.g., "green", "yellow", "orange")
- * @param {object} Icon - Lucide icon component
+ * @param {number} current - Current value (e.g., calories eaten)
+ * @param {number} target - Target value (e.g., calorie goal)
+ * @param {string} label - Label to display (e.g., "Calories")
+ * @param {string} color - Tailwind color class for the ring (e.g., "indigo")
+ * @param {number} size - Size of the ring in pixels (default: 120)
+ * @param {string} unit - Unit to display (e.g., "kcal", "g")
  */
-const MacroBar = ({ 
-    label = "Macro", 
+const MacroRing = ({ 
     current = 0, 
     target = 1, 
-    unit = "g",
-    color = "indigo",
-    Icon = null
+    label = "Macro", 
+    color = "indigo", 
+    size = 120,
+    unit = ""
 }) => {
     const percentage = target > 0 ? Math.min(100, (current / target) * 100) : 0;
-    const remaining = Math.max(0, target - current);
+    const strokeWidth = 8;
+    const radius = (size - strokeWidth) / 2;
+    const circumference = 2 * Math.PI * radius;
+    const offset = circumference - (percentage / 100) * circumference;
 
-    // Determine bar color based on progress
-    const getBarColor = () => {
+    // Determine color based on progress
+    const getColorClasses = () => {
         if (percentage >= 95 && percentage <= 105) {
-            return 'bg-green-500';
+            return { ring: 'stroke-green-500', text: 'text-green-700' };
         } else if (percentage > 105) {
-            return 'bg-red-500';
-        } else if (percentage < 50) {
-            return 'bg-gray-400';
+            return { ring: 'stroke-red-500', text: 'text-red-700' };
         } else {
-            return `bg-${color}-500`;
+            return { ring: `stroke-${color}-500`, text: `text-${color}-700` };
         }
     };
 
-    const getTextColor = () => {
-        if (percentage >= 95 && percentage <= 105) {
-            return 'text-green-700';
-        } else if (percentage > 105) {
-            return 'text-red-700';
-        } else {
-            return `text-${color}-700`;
-        }
-    };
+    const colors = getColorClasses();
 
     return (
-        <div className="space-y-1">
-            {/* Header with label and values */}
-            <div className="flex justify-between items-center">
-                <div className="flex items-center">
-                    {Icon && <Icon size={16} className={`mr-2 ${getTextColor()}`} />}
-                    <span className="text-sm font-semibold text-gray-700">{label}</span>
-                </div>
-                <div className="text-sm font-bold">
-                    <span className={getTextColor()}>{Math.round(current)}</span>
-                    <span className="text-gray-400"> / </span>
-                    <span className="text-gray-600">{target}{unit}</span>
+        <div className="flex flex-col items-center">
+            <div className="relative" style={{ width: size, height: size }}>
+                {/* Background Circle */}
+                <svg className="transform -rotate-90" width={size} height={size}>
+                    <circle
+                        cx={size / 2}
+                        cy={size / 2}
+                        r={radius}
+                        stroke="currentColor"
+                        strokeWidth={strokeWidth}
+                        fill="none"
+                        className="text-gray-200"
+                    />
+                    {/* Progress Circle */}
+                    <circle
+                        cx={size / 2}
+                        cy={size / 2}
+                        r={radius}
+                        stroke="currentColor"
+                        strokeWidth={strokeWidth}
+                        fill="none"
+                        strokeDasharray={circumference}
+                        strokeDashoffset={offset}
+                        strokeLinecap="round"
+                        className={`${colors.ring} transition-all duration-500 ease-out`}
+                    />
+                </svg>
+                {/* Center Text */}
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className={`text-2xl font-extrabold ${colors.text}`}>
+                        {Math.round(current)}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                        / {target}
+                    </span>
                 </div>
             </div>
-            
-            {/* Progress Bar */}
-            <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
-                <div 
-                    className={`h-3 rounded-full transition-all duration-500 ease-out ${getBarColor()}`}
-                    style={{ width: `${percentage}%` }}
-                />
-            </div>
-            
-            {/* Remaining amount (optional) */}
-            {remaining > 0 && (
-                <p className="text-xs text-gray-500 text-right">
-                    {Math.round(remaining)}{unit} remaining
-                </p>
-            )}
+            {/* Label */}
+            <p className="mt-2 text-sm font-semibold text-gray-700">
+                {label} {unit && <span className="text-gray-500">({unit})</span>}
+            </p>
         </div>
     );
 };
 
-export default MacroBar;
+export default MacroRing;
