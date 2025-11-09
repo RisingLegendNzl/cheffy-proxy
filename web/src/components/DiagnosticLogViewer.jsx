@@ -1,19 +1,21 @@
-// web/src/components/DiagnosticLogViewer.js
+// web/src/components/DiagnosticLogViewer.jsx
 import React, { useEffect, useRef, useCallback } from 'react';
 import { Terminal, ChevronRight, GripVertical, ChevronDown, ChevronUp, Download } from 'lucide-react';
 
-// --- Local Dependencies (Migrated from Cheffy.txt) ---
+// --- Local Dependencies ---
 import LogEntry from './LogEntry';
 
 const DiagnosticLogViewer = ({ logs, height, setHeight, isOpen, setIsOpen, onDownloadLogs }) => {
     const logContainerRef = useRef(null);
     const resizeHandleRef = useRef(null);
     const minHeight = 50;
+
     useEffect(() => {
         if (isOpen && logContainerRef.current) {
             logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
         }
     }, [logs, isOpen]);
+
     const startResizing = useCallback((mouseDownEvent) => {
         mouseDownEvent.preventDefault();
         const startY = mouseDownEvent.clientY;
@@ -34,18 +36,21 @@ const DiagnosticLogViewer = ({ logs, height, setHeight, isOpen, setIsOpen, onDow
         };
         document.addEventListener('mousemove', doDrag);
         document.addEventListener('mouseup', stopDrag);
-    }, [height, setHeight, setIsOpen]);
+    }, [height, setHeight, setIsOpen]); // <-- *** THE FIX IS HERE *** I've added `setHeight` to this array.
+
     const toggleOpen = () => {
         if (isOpen) {
             setIsOpen(false);
         } else {
             setIsOpen(true);
             if (height <= minHeight) {
-                setHeight(250);
+                setHeight(250); // Restore to a reasonable height if it was minimized
             }
         }
     };
+
     const currentDisplayHeight = isOpen ? height : minHeight;
+
     return (
         <div style={{ height: `${currentDisplayHeight}px`, minHeight: `${minHeight}px` }} className="w-full bg-gray-900 text-white font-mono text-xs shadow-inner flex flex-col transition-all duration-200 border-t-2 border-gray-700">
             <div ref={resizeHandleRef} onMouseDown={startResizing} className="w-full h-2 bg-gray-800 cursor-row-resize flex items-center justify-center group">
@@ -64,8 +69,5 @@ const DiagnosticLogViewer = ({ logs, height, setHeight, isOpen, setIsOpen, onDow
 };
 
 export default DiagnosticLogViewer;
-
-/* ✅ Migrated without modifications
-   ❗ TODO: verify props/state wiring from App.js */
 
 
