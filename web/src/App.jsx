@@ -775,7 +775,7 @@ const App = () => {
             logContent += `Failure ${index + 1}:\nTimestamp: ${new Date(item.timestamp).toLocaleString()}\nIngredient: ${item.originalIngredient}\nTight Query: ${item.tightQuery || 'N/A'}\nNormal Query: ${item.normalQuery || 'N/A'}\nWide Query: ${item.wideQuery || 'N/A'}\n${item.error ? `Error: ${item.error}\n` : ''}\n`;
         });
         const blob = new Blob([logContent], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(url);
         const link = document.createElement('a');
         link.href = url;
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1034,7 +1034,7 @@ const App = () => {
                 onOpenSettings={() => setIsSettingsOpen(true)}
                 onNavigateToProfile={() => {
                     setContentView('profile');
-                    setIsMenuOpen(true); 
+                    setIsMenuOpen(true); // <-- FIX: Set to true to open setup panel
                 }}
                 onSignOut={() => {
                     if (auth) auth.signOut();
@@ -1056,17 +1056,21 @@ const App = () => {
                     {/* --- CHANGE 2: Remove the Duplicate "Cheffy" Logo --- */}
                     {/* <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1> */}
     
+                    {/*
                     {statusMessage.text && (
                         <div className={`p-3 mb-4 rounded-lg text-sm font-medium text-center max-w-xl mx-auto ${getStatusColor(statusMessage.type)}`}>
                             {statusMessage.text}
                         </div>
                     )}
+                    */}
     
+                     {/*
                      {userId && isAuthReady && (
                         <div className="text-center text-xs text-gray-500 mb-4 flex items-center justify-center">
                             <User size={12} className="mr-1" /> User ID: <span className="font-mono ml-1">{userId}</span>
                         </div>
                      )}
+                     */}
     
     
                     <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
@@ -1179,6 +1183,7 @@ const App = () => {
                                         {/* <h2 className="text-xl font-bold mb-4 flex items-center"><Calendar className="w-5 h-5 mr-2" /> Plan Summary ({formData.days} Days)</h2> */}
                                         {/* <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border"> ... </div> */}
                                         
+                                        {/*
                                         {uniqueIngredients.length > 0 && !hasInvalidMeals && (
                                             <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1194,6 +1199,7 @@ const App = () => {
                                                 </div>
                                             </CollapsibleSection>
                                         )}
+                                        */}
                                     </div>
                                 </div>
     
@@ -1213,6 +1219,7 @@ const App = () => {
                                         )}
                                 
                                         {/* Tab navigation - only show when results exist */}
+                                        {/*
                                         {(results && Object.keys(results).length > 0 && !loading) && (
                                             <div className="flex space-x-2 p-4 bg-gray-100 border-b">
                                                 <button 
@@ -1235,25 +1242,32 @@ const App = () => {
                                                 </button>
                                             </div>
                                         )}
+                                        */}
                                         
                                         {/* Content rendering - Profile displays always */}
+                                        {/*
                                         {contentView === 'profile' && (
                                             <ProfileTab 
                                                 formData={formData} 
                                                 nutritionalTargets={nutritionalTargets} 
                                             />
                                         )}
+                                        */}
                                         
                                         {/* Meals and Ingredients only show if results exist */}
+                                        {/*
                                         {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
                                         {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
+                                        */}
                                         
                                         {/* Placeholder when on Meals/Ingredients but no results yet */}
+                                        {/*
                                         {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
                                             <div className="p-6 text-center text-gray-500">
                                                 Generate a plan to view {contentView}.
                                             </div>
                                         )}
+                                        */}
                                 
                                     </div>
                                 )}
@@ -1342,4 +1356,5 @@ const App = () => {
 };
 
 export default App;
+
 
