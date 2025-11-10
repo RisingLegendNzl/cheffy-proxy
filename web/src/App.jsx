@@ -1046,12 +1046,14 @@ const App = () => {
             {/* NEW: Pull to Refresh Wrapper */}
             <PullToRefresh onRefresh={handleRefresh} refreshing={loading}>
                 <div 
-                    className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" 
-                    style={{ 
-                        paddingTop: '80px', // Offset for fixed header
-                        paddingBottom: `${isMobile ? '80px' : (Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight) + 'px'}` 
-                    }}
-                >
+    className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" 
+    style={{ 
+        paddingTop: '80px', // Offset for fixed header
+        // --- THIS IS THE FIX ---
+        paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '80px' : (Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight) + 'px'}`
+    }}
+>
+
                     {/* --- EXISTING CONTENT --- */}
                     {/* --- CHANGE 2: Remove the Duplicate "Cheffy" Logo --- */}
                     {/* <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1> */}
