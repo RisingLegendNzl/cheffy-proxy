@@ -1,0 +1,3 @@
+[submodule "mcp-opennutrition"]
+       path = mcp-opennutrition
+       url = https://github.com/deadletterq/mcp-opennutrition.git
