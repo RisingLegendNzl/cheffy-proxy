@@ -1,13 +1,13 @@
 /// ========= NUTRITION-SEARCH-START ========= \\\\
 // File: api/nutrition-search.js
-// [MODIFIED] Pipeline: Canonical → Avocavo → OFF → USDA
+// [MODIFIED V8] Pipeline: Canonical → OpenNutrition (NEW!) → Avocavo → OFF → USDA
 // Caching: Memory + Upstash (Vercel KV) incl. final-response cache
 
 const fetch = require('node-fetch');
 const { createClient } = require('@vercel/kv');
 
-// --- [NEW] CommonJS imports for our new modules ---
-// Use require for CommonJS compatibility
+// --- [NEW] Import OpenNutrition client ---
+const { getClient } = require('./opennutrition-client.js');
 
 // --- [MODIFICATION] Add defensive try/catch for the _canon.js import ---
 let CANON_VERSION = '0.0.0-detached';
@@ -34,8 +34,11 @@ const USDA_KEY    = process.env.USDA_API_KEY || '';
 const KV_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
 const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
+// --- [NEW] OpenNutrition control flag ---
+const DISABLE_EXTERNAL_NUTRITION_APIS = process.env.DISABLE_EXTERNAL_NUTRITION_APIS === 'true';
+
 // --- [MODIFIED] Cache key now includes CANON_VERSION ---
-const CACHE_PREFIX = `nutri:v7:cv:${CANON_VERSION}`;
+const CACHE_PREFIX = `nutri:v8:cv:${CANON_VERSION}`;
 // --- [PERF] TTLs match instructions (7d name, 30d barcode) ---
 const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
@@ -65,7 +68,6 @@ async function cacheSet(key, val, ttl) {
 }
 
 // ---------- Utilities ----------
-// --- [DELETED] Old local normalizeKey function (now imported) ---
 const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
 // --- [PERF] Reduced default timeout to 8000ms ---
@@ -73,8 +75,6 @@ function withTimeout(promise, ms = 8000) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); 
 }
 function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
-
-// --- [DELETED] Old CANON object and canonical() function ---
 
 // ---------- USDA link helpers ----------
 function extractFdcId(any) {
@@ -119,45 +119,35 @@ async function avocavoIngredient(q) {
   const key = `${CACHE_PREFIX}:avq:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
-    // --- [PERF] Use default 8000ms timeout ---
     const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/ingredient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
       body: JSON.stringify({ ingredient: q })
     }));
     const j = await res.json().catch(() => null);
-    const n = j?.nutrition || j?.result?.nutrition || j?.results?.[0]?.nutrition || null;
+    const n = j?.nutrition || j?.result?.nutrition || j?.results?.[0]?.nutrition;
     const out = extractAvocavoNutrition(n, j);
-    if (!out) return null;
-    await cacheSet(key, out, TTL_AVO_Q_MS);
-    return out;
-  } catch { softLog('avocavo:ingredient timeout', q); return null; }
+    if (out) { await cacheSet(key, out, TTL_AVO_Q_MS); return out; }
+    return null;
+  } catch { softLog('avo:ing timeout', q); return null; }
 }
-async function avocavoUPC(barcode) {
+async function avocavoUpc(barcode) {
   if (!AVOCAVO_KEY) return null;
-  const key = `${CACHE_PREFIX}:avupc:${normalizeKey(barcode)}`;
+  const key = `${CACHE_PREFIX}:avu:${normalizeKey(barcode)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
-    // --- [PERF] Use default 8000ms timeout ---
-    const res = await withTimeout(fetch(`${AVOCAVO_URL}/upc/ingredient`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
-      body: JSON.stringify({ upc: String(barcode) })
+    const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/upc/${barcode}`, {
+      headers: { 'X-API-Key': AVOCAVO_KEY }
     }));
     const j = await res.json().catch(() => null);
-    const n = j?.product?.nutrition || j?.nutrition || null;
+    const n = j?.nutrition || j?.product?.nutrition;
     const out = extractAvocavoNutrition(n, j);
-    if (!out) return null;
-    await cacheSet(key, out, TTL_AVO_U_MS);
-    return out;
-  } catch { softLog('avocavo:upc timeout', barcode); return null; }
+    if (out) { await cacheSet(key, out, TTL_AVO_U_MS); return out; }
+    return null;
+  } catch { softLog('avo:upc timeout', barcode); return null; }
 }
-async function tryAvocavo(arg, isUPC) {
-  try { 
-    // --- [PERF] Keep shorter 3.5s timeout for Promise.race ---
-    return await withTimeout(isUPC ? avocavoUPC(arg) : avocavoIngredient(arg), 3500); 
-  }
-  catch { return null; }
+async function tryAvocavo(arg, isBarcode) {
+  return isBarcode ? avocavoUpc(arg) : avocavoIngredient(arg);
 }
 
 // ---------- OpenFoodFacts ----------
@@ -165,13 +155,12 @@ async function offByBarcode(barcode) {
   const key = `${CACHE_PREFIX}:off:barcode:${normalizeKey(barcode)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
-    const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json`;
-    // --- [PERF] Use default 8000ms timeout ---
+    const url = `https://world.openfoodfacts.org/api/v2/product/${barcode}`;
     const res = await withTimeout(fetch(url));
     if (!res.ok) return null;
     const json = await res.json().catch(() => null);
-    if (!json || !json.product) return null;
-    const nutr = json.product.nutriments || {};
+    const nutr = json?.product?.nutriments;
+    if (!nutr) return null;
     const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
     const out = {
       status: 'found', source: 'openfoodfacts', servingUnit: '100g', usda_link: null,
@@ -190,14 +179,13 @@ async function offByQuery(q) {
   const c = await cacheGet(key); if (c) return c;
   try {
     const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=3`;
-    // --- [PERF] Use default 8000ms timeout ---
     const res = await withTimeout(fetch(url));
     if (!res.ok) return null;
     const json = await res.json().catch(() => null);
     const items = json?.products || [];
     for (const p of items) {
       const nutr = p.nutriments || {};
-      const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_1D.1:200g'] / KJ_TO_KCAL : null);
+      const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
       const out = {
         status: 'found', source: 'openfoodfacts', servingUnit: '100g', usda_link: null,
         calories: toNumber(kcal),
@@ -217,7 +205,6 @@ async function offByQuery(q) {
 function pickBestFdc(list, query) {
   if (!Array.isArray(list) || list.length === 0) return null;
   const q = (query || '').toLowerCase();
-  // lightweight scoring
   const score = (h) => {
     const d = (h.description || '').toLowerCase();
     let s = 0;
@@ -234,7 +221,6 @@ async function usdaByQuery(q) {
   const c = await cacheGet(key); if (c) return c;
   try {
     const sURL = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${USDA_KEY}&query=${encodeURIComponent(q)}&pageSize=7`;
-    // --- [PERF] Use default 8000ms timeout ---
     const sres = await withTimeout(fetch(sURL));
     if (!sres.ok) return null;
     const sjson = await sres.json().catch(() => null);
@@ -243,7 +229,6 @@ async function usdaByQuery(q) {
     const best = pickBestFdc(foods, q) || foods[0];
     const id = best.fdcId;
     const dURL = `https://api.nal.usda.gov/fdc/v1/food/${id}?api_key=${USDA_KEY}`;
-    // --- [PERF] Use default 8000ms timeout ---
     const dres = await withTimeout(fetch(dURL));
     if (!dres.ok) return null;
     const food = await dres.json().catch(() => null);
@@ -273,27 +258,84 @@ async function usdaByQuery(q) {
   } catch { softLog('usda:query timeout', q); return null; }
 }
 
-// ---------- [MODIFIED] Resolver (Canonical-First) ----------
+// ---------- [NEW] OpenNutrition Integration ----------
+async function tryOpenNutrition(barcode, query, log) {
+  const onStartTime = Date.now();
+  
+  try {
+    const onClient = getClient();
+    let onResult = null;
+
+    // Try barcode lookup first (most specific)
+    if (barcode) {
+      log(`[NUTRI] OpenNutrition barcode lookup: ${barcode}`, 'DEBUG', 'ON');
+      const barcodeResult = await onClient.lookupByBarcode(barcode);
+      
+      if (barcodeResult) {
+        onResult = onClient.transformToCheffyFormat(barcodeResult);
+        if (onResult) {
+          const latency = Date.now() - onStartTime;
+          log(`[NUTRI] OpenNutrition barcode HIT: ${barcodeResult.name} (${latency}ms)`, 'INFO', 'ON');
+          return onResult;
+        }
+      }
+      log(`[NUTRI] OpenNutrition barcode MISS`, 'DEBUG', 'ON');
+    }
+
+    // Try name search (semantic matching)
+    if (query) {
+      log(`[NUTRI] OpenNutrition name search: ${query}`, 'DEBUG', 'ON');
+      const searchResults = await onClient.searchByName(query, 5);
+      
+      if (searchResults && searchResults.length > 0) {
+        // Pick best match (first result is typically most relevant)
+        const bestMatch = searchResults[0];
+        onResult = onClient.transformToCheffyFormat(bestMatch);
+        
+        if (onResult) {
+          const latency = Date.now() - onStartTime;
+          log(`[NUTRI] OpenNutrition name HIT: ${bestMatch.name} (${latency}ms)`, 'INFO', 'ON', {
+            query: query,
+            matched: bestMatch.name,
+            latency_ms: latency,
+            alternatives: searchResults.slice(1, 3).map(r => r.name)
+          });
+          return onResult;
+        }
+      }
+      log(`[NUTRI] OpenNutrition name MISS`, 'DEBUG', 'ON');
+    }
+
+    const latency = Date.now() - onStartTime;
+    log(`[NUTRI] OpenNutrition MISS (${latency}ms)`, 'DEBUG', 'ON');
+    return null;
+
+  } catch (error) {
+    const latency = Date.now() - onStartTime;
+    log(`[NUTRI] OpenNutrition ERROR (${latency}ms): ${error.message}`, 'WARN', 'ON');
+    return null; // Graceful fallback
+  }
+}
+
+// ---------- [MODIFIED] Resolver (Canonical → OpenNutrition → External) ----------
 async function fetchNutritionData(barcode, query, log = console.log) {
   query = query ? normFood(query) : query;
   
-  // --- [NEW] Step 1: Check Canonical DB First ---
+  // --- Step 1: Check Canonical DB First (HIGHEST PRIORITY) ---
   if (query) {
-    const key = normalizeKey(query); // Use shared normalizer
-    const canonData = canonGet(key); // Use imported getter
+    const key = normalizeKey(query);
+    const canonData = canonGet(key);
     if (canonData) {
       log(`[NUTRI] Canonical HIT for: ${query} (key: ${key})`, 'INFO', 'CANON');
-      // Transform CanonRow to the expected output format
       return {
         status: 'found',
-        source: 'CANON', // Use 'CANON' as the source
+        source: 'CANON',
         servingUnit: '100g',
-        usda_link: null, // No USDA link for canonical data
+        usda_link: null,
         calories: canonData.kcal_per_100g,
         protein: canonData.protein_g_per_100g,
         fat: canonData.fat_g_per_100g,
         carbs: canonData.carb_g_per_100g,
-        // Add fiber and other details
         fiber: canonData.fiber_g_per_100g,
         notes: canonData.notes,
         version: CANON_VERSION
@@ -301,34 +343,64 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     }
     log(`[NUTRI] Canonical MISS for: ${query} (key: ${key})`, 'DEBUG', 'CANON');
   }
-  // --- [END NEW] ---
 
-  // --- Step 2: Check Cache (for external API results) ---
-  // Cache key already includes CANON_VERSION from CACHE_PREFIX
+  // --- Step 2: Check Cache (for external/OpenNutrition results) ---
   const finalKey = `${CACHE_PREFIX}:final:${normalizeKey(barcode || query || '')}`;
   const cached = await cacheGet(finalKey);
-  if (cached) return cached;
-  log(`[NUTRI] External API Cache MISS for: ${query || barcode}`, 'DEBUG', 'CACHE');
+  if (cached) {
+    log(`[NUTRI] Cache HIT for: ${query || barcode}`, 'DEBUG', 'CACHE');
+    return cached;
+  }
+  log(`[NUTRI] Cache MISS for: ${query || barcode}`, 'DEBUG', 'CACHE');
 
-  // --- Step 3: Run external API fallbacks ---
+  // --- Step 3: Try OpenNutrition (LOCAL, FAST) ---
+  log(`[NUTRI] Trying OpenNutrition...`, 'DEBUG', 'ON');
+  const onResult = await tryOpenNutrition(barcode, query, log);
+  if (onResult) {
+    await cacheSet(finalKey, onResult, TTL_FINAL_MS);
+    return onResult;
+  }
+
+  // --- Step 4: External APIs (FALLBACK) ---
+  if (DISABLE_EXTERNAL_NUTRITION_APIS) {
+    log(`[NUTRI] External APIs disabled, returning not_found`, 'INFO', 'EXTERNAL');
+    const notFound = {
+      status: 'not_found',
+      source: 'error',
+      reason: 'opennutrition_miss_external_disabled',
+      usda_link: null
+    };
+    await cacheSet(finalKey, notFound, TTL_FINAL_MS);
+    return notFound;
+  }
+
+  log(`[NUTRI] Falling back to external APIs...`, 'DEBUG', 'EXTERNAL');
   const tasks = [];
   if (barcode) tasks.push(tryAvocavo(barcode, true));
   if (query)   tasks.push(tryAvocavo(query, false), offByQuery(query), usdaByQuery(query));
 
   let out = null;
   if (tasks.length) {
-    try { out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); }
-    catch { out = null; }
+    try {
+      out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null)));
+    } catch {
+      out = null;
+    }
   }
 
   if (!out && barcode) out = await offByBarcode(barcode);
   if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
   
-  // --- [DELETED] Old canonical(query) fallback ---
-  
-  if (!out)            out = { status: 'not_found', source: 'error', reason: 'no_source_succeeded', usda_link: null };
+  if (!out) {
+    out = {
+      status: 'not_found',
+      source: 'error',
+      reason: 'no_source_succeeded',
+      usda_link: null
+    };
+  }
 
-  // --- Step 4: Cache external results ---
+  // --- Step 5: Cache external results ---
   await cacheSet(finalKey, out, TTL_FINAL_MS);
   return out;
 }
@@ -353,4 +425,3 @@ module.exports = async (req, res) => {
 
 module.exports.fetchNutritionData = fetchNutritionData;
 /// ========= NUTRITION-SEARCH-END ========= \\\\
-
