@@ -1034,7 +1034,7 @@ const App = () => {
                 onOpenSettings={() => setIsSettingsOpen(true)}
                 onNavigateToProfile={() => {
                     setContentView('profile');
-                    setIsMenuOpen(false); // Close mobile menu if open
+                    setIsMenuOpen(true); 
                 }}
                 onSignOut={() => {
                     if (auth) auth.signOut();
