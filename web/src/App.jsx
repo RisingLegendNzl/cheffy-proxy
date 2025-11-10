@@ -421,7 +421,8 @@ const App = () => {
             // This is CRITICAL. It tells the app it's safe to start auto-saving.
             setIsPlanLoaded(true);
         }
-    }, [isAuthReady, userId, db, appId, recalculateTotalCost, showToast]);
+    // --- FIX: Add all dependencies to handleLoadPlan ---
+    }, [isAuthReady, userId, db, appId, recalculateTotalCost, showToast, setMealPlan, setResults, setUniqueIngredients, setNutritionalTargets, setEatenMeals, setSelectedDay]);
 
     // --- FIX 2.4: Update startup useEffect to call handleLoadPlan ---
     useEffect(() => {
@@ -445,13 +446,15 @@ const App = () => {
             }
         });
         setTotalCost(newTotal);
-    }, []);
+    // --- FIX: Add dependency to recalculateTotalCost ---
+    }, [setTotalCost]);
 
     // ===== TOAST HELPERS =====
     const showToast = useCallback((message, type = 'info', duration = 3000) => {
       const id = Date.now();
       setToasts(prev => [...prev, { id, message, type, duration }]);
-    }, []);
+    // --- FIX: Add dependency to showToast ---
+    }, [setToasts]);
     
     const removeToast = useCallback((id) => {
       setToasts(prev => prev.filter(toast => toast.id !== id));
@@ -1308,7 +1311,7 @@ const App = () => {
                                                          <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
                                                             <div className="flex-1 min-w-0">
                                                                 <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
-                                                                <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGamsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
+                                                                <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGramsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
                                                             </div>
                                                             <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
                                                         </div>
