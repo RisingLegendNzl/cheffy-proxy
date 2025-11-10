@@ -588,15 +588,21 @@ const App = () => {
                                 break;
 
                             case 'plan:complete':
-                                planComplete = true; // Mark as complete
-                                setMealPlan(eventData.mealPlan || []);
-                                setResults(eventData.results || {});
-                                setUniqueIngredients(eventData.uniqueIngredients || []);
-                                recalculateTotalCost(eventData.results || {});
-                                
-                                setGenerationStepKey('complete');
-                                setGenerationStatus('Plan generation complete!');
-                                break;
+    planComplete = true; // Mark as complete
+    setMealPlan(eventData.mealPlan || []);
+    setResults(eventData.results || {});
+    setUniqueIngredients(eventData.uniqueIngredients || []);
+    recalculateTotalCost(eventData.results || {});
+    
+    setGenerationStepKey('complete');
+    setGenerationStatus('Plan generation complete!');
+    
+    // 🆕 AUTO-NAVIGATE TO MEALS TAB AFTER SUCCESSFUL GENERATION
+    setTimeout(() => {
+        setContentView('meals');
+        setSelectedDay(1); // Reset to day 1
+    }, 1500); // Wait 1.5 seconds so user sees "Complete" status
+    break;
 
                             case 'error':
                                 throw new Error(eventData.message || 'Unknown backend error');
