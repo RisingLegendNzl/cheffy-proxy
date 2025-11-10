@@ -840,7 +840,7 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, formData, appId]);
 
-    // --- Handle Edit Profile Navigation from Settings ---
+   // --- Handle Edit Profile Navigation from Settings ---
     const handleEditProfile = useCallback(() => {
         setIsSettingsOpen(false);
         setContentView('profile');
@@ -848,7 +848,8 @@ const App = () => {
         setTimeout(() => {
             document.querySelector('[name="name"]')?.focus();
         }, 100);
-    }, []);
+    }, [setContentView, setIsSettingsOpen]); // <-- FIX: Add state setters to dependency array
+
 
 
     const handleChange = (e) => {
