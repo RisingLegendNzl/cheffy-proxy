@@ -376,22 +376,6 @@ const App = () => {
         }
     }, [userId, db, isAuthReady, showToast]);
 
-    // --- ADDED per Change 4 ---
-    // Auto-save profile 2 seconds after user stops typing
-    useEffect(() => {
-        // Only auto-save if user is authenticated
-        if (!userId || userId.startsWith('local_') || !isAuthReady) return;
-        
-        // Debounce: wait 2 seconds after last change
-        const timeoutId = setTimeout(() => {
-            handleSaveProfile(true); // Silent save (no toast)
-        }, 2000);
-        
-        // Cleanup: cancel previous timer if user types again
-        return () => clearTimeout(timeoutId);
-    }, [formData, nutritionalTargets, userId, isAuthReady, handleSaveProfile]);
-
-
     // --- ADDED per Change 5 ---
     // Save settings to Firestore
     const handleSaveSettings = useCallback(async () => {
@@ -436,24 +420,6 @@ const App = () => {
             console.error("[SETTINGS] Error loading settings:", error);
         }
     }, [userId, db, isAuthReady]);
-
-    // --- ADDED per Change 6 ---
-    // Auto-save settings when they change
-    useEffect(() => {
-        if (userId && !userId.startsWith('local_') && isAuthReady) {
-            handleSaveSettings();
-        }
-    }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, isAuthReady, handleSaveSettings]);
-
-    // --- ADDED per Change 7 ---
-    // Load profile and settings after user signs in
-    useEffect(() => {
-        if (userId && !userId.startsWith('local_') && isAuthReady && db) {
-            // Load both profile and settings
-            handleLoadProfile(true); // Silent load
-            handleLoadSettings();
-        }
-    }, [userId, isAuthReady, db, handleLoadProfile, handleLoadSettings]);
 
 
     // --- DELETED old auto-load effect per Change 9 ---
@@ -1150,6 +1116,39 @@ const App = () => {
             return { ...prev, [dayKey]: dayMeals };
         });
     }, []); 
+
+    // --- ADDED per Change 4 (MOVED HERE) ---
+    // Auto-save profile 2 seconds after user stops typing
+    useEffect(() => {
+        // Only auto-save if user is authenticated
+        if (!userId || userId.startsWith('local_') || !isAuthReady) return;
+        
+        // Debounce: wait 2 seconds after last change
+        const timeoutId = setTimeout(() => {
+            handleSaveProfile(true); // Silent save (no toast)
+        }, 2000);
+        
+        // Cleanup: cancel previous timer if user types again
+        return () => clearTimeout(timeoutId);
+    }, [formData, nutritionalTargets, userId, isAuthReady, handleSaveProfile]);
+
+    // --- ADDED per Change 6 (MOVED HERE) ---
+    // Auto-save settings when they change
+    useEffect(() => {
+        if (userId && !userId.startsWith('local_') && isAuthReady) {
+            handleSaveSettings();
+        }
+    }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, isAuthReady, handleSaveSettings]);
+
+    // --- ADDED per Change 7 (MOVED HERE) ---
+    // Load profile and settings after user signs in
+    useEffect(() => {
+        if (userId && !userId.startsWith('local_') && isAuthReady && db) {
+            // Load both profile and settings
+            handleLoadProfile(true); // Silent load
+            handleLoadSettings();
+        }
+    }, [userId, isAuthReady, db, handleLoadProfile, handleLoadSettings]);
 
     const categorizedResults = useMemo(() => {
         const groups = {};
