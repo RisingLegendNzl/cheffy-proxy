@@ -184,6 +184,14 @@ const App = () => {
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
     
+    // --- CHANGE 4: Add State Variables for Log Visibility Toggles ---
+    const [showOrchestratorLogs, setShowOrchestratorLogs] = useState(
+      () => JSON.parse(localStorage.getItem('cheffy_show_orchestrator_logs') ?? 'true')
+    );
+    const [showFailedIngredientsLogs, setShowFailedIngredientsLogs] = useState(
+      () => JSON.parse(localStorage.getItem('cheffy_show_failed_ingredients_logs') ?? 'true')
+    );
+    
     const [generationStepKey, setGenerationStepKey] = useState(null);
     const [generationStatus, setGenerationStatus] = useState("Ready to generate plan."); 
 
@@ -213,6 +221,15 @@ const App = () => {
     const [isAuthReady, setIsAuthReady] = useState(false);
 
     const [appId, setAppId] = useState('default-app-id');
+    
+    // --- CHANGE 5: Persist Log Visibility Preferences ---
+    useEffect(() => {
+      localStorage.setItem('cheffy_show_orchestrator_logs', JSON.stringify(showOrchestratorLogs));
+    }, [showOrchestratorLogs]);
+
+    useEffect(() => {
+      localStorage.setItem('cheffy_show_failed_ingredients_logs', JSON.stringify(showFailedIngredientsLogs));
+    }, [showFailedIngredientsLogs]);
 
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
@@ -823,6 +840,16 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, formData, appId]);
 
+    // --- CHANGE 7: Handle Edit Profile Navigation from Settings ---
+    const handleEditProfile = useCallback(() => {
+        setIsSettingsOpen(false);
+        setContentView('profile');
+        // Scroll to top of form
+        setTimeout(() => {
+            document.querySelector('[name="name"]')?.focus();
+        }, 100);
+    }, []);
+
 
     const handleChange = (e) => {
         const { name, value } = e.target;
@@ -1019,7 +1046,8 @@ const App = () => {
                     }}
                 >
                     {/* --- EXISTING CONTENT --- */}
-                    <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1>
+                    {/* --- CHANGE 2: Remove the Duplicate "Cheffy" Logo --- */}
+                    {/* <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1> */}
     
                     {statusMessage.text && (
                         <div className={`p-3 mb-4 rounded-lg text-sm font-medium text-center max-w-xl mx-auto ${getStatusColor(statusMessage.type)}`}>
@@ -1131,24 +1159,19 @@ const App = () => {
     
                             {/* --- RESULTS VIEW --- */}
                             <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
+                                {/* --- CHANGE 1: Remove the Purple Burger Menu Button --- */}
+                                {/*
                                 <div className="p-4 md:hidden flex justify-end">
                                     <button className="bg-indigo-600 text-white p-2 rounded-full shadow" onClick={() => setIsMenuOpen(true)}><Menu /></button>
                                 </div>
+                                */}
+                                
+                                {/* --- CHANGE 3: Remove the "Plan Summary" Card (kept wrapper) --- */}
                                 <div className="border-b">
                                     <div className="p-6 md:p-8">
-                                        <h2 className="text-xl font-bold mb-4 flex items-center"><Calendar className="w-5 h-5 mr-2" /> Plan Summary ({formData.days} Days)</h2>
-                                        <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border">
-                                            {/* --- UPDATED PLAN SUMMARY --- */}
-                                            <p className="flex items-center">
-                                                <Users className="w-4 h-4 mr-2"/> 
-                                                Goal: <span className='font-semibold ml-1'>{formatGoalText(formData.goal)}</span> | 
-                                                Dietary: <span className='font-semibold ml-1'>{formData.dietary}</span>
-                                            </p>
-                                            <p className="flex items-center">
-                                                <Tag className="w-4 h-4 mr-2"/> 
-                                                Spending: <span className='font-semibold ml-1'>{formData.costPriority}</span>
-                                            </p>
-                                        </div>
+                                        {/* <h2 className="text-xl font-bold mb-4 flex items-center"><Calendar className="w-5 h-5 mr-2" /> Plan Summary ({formData.days} Days)</h2> */}
+                                        {/* <div className="text-sm space-y-2 bg-indigo-50 p-4 rounded-lg border"> ... </div> */}
+                                        
                                         {uniqueIngredients.length > 0 && !hasInvalidMeals && (
                                             <CollapsibleSection title={`Shopping List (${uniqueIngredients.length} Items)`}>
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1250,6 +1273,7 @@ const App = () => {
             />
     
             {/* NEW: Settings Panel */}
+            {/* --- CHANGE 8: Pass New Props to Settings Panel --- */}
             <SettingsPanel
                 isOpen={isSettingsOpen}
                 onClose={() => setIsSettingsOpen(false)}
@@ -1265,12 +1289,27 @@ const App = () => {
                     setEatenMeals({});
                     showToast('All data cleared', 'success');
                 }}
+                onEditProfile={handleEditProfile}
+                showOrchestratorLogs={showOrchestratorLogs}
+                onToggleOrchestratorLogs={setShowOrchestratorLogs}
+                showFailedIngredientsLogs={showFailedIngredientsLogs}
+                onToggleFailedIngredientsLogs={setShowFailedIngredientsLogs}
             />
     
             {/* KEEP: Existing log viewers and recipe modal */}
+            {/* --- CHANGE 6: Conditionally Render Log Viewers --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
-                <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
-                <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
+                {showOrchestratorLogs && (
+                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                )}
+                {showFailedIngredientsLogs && (
+                    <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
+                )}
+                {!showOrchestratorLogs && !showFailedIngredientsLogs && (
+                    <div className="bg-gray-800 text-white p-2 text-xs text-center cursor-pointer hover:bg-gray-700" onClick={() => { setShowOrchestratorLogs(true); setShowFailedIngredientsLogs(true); }}>
+                        📋 Show Logs
+                    </div>
+                )}
             </div>
     
             {selectedMeal && (
