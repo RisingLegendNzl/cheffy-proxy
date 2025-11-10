@@ -966,6 +966,8 @@ const App = () => {
                     eatenMeals={eatenMeals}
                     onToggleMealEaten={onToggleMealEaten}
                     onViewRecipe={setSelectedMeal} 
+                     nutritionalTargets={nutritionalTargets} 
+                     loading={loading}
                 />
             ) : (
                 <div className="flex-1 text-center p-8 text-gray-500">
