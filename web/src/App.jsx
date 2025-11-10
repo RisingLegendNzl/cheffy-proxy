@@ -152,7 +152,7 @@ const categoryIconMap = {
     'spreads': <EmojiIcon code="1f95c" alt="spreads" />,
     'condiments': <EmojiIcon code="1f9c2" alt="condiments" />,
     'bakery': <EmojiIcon code="1f370" alt="bakery" />,
-    'frozen': <EmojiIcon code="2744" alt="frozen" />, // <<< FIX: Removed the stray "S"
+    'frozen': <EmojiIcon code="2744" alt="frozen" />,
     'snacks': <EmojiIcon code="1f36b" alt="snacks" />, 
     'misc': <EmojiIcon code="1f36b" alt="snacks" />,
     'uncategorized': <EmojiIcon code="1f6cd" alt="shopping" />,
@@ -175,7 +175,7 @@ const App = () => {
     const [eatenMeals, setEatenMeals] = useState({});
     const [selectedDay, setSelectedDay] = useState(1);
     const [contentView, setContentView] = useState('profile'); // <-- Set default tab
-    const [isMenuOpen, setIsMenuOpen] = useState(false);
+    const [isMenuOpen, setIsMenuOpen] = useState(false); // This state is no longer used for layout
     const [diagnosticLogs, setDiagnosticLogs] = useState([]);
     const [nutritionCache, setNutritionCache] = useState({});
     const [loadingNutritionFor, setLoadingNutritionFor] = useState(null);
@@ -978,15 +978,16 @@ const App = () => {
     }, [auth, showToast]);
 
     // --- Handle Edit Profile Navigation from Settings ---
+    // <<< THIS IS THE FIX >>>
     const handleEditProfile = useCallback(() => {
         setIsSettingsOpen(false); // Close settings panel
-        setIsMenuOpen(true); // <-- *** THIS IS THE FIX: Open the setup form panel ***
-        setContentView('profile'); // Set right panel to profile summary
+        setContentView('profile'); // Set content view to profile
         // Scroll to top of form
         setTimeout(() => {
+            // Check if the element exists before focusing
             document.querySelector('[name="name"]')?.focus();
         }, 100);
-    }, [setContentView, setIsSettingsOpen, setIsMenuOpen]); // <-- *** ADD ALL SETTERS ***
+    }, [setContentView, setIsSettingsOpen]); // <-- Removed isMenuOpen from dependencies
 
 
     const handleChange = (e) => {
