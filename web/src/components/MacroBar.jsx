@@ -61,11 +61,15 @@ const MacroBar = ({
                 </div>
             </div>
             
-            {/* Progress Bar - FIXED: Added overflow-hidden */}
-            <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+            {/* Progress Bar Container - FIX: Added relative, overflow-hidden */}
+            <div className="relative w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+                {/* Progress Bar Fill - FIX: Added absolute positioning, will-change */}
                 <div 
-                    className={`h-3 rounded-full transition-all duration-500 ease-out ${getBarColor()}`}
-                    style={{ width: `${percentage}%` }}
+                    className={`absolute top-0 left-0 h-full rounded-full transition-all duration-500 ease-out ${getBarColor()}`}
+                    style={{ 
+                        width: `${percentage}%`,
+                        willChange: 'width'
+                    }}
                 />
             </div>
             
