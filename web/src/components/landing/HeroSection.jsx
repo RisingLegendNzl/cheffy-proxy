@@ -51,7 +51,7 @@ const HeroSection = ({ onGetStarted, onWatchDemo }) => {
                 backgroundColor: COLORS.primary[600],
               }}
             >
-              <span>Start Free Trial</span>
+              <span>Start 7-Day Free Trial</span>
               <ArrowRight size={20} />
             </button>
 
@@ -68,56 +68,27 @@ const HeroSection = ({ onGetStarted, onWatchDemo }) => {
             </button>
           </div>
 
-          {/* Social Proof Stats */}
-          <div className="flex flex-col md:flex-row items-center justify-center space-y-8 md:space-y-0 md:space-x-12 mb-16">
-            <div className="text-center">
-              <div 
-                className="text-4xl md:text-5xl font-bold mb-2"
-                style={{ color: COLORS.gray[900] }}
-              >
-                50K+
-              </div>
-              <div style={{ color: COLORS.gray[600] }}>Active Users</div>
-            </div>
-
-            <div className="hidden md:block w-px h-12" style={{ backgroundColor: COLORS.gray[300] }}></div>
-
-            <div className="text-center">
-              <div 
-                className="text-4xl md:text-5xl font-bold mb-2"
-                style={{ color: COLORS.gray[900] }}
-              >
-                4.9/5
-              </div>
-              <div style={{ color: COLORS.gray[600] }}>User Rating</div>
-            </div>
-
-            <div className="hidden md:block w-px h-12" style={{ backgroundColor: COLORS.gray[300] }}></div>
-
-            <div className="text-center">
-              <div 
-                className="text-4xl md:text-5xl font-bold mb-2"
-                style={{ color: COLORS.gray[900] }}
-              >
-                1M+
-              </div>
-              <div style={{ color: COLORS.gray[600] }}>Meals Generated</div>
-            </div>
-          </div>
-
-          {/* Hero Image */}
-          <div className="max-w-5xl mx-auto">
+          {/* Hero Image - Larger and Cleaner */}
+          <div className="max-w-6xl mx-auto px-4">
             <div 
-              className="rounded-2xl overflow-hidden shadow-2xl"
+              className="rounded-3xl overflow-hidden shadow-2xl"
               style={{ backgroundColor: COLORS.gray[100] }}
             >
               <img
-                src="https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=1200&h=600&fit=crop"
-                alt="Healthy meal prep containers"
+                src="https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=1400&h=700&fit=crop&q=80"
+                alt="Healthy meal prep bowls"
                 className="w-full h-auto"
                 loading="eager"
               />
             </div>
+            
+            {/* Subtle Caption */}
+            <p 
+              className="text-center mt-6 text-sm"
+              style={{ color: COLORS.gray[500] }}
+            >
+              Personalized meal plans tailored to your goals
+            </p>
           </div>
         </div>
       </div>
