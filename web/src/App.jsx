@@ -71,6 +71,11 @@ const MAX_SUBSTITUTES = 5;
 const FIRESTORE_PROFILE_COLLECTION = 'profile';
 const FIRESTORE_PROFILE_DOC_ID = 'userProfile';
 
+// --- FIX 2.1: Add new constants for plan persistence ---
+const FIRESTORE_PLAN_COLLECTION = 'plan';
+const FIRESTORE_PLAN_DOC_ID = 'userPlan';
+
+
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = {
     name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 15.99, size: "1kg",
@@ -219,6 +224,9 @@ const App = () => {
     const [db, setDb] = useState(null);
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
+
+    // --- FIX 2.2: Add state to track if plan load is complete ---
+    const [isPlanLoaded, setIsPlanLoaded] = useState(false);
 
     const [appId, setAppId] = useState('default-app-id');
     
@@ -371,11 +379,57 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, appId]);
 
+    // --- FIX 2.3: Create new handleLoadPlan function ---
+    const handleLoadPlan = useCallback(async () => {
+        if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
+            console.warn('[FIREBASE LOAD] Skipping plan load: Firebase not ready.');
+            setIsPlanLoaded(true); // Mark as "loaded" to unblock saving
+            return;
+        }
+        
+        console.log('[FIREBASE LOAD] Attempting plan load...');
+        try {
+            const planDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PLAN_COLLECTION, FIRESTORE_PLAN_DOC_ID);
+            const docSnap = await getDoc(planDocRef);
+
+            if (docSnap.exists()) {
+                const loadedData = docSnap.data();
+                console.log('[FIREBASE LOAD] Plan data found:', loadedData);
+
+                if (loadedData.mealPlan && loadedData.mealPlan.length > 0) {
+                    setMealPlan(loadedData.mealPlan || []);
+                    setResults(loadedData.results || {});
+                    setUniqueIngredients(loadedData.uniqueIngredients || []);
+                    setNutritionalTargets(loadedData.nutritionalTargets || { calories: 0, protein: 0, fat: 0, carbs: 0 });
+                    setEatenMeals(loadedData.eatenMeals || {});
+                    setSelectedDay(loadedData.selectedDay || 1);
+                    
+                    // Important: Recalculate total cost from loaded results
+                    recalculateTotalCost(loadedData.results || {});
+                    
+                    showToast('Loaded previous plan from session!', 'success');
+                } else {
+                    console.log('[FIREBASE LOAD] Plan document found, but it was empty.');
+                }
+            } else {
+                console.log('[FIREBASE LOAD] No saved plan document found.');
+            }
+        } catch (loadError) {
+            console.error('[FIREBASE LOAD] Error loading plan:', loadError);
+            showToast(`Error loading plan: ${loadError.message}`, 'error');
+        } finally {
+            // This is CRITICAL. It tells the app it's safe to start auto-saving.
+            setIsPlanLoaded(true);
+        }
+    }, [isAuthReady, userId, db, appId, recalculateTotalCost, showToast]);
+
+    // --- FIX 2.4: Update startup useEffect to call handleLoadPlan ---
     useEffect(() => {
         if (isAuthReady && userId && db && appId) {
             handleLoadProfile(true);
+            handleLoadPlan(); // <-- ADDED
         }
-    }, [isAuthReady, userId, db, appId, handleLoadProfile]);
+    }, [isAuthReady, userId, db, appId, handleLoadProfile, handleLoadPlan]); // <-- ADDED
 
 
     // --- Handlers ---
@@ -898,6 +952,69 @@ const App = () => {
     }, [results]); 
 
 
+    // --- FIX 2.5: Add auto-save logic ---
+    const saveTimerRef = useRef(null);
+
+    const savePlan = useCallback(() => {
+        // Stop if auth isn't ready OR if the initial plan load isn't finished
+        if (!isAuthReady || !userId || !db || !appId || !isPlanLoaded) {
+            return;
+        }
+
+        // Don't save if there's no plan
+        if (mealPlan.length === 0 && Object.keys(results).length === 0) {
+            console.log("[FIREBASE SAVE] Skipping save, plan is empty.");
+            return;
+        }
+
+        const planData = {
+            mealPlan,
+            results,
+            uniqueIngredients,
+            nutritionalTargets,
+            eatenMeals,
+            selectedDay
+        };
+
+        try {
+            const planDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PLAN_COLLECTION, FIRESTORE_PLAN_DOC_ID);
+            // setDoc (not updateDoc) to overwrite the entire plan
+            setDoc(planDocRef, planData); 
+            console.log("[FIREBASE SAVE] Plan data auto-saved.");
+        } catch (saveError) {
+            console.error('[FIREBASE SAVE] Error auto-saving plan:', saveError);
+            setStatusMessage({ text: `Error auto-saving plan: ${saveError.message}`, type: 'error' });
+        }
+    }, [isAuthReady, userId, db, appId, isPlanLoaded, mealPlan, results, uniqueIngredients, nutritionalTargets, eatenMeals, selectedDay]);
+
+    // Debounced save effect
+    useEffect(() => {
+        // Only run auto-save *after* the initial plan load is complete
+        if (!isPlanLoaded) {
+            return;
+        }
+
+        // Clear any existing timer
+        if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+        }
+
+        // Set a new timer
+        saveTimerRef.current = setTimeout(() => {
+            console.log("[FIREBASE SAVE] Debounced save triggered.");
+            savePlan();
+        }, 1500); // 1.5 second debounce
+
+        // Cleanup
+        return () => {
+            if (saveTimerRef.current) {
+                clearTimeout(saveTimerRef.current);
+            }
+        };
+    }, [isPlanLoaded, mealPlan, results, uniqueIngredients, nutritionalTargets, eatenMeals, selectedDay, savePlan]);
+    // --- END: FIX 2.5 ---
+
+
     const PlanCalculationErrorPanel = () => (
         <div className="p-6 text-center bg-red-100 text-red-800 rounded-lg shadow-lg m-4">
             <AlertTriangle className="inline mr-2 w-8 h-8" />
@@ -1191,7 +1308,7 @@ const App = () => {
                                                          <div key={item.originalIngredient || index} className="flex justify-between items-center p-3 bg-white border rounded-lg shadow-sm">
                                                             <div className="flex-1 min-w-0">
                                                                 <p className="font-bold truncate">{item.originalIngredient || 'Unknown Ingredient'}</p>
-                                                                <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGramsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
+                                                                <p className="text-sm">Est. Qty: {item.totalGramsRequired ? `${Math.round(item.totalGamsRequired)}g` : 'N/A'} ({item.quantityUnits || 'N/A'})</p>
                                                             </div>
                                                             <span className="px-3 py-1 ml-4 text-xs font-semibold text-indigo-800 bg-indigo-100 rounded-full whitespace-nowrap">{item.category || 'N/A'}</span>
                                                         </div>
