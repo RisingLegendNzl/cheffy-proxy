@@ -152,8 +152,8 @@ const categoryIconMap = {
     'spreads': <EmojiIcon code="1f95c" alt="spreads" />,
     'condiments': <EmojiIcon code="1f9c2" alt="condiments" />,
     'bakery': <EmojiIcon code="1f370" alt="bakery" />,
-S    'frozen': <EmojiIcon code="2744" alt="frozen" />,
-    'snacks': <EmojiIcon code="1f36b" alt="snacks" />, // <-- *** THE FIX IS HERE *** (was `code-=`)
+    'frozen': <EmojiIcon code="2744" alt="frozen" />, // <<< FIX: Removed the stray "S"
+    'snacks': <EmojiIcon code="1f36b" alt="snacks" />, 
     'misc': <EmojiIcon code="1f36b" alt="snacks" />,
     'uncategorized': <EmojiIcon code="1f6cd" alt="shopping" />,
     'default': <EmojiIcon code="1f6cd" alt="shopping" />
@@ -307,7 +307,7 @@ const App = () => {
                 setIsAuthReady(true);
             }
         }
-    }, [isAuthReady]); // Removed isAuthReady from dep array logic as it's set inside
+    }, []); // Removed isAuthReady from dep array logic as it's set inside
 
 
     // --- Load Profile on Auth Ready ---
@@ -1351,8 +1351,7 @@ const App = () => {
                                         </div>
                                     ) : (
                                         <EmptyState
-                                            title="No Shopping List
-                                            Yet"
+                                            title="No Shopping List Yet"
                                             description="Generate a meal plan first to see your shopping list."
                                             icon="🛒"
                                         />
