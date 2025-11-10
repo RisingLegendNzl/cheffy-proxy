@@ -775,7 +775,7 @@ const App = () => {
             logContent += `Failure ${index + 1}:\nTimestamp: ${new Date(item.timestamp).toLocaleString()}\nIngredient: ${item.originalIngredient}\nTight Query: ${item.tightQuery || 'N/A'}\nNormal Query: ${item.normalQuery || 'N/A'}\nWide Query: ${item.wideQuery || 'N/A'}\n${item.error ? `Error: ${item.error}\n` : ''}\n`;
         });
         const blob = new Blob([logContent], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(url);
+        const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1245,29 +1245,23 @@ const App = () => {
                                         */}
                                         
                                         {/* Content rendering - Profile displays always */}
-                                        {/*
                                         {contentView === 'profile' && (
                                             <ProfileTab 
                                                 formData={formData} 
                                                 nutritionalTargets={nutritionalTargets} 
                                             />
                                         )}
-                                        */}
                                         
                                         {/* Meals and Ingredients only show if results exist */}
-                                        {/*
                                         {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
                                         {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
-                                        */}
                                         
                                         {/* Placeholder when on Meals/Ingredients but no results yet */}
-                                        {/*
                                         {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
                                             <div className="p-6 text-center text-gray-500">
                                                 Generate a plan to view {contentView}.
                                             </div>
                                         )}
-                                        */}
                                 
                                     </div>
                                 )}
