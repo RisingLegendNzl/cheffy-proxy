@@ -8,7 +8,7 @@ import { APP_CONFIG } from '../constants';
  * Main app header with branding, user menu, and scroll behavior
  * Becomes compact when user scrolls down
  */
-const Header = ({ userId, onOpenSettings, onSignOut }) => {
+const Header = ({ userId, onOpenSettings, onNavigateToProfile, onSignOut }) => {
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
@@ -150,6 +150,21 @@ const Header = ({ userId, onOpenSettings, onSignOut }) => {
               )}
 
               {/* Menu Items */}
+              <button
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  onNavigateToProfile && onNavigateToProfile();
+                }}
+                className="w-full flex items-center px-4 py-3 rounded-lg hover:bg-gray-50 transition-fast text-left"
+              >
+                <User
+                  size={18}
+                  className="mr-3"
+                  style={{ color: COLORS.gray[600] }}
+                />
+                <span style={{ color: COLORS.gray[900] }}>Edit Profile</span>
+              </button>
+
               <button
                 onClick={() => {
                   setIsMenuOpen(false);
