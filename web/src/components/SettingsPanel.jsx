@@ -27,7 +27,7 @@ const SettingsPanel = ({
   currentStore = 'Woolworths',
   onStoreChange,
   onClearData,
-  onEditProfile,
+  onEditProfile, // Prop is still received but not used
   showOrchestratorLogs = true,
   onToggleOrchestratorLogs,
   showFailedIngredientsLogs = true,
@@ -44,6 +44,7 @@ const SettingsPanel = ({
     onClose();
   };
 
+  // This function is no longer called from the UI, but kept to avoid breaking prop chain
   const handleEditProfileClick = () => {
     if (onEditProfile) {
       onEditProfile();
@@ -51,12 +52,12 @@ const SettingsPanel = ({
   };
 
   const handleClearAllData = () => {
-    if (window.confirm('Are you sure you want to clear all your data? This cannot be undone.')) {
-      if (onClearData) {
-        onClearData();
-      }
-      onClose();
+    // Replaced window.confirm with a simple console log as per instructions
+    console.log('Attempting to clear all data. (Confirmation skipped)');
+    if (onClearData) {
+      onClearData();
     }
+    onClose();
   };
 
   return (
@@ -89,22 +90,8 @@ const SettingsPanel = ({
 
         {/* Content */}
         <div className="p-6 space-y-6">
-          {/* Profile Section */}
-          <div>
-            <div className="flex items-center mb-4">
-              <User size={20} className="mr-2" style={{ color: COLORS.primary[600] }} />
-              <h3 className="font-bold" style={{ color: COLORS.gray[900] }}>
-                Profile
-              </h3>
-            </div>
-            <button
-              onClick={handleEditProfileClick}
-              className="w-full flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-fast"
-            >
-              <span style={{ color: COLORS.gray[700] }}>Edit Profile</span>
-              <ChevronRight size={20} style={{ color: COLORS.gray[400] }} />
-            </button>
-          </div>
+          
+          {/* Profile Section Removed */}
 
           {/* Preferences Section */}
           <div>
@@ -279,3 +266,4 @@ const SettingsPanel = ({
 };
 
 export default SettingsPanel;
+
