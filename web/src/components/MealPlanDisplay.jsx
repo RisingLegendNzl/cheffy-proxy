@@ -1,360 +1,217 @@
 // web/src/components/MealPlanDisplay.jsx
-import React, { useState, useMemo } from 'react';
-import { 
-  ChefHat, 
-  Calendar, 
-  TrendingUp,
-  CheckCircle,
-  Clock,
-  Flame
-} from 'lucide-react';
-import MealCard from './MealCard';
-import DayNavigator from './DayNavigator';
-import EmptyState from './EmptyState';
-import SwipeHandler from './SwipeHandler';
-import { MealCardSkeleton } from './SkeletonLoader';
-import { COLORS, SHADOWS } from '../constants';
-import { 
-  formatCalories, 
-  formatGrams, 
-  calculatePercentage,
-  formatPercentage 
-} from '../helpers';
-import { useResponsive } from '../hooks/useResponsive';
+import React, { useMemo } from 'react';
+import { BookOpen, Target, CheckCircle, AlertTriangle, Soup, Droplet, Wheat } from 'lucide-react';
+import MacroBar from './MacroBar';
 
-/**
- * Enhanced Meal Plan Display Component
- * Shows daily meals with better visuals and interactions
- */
-const MealPlanDisplay = ({ 
-  mealPlan, 
-  selectedDay, 
-  setSelectedDay, 
-  eatenMeals, 
-  onToggleMealEaten, 
-  setSelectedMeal,
-  nutritionalTargets,
-  loading = false 
-}) => {
-  const { isMobile } = useResponsive();
-  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'list'
+// --- [MODIFIED] MealPlanDisplay Component ---
+const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe }) => {
+    const dayData = mealPlan[selectedDay - 1];
 
-  // Get current day's data
-  const dayData = useMemo(() => {
-    if (!mealPlan || mealPlan.length === 0) return null;
-    return mealPlan.find(day => day.day === selectedDay);
-  }, [mealPlan, selectedDay]);
-
-  // Calculate completed days (days where all meals are eaten)
-  const completedDays = useMemo(() => {
-    if (!mealPlan || !eatenMeals) return [];
-    
-    return mealPlan
-      .filter(day => {
-        const dayKey = `day${day.day}`;
-        const dayMeals = eatenMeals[dayKey];
-        if (!dayMeals || !day.meals) return false;
+    // Calculate eaten macros for the day
+    const dailyMacrosEaten = useMemo(() => {
+        if (!dayData || !Array.isArray(dayData.meals)) {
+            return { calories: 0, protein: 0, fat: 0, carbs: 0 };
+        }
         
-        // Check if all meals are eaten
-        return day.meals.every((_, index) => dayMeals[index] === true);
-      })
-      .map(day => day.day);
-  }, [mealPlan, eatenMeals]);
-
-  // Calculate daily totals
-  const dailyTotals = useMemo(() => {
-    if (!dayData || !dayData.meals) {
-      return { calories: 0, protein: 0, fat: 0, carbs: 0 };
-    }
-
-    return dayData.meals.reduce((totals, meal) => ({
-      calories: totals.calories + (meal.subtotal_kcal || 0),
-      protein: totals.protein + (meal.subtotal_protein || 0),
-      fat: totals.fat + (meal.subtotal_fat || 0),
-      carbs: totals.carbs + (meal.subtotal_carbs || 0),
-    }), { calories: 0, protein: 0, fat: 0, carbs: 0 });
-  }, [dayData]);
-
-  // Calculate eaten totals for the day
-  const eatenTotals = useMemo(() => {
-    if (!dayData || !dayData.meals || !eatenMeals) {
-      return { calories: 0, protein: 0, fat: 0, carbs: 0 };
-    }
-
-    const dayKey = `day${selectedDay}`;
-    const dayEatenMeals = eatenMeals[dayKey] || {};
-
-    return dayData.meals.reduce((totals, meal, index) => {
-      if (dayEatenMeals[index]) {
+        const dayMealsEatenState = eatenMeals[`day${selectedDay}`] || {};
+        let totals = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+        
+        dayData.meals.forEach(meal => {
+            if (meal && meal.name && dayMealsEatenState[meal.name]) {
+                totals.calories += meal.subtotal_kcal || 0;
+                totals.protein += meal.subtotal_protein || 0;
+                totals.fat += meal.subtotal_fat || 0;
+                totals.carbs += meal.subtotal_carbs || 0;
+            }
+        });
+        
         return {
-          calories: totals.calories + (meal.subtotal_kcal || 0),
-          protein: totals.protein + (meal.subtotal_protein || 0),
-          fat: totals.fat + (meal.subtotal_fat || 0),
-          carbs: totals.carbs + (meal.subtotal_carbs || 0),
+            calories: Math.round(totals.calories),
+            protein: Math.round(totals.protein),
+            fat: Math.round(totals.fat),
+            carbs: Math.round(totals.carbs),
         };
-      }
-      return totals;
-    }, { calories: 0, protein: 0, fat: 0, carbs: 0 });
-  }, [dayData, selectedDay, eatenMeals]);
+    }, [dayData, eatenMeals, selectedDay]);
 
-  // Handle swipe navigation
-  const handleSwipeLeft = () => {
-    if (selectedDay < mealPlan.length) {
-      setSelectedDay(selectedDay + 1);
+    if (!dayData) {
+        console.warn(`[MealPlanDisplay] No valid data found for day ${selectedDay}.`);
+        return <div className="p-6 text-center bg-yellow-50 rounded-lg"><AlertTriangle className="inline mr-2" />No meal plan data found for Day {selectedDay}.</div>;
     }
-  };
-
-  const handleSwipeRight = () => {
-    if (selectedDay > 1) {
-      setSelectedDay(selectedDay - 1);
+    if (!Array.isArray(dayData.meals)) {
+        console.error(`[MealPlanDisplay] Invalid meals structure for day ${selectedDay}. Expected array, got:`, dayData.meals);
+        return <div className="p-6 text-center bg-red-50 text-red-800 rounded-lg"><AlertTriangle className="inline mr-2" />Error loading meals for Day {selectedDay}. Data invalid.</div>;
     }
-  };
 
-  // Empty state
-  if (!mealPlan || mealPlan.length === 0) {
+    const calTarget = nutritionalTargets.calories || 0;
+    
     return (
-      <div className="p-6">
-        <EmptyState
-          icon={ChefHat}
-          title="No Meal Plan Yet"
-          description="Generate a meal plan to see your personalized meals here"
-          actionLabel="Get Started"
-          onAction={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-        />
-      </div>
-    );
-  }
-
-  // Loading state
-  if (loading) {
-    return (
-      <div className="p-4 md:p-6 space-y-4">
-        <MealCardSkeleton />
-        <MealCardSkeleton />
-        <MealCardSkeleton />
-      </div>
-    );
-  }
-
-  // No data for selected day
-  if (!dayData || !dayData.meals) {
-    return (
-      <div className="p-6">
-        <EmptyState
-          icon={Calendar}
-          title="No Meals for This Day"
-          description="This day doesn't have any meals yet"
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-full flex flex-col">
-      {/* Day Navigator */}
-      <div className="p-4 md:p-6 border-b animate-fadeIn" style={{ borderColor: COLORS.gray[200] }}>
-        <DayNavigator
-          currentDay={selectedDay}
-          totalDays={mealPlan.length}
-          onSelectDay={setSelectedDay}
-          completedDays={completedDays}
-        />
-      </div>
-
-      {/* Daily Macro Summary */}
-      <div className="p-4 md:p-6 bg-gradient-to-br from-indigo-50 to-purple-50 border-b animate-fadeInDown" style={{ borderColor: COLORS.gray[200] }}>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-bold flex items-center" style={{ color: COLORS.gray[900] }}>
-            <TrendingUp size={20} className="mr-2" style={{ color: COLORS.primary[600] }} />
-            Daily Progress
-          </h3>
-          <span className="text-sm" style={{ color: COLORS.gray[600] }}>
-            {formatPercentage(eatenTotals.calories, dailyTotals.calories)} Complete
-          </span>
-        </div>
-
-        {/* Macro Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {/* Calories */}
-          <div
-            className="p-3 rounded-lg border-2"
-            style={{
-              backgroundColor: COLORS.macros.calories.light,
-              borderColor: COLORS.macros.calories.main,
-            }}
-          >
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-semibold" style={{ color: COLORS.macros.calories.dark }}>
-                Calories
-              </span>
-              <Flame size={14} style={{ color: COLORS.macros.calories.main }} />
-            </div>
-            <p className="text-xl font-bold" style={{ color: COLORS.macros.calories.dark }}>
-              {formatCalories(eatenTotals.calories, false)}
-            </p>
-            <p className="text-xs" style={{ color: COLORS.macros.calories.dark }}>
-              of {formatCalories(dailyTotals.calories, false)}
-            </p>
-            {/* Progress bar */}
-            <div className="mt-2 h-1.5 bg-white rounded-full overflow-hidden">
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(calculatePercentage(eatenTotals.calories, dailyTotals.calories), 100)}%`,
-                  backgroundColor: COLORS.macros.calories.main,
-                }}
-              />
-            </div>
-          </div>
-
-          {/* Protein */}
-          <div
-            className="p-3 rounded-lg border-2"
-            style={{
-              backgroundColor: COLORS.macros.protein.light,
-              borderColor: COLORS.macros.protein.main,
-            }}
-          >
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-semibold" style={{ color: COLORS.macros.protein.dark }}>
-                Protein
-              </span>
-              <span className="text-sm">{COLORS.macros.protein.icon}</span>
-            </div>
-            <p className="text-xl font-bold" style={{ color: COLORS.macros.protein.dark }}>
-              {Math.round(eatenTotals.protein)}g
-            </p>
-            <p className="text-xs" style={{ color: COLORS.macros.protein.dark }}>
-              of {Math.round(dailyTotals.protein)}g
-            </p>
-            <div className="mt-2 h-1.5 bg-white rounded-full overflow-hidden">
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(calculatePercentage(eatenTotals.protein, dailyTotals.protein), 100)}%`,
-                  backgroundColor: COLORS.macros.protein.main,
-                }}
-              />
-            </div>
-          </div>
-
-          {/* Fat */}
-          <div
-            className="p-3 rounded-lg border-2"
-            style={{
-              backgroundColor: COLORS.macros.fat.light,
-              borderColor: COLORS.macros.fat.main,
-            }}
-          >
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-semibold" style={{ color: COLORS.macros.fat.dark }}>
-                Fat
-              </span>
-              <span className="text-sm">{COLORS.macros.fat.icon}</span>
-            </div>
-            <p className="text-xl font-bold" style={{ color: COLORS.macros.fat.dark }}>
-              {Math.round(eatenTotals.fat)}g
-            </p>
-            <p className="text-xs" style={{ color: COLORS.macros.fat.dark }}>
-              of {Math.round(dailyTotals.fat)}g
-            </p>
-            <div className="mt-2 h-1.5 bg-white rounded-full overflow-hidden">
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(calculatePercentage(eatenTotals.fat, dailyTotals.fat), 100)}%`,
-                  backgroundColor: COLORS.macros.fat.main,
-                }}
-              />
-            </div>
-          </div>
-
-          {/* Carbs */}
-          <div
-            className="p-3 rounded-lg border-2"
-            style={{
-              backgroundColor: COLORS.macros.carbs.light,
-              borderColor: COLORS.macros.carbs.main,
-            }}
-          >
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-semibold" style={{ color: COLORS.macros.carbs.dark }}>
-                Carbs
-              </span>
-              <span className="text-sm">{COLORS.macros.carbs.icon}</span>
-            </div>
-            <p className="text-xl font-bold" style={{ color: COLORS.macros.carbs.dark }}>
-              {Math.round(eatenTotals.carbs)}g
-            </p>
-            <p className="text-xs" style={{ color: COLORS.macros.carbs.dark }}>
-              of {Math.round(dailyTotals.carbs)}g
-            </p>
-            <div className="mt-2 h-1.5 bg-white rounded-full overflow-hidden">
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(calculatePercentage(eatenTotals.carbs, dailyTotals.carbs), 100)}%`,
-                  backgroundColor: COLORS.macros.carbs.main,
-                }}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Meal Cards with Swipe Handler */}
-      <SwipeHandler
-        onSwipeLeft={handleSwipeLeft}
-        onSwipeRight={handleSwipeRight}
-        showHint={isMobile}
-      >
-        <div className="flex-1 overflow-y-auto p-4 md:p-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 stagger-container">
-            {dayData.meals.map((meal, index) => {
-              const dayKey = `day${selectedDay}`;
-              const isEaten = eatenMeals?.[dayKey]?.[index] || false;
-
-              return (
-                <div key={index} className="stagger-item">
-                  <MealCard
-                    meal={meal}
-                    isEaten={isEaten}
-                    onToggleEaten={() => onToggleMealEaten(selectedDay, index)}
-                    onViewRecipe={() => setSelectedMeal(meal)}
-                    showNutrition={true}
-                    nutritionalTargets={nutritionalTargets}
-                  />
+        <div className="space-y-6">
+            <h3 className="text-2xl font-bold border-b-2 pb-1 flex items-center">
+                <BookOpen className="w-6 h-6 mr-2" /> Meals for Day {selectedDay}
+            </h3>
+            
+            {/* Enhanced Tracker with Macro Bars */}
+            <div className="sticky top-0 bg-white/95 backdrop-blur-sm p-6 rounded-xl shadow-lg border z-10">
+                <h4 className="text-lg font-bold mb-4 flex items-center">
+                    <Target className="w-5 h-5 mr-2"/>Daily Progress
+                </h4>
+                
+                {/* Main Calorie Bar - FIXED: Added relative and overflow-hidden */}
+                <div className="mb-4">
+                    <div className="flex justify-between items-center mb-1">
+                        <span className="text-sm font-semibold text-gray-700">Calories</span>
+                        <span className="text-sm font-bold">
+                            <span className={dailyMacrosEaten.calories > calTarget * 1.05 ? 'text-red-600' : 'text-green-600'}>
+                                {dailyMacrosEaten.calories}
+                            </span>
+                            <span className="text-gray-400"> / </span>
+                            <span className="text-gray-600">{calTarget} kcal</span>
+                        </span>
+                    </div>
+                    {/* FIXED: Added relative and overflow-hidden to container */}
+                    <div className="relative w-full bg-gray-200 rounded-full h-4 mb-1 overflow-hidden">
+                        {/* FIXED: Added absolute positioning and will-change */}
+                        <div 
+                            className={`absolute top-0 left-0 h-full rounded-full transition-all duration-500 ${
+                                dailyMacrosEaten.calories > calTarget * 1.05 ? 'bg-red-500' : 
+                                dailyMacrosEaten.calories >= calTarget * 0.95 ? 'bg-green-500' : 
+                                'bg-indigo-500'
+                            }`}
+                            style={{ 
+                                width: `${calTarget > 0 ? Math.min(100, (dailyMacrosEaten.calories / calTarget) * 100) : 0}%`,
+                                willChange: 'width'
+                            }}
+                        />
+                    </div>
+                    <p className="text-xs text-gray-500 text-right">
+                        {Math.max(0, calTarget - dailyMacrosEaten.calories)} kcal remaining
+                    </p>
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      </SwipeHandler>
 
-      {/* Day Completion Badge */}
-      {completedDays.includes(selectedDay) && (
-        <div
-          className="p-4 m-4 rounded-lg text-center animate-bounceIn"
-          style={{
-            backgroundColor: COLORS.success.light,
-            border: `2px solid ${COLORS.success.main}`,
-          }}
-        >
-          <CheckCircle
-            size={32}
-            className="mx-auto mb-2"
-            style={{ color: COLORS.success.main }}
-          />
-          <p className="font-bold" style={{ color: COLORS.success.dark }}>
-            Day {selectedDay} Complete! 🎉
-          </p>
-          <p className="text-sm" style={{ color: COLORS.success.dark }}>
-            All meals eaten for today
-          </p>
+                {/* Macro Bars */}
+                <div className="space-y-3 pt-3 border-t">
+                    <MacroBar
+                        label="Protein"
+                        current={dailyMacrosEaten.protein}
+                        target={nutritionalTargets.protein || 0}
+                        unit="g"
+                        color="green"
+                        Icon={Soup}
+                    />
+                    <MacroBar
+                        label="Fat"
+                        current={dailyMacrosEaten.fat}
+                        target={nutritionalTargets.fat || 0}
+                        unit="g"
+                        color="yellow"
+                        Icon={Droplet}
+                    />
+                    <MacroBar
+                        label="Carbs"
+                        current={dailyMacrosEaten.carbs}
+                        target={nutritionalTargets.carbs || 0}
+                        unit="g"
+                        color="orange"
+                        Icon={Wheat}
+                    />
+                </div>
+            </div>
+
+            {/* Meal Cards */}
+            {dayData.meals.map((meal, index) => {
+                if (!meal || typeof meal !== 'object') {
+                    console.warn(`[MealPlanDisplay] Invalid meal item index ${index} day ${selectedDay}`, meal);
+                    return null;
+                }
+                const mealName = meal.name || `Unnamed Meal ${index + 1}`;
+                const mealDesc = meal.description || "No description available.";
+                const mealType = meal.type || "Meal";
+                const mealCalories = typeof meal.subtotal_kcal === 'number' ? `${Math.round(meal.subtotal_kcal)} kcal` : 'N/A';
+                const isEaten = eatenMeals[`day${selectedDay}`]?.[mealName] || false;
+                
+                const mealMacros = {
+                    p: Math.round(meal.subtotal_protein || 0),
+                    f: Math.round(meal.subtotal_fat || 0),
+                    c: Math.round(meal.subtotal_carbs || 0)
+                };
+
+                // Calculate what % of daily target this meal represents
+                const percentOfDaily = {
+                    cal: calTarget > 0 ? Math.round((meal.subtotal_kcal / calTarget) * 100) : 0,
+                    protein: nutritionalTargets.protein > 0 ? Math.round((mealMacros.p / nutritionalTargets.protein) * 100) : 0,
+                };
+
+                // Determine if meal is high protein
+                const isHighProtein = percentOfDaily.protein >= 30;
+
+                return (
+                    <div 
+                        key={index} 
+                        className={`p-5 border-l-4 bg-white rounded-lg shadow-md ${isEaten ? 'border-green-500 opacity-60' : 'border-indigo-500'} cursor-pointer hover:shadow-lg transition-shadow`}
+                        onClick={() => onViewRecipe(meal)}
+                    >
+                        <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                    <p className="text-sm font-bold uppercase text-indigo-600">{mealType}</p>
+                                    {isHighProtein && (
+                                        <span className="px-2 py-0.5 text-xs font-bold bg-green-100 text-green-700 rounded-full">
+                                            High Protein
+                                        </span>
+                                    )}
+                                </div>
+                                <h4 className="text-xl font-semibold">{mealName}</h4>
+                                <p className="text-xl font-bold text-red-600 mt-1">{mealCalories}</p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    {percentOfDaily.cal}% of daily calories
+                                </p>
+                            </div>
+                            <button 
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onToggleMealEaten(selectedDay, mealName);
+                                }} 
+                                className={`flex items-center text-xs py-1 px-3 rounded-full ${isEaten ? 'bg-green-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+                            >
+                                <CheckCircle className="w-4 h-4 mr-1" /> {isEaten ? 'Eaten' : 'Mark as Eaten'}
+                            </button>
+                        </div>
+                        
+                        <p className="text-gray-600 leading-relaxed mt-2">{mealDesc}</p>
+
+                        {/* Macro Breakout with Visual Indicators */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4 text-center">
+                            <div className="bg-green-50 p-2 rounded-lg border border-green-200">
+                                <p className="text-sm font-semibold text-green-800">Protein</p>
+                                <p className="text-lg font-bold">{mealMacros.p}g</p>
+                                <p className="text-xs text-green-600">{percentOfDaily.protein}% daily</p>
+                            </div>
+                            <div className="bg-yellow-50 p-2 rounded-lg border border-yellow-200">
+                                <p className="text-sm font-semibold text-yellow-800">Fat</p>
+                                <p className="text-lg font-bold">{mealMacros.f}g</p>
+                            </div>
+                            <div className="bg-orange-50 p-2 rounded-lg border border-orange-200">
+                                <p className="text-sm font-semibold text-orange-800">Carbs</p>
+                                <p className="text-lg font-bold">{mealMacros.c}g</p>
+                            </div>
+                        </div>
+
+                        {/* Ingredient Pills */}
+                        <div className="mt-4">
+                            <h5 className="text-sm font-semibold mb-2 text-gray-700">Ingredients:</h5>
+                            <div className="flex flex-wrap gap-2">
+                                {meal.items && meal.items.map((item, i) => (
+                                    <span key={i} className="bg-gray-200 text-gray-800 text-xs font-medium px-3 py-1 rounded-full">
+                                        {item.qty}{item.unit} {item.key}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })}
         </div>
-      )}
-    </div>
-  );
+    );
 };
 
 export default MealPlanDisplay;
