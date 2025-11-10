@@ -840,16 +840,16 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, formData, appId]);
 
-   // --- Handle Edit Profile Navigation from Settings ---
+    // --- Handle Edit Profile Navigation from Settings ---
     const handleEditProfile = useCallback(() => {
-        setIsSettingsOpen(false);
-        setContentView('profile');
+        setIsSettingsOpen(false); // Close settings panel
+        setIsMenuOpen(true); // <-- *** THIS IS THE FIX: Open the setup form panel ***
+        setContentView('profile'); // Set right panel to profile summary
         // Scroll to top of form
         setTimeout(() => {
             document.querySelector('[name="name"]')?.focus();
         }, 100);
-    }, [setContentView, setIsSettingsOpen]); // <-- FIX: Add state setters to dependency array
-
+    }, [setContentView, setIsSettingsOpen, setIsMenuOpen]); // <-- *** ADD ALL SETTERS ***
 
 
     const handleChange = (e) => {
@@ -1319,7 +1319,7 @@ const App = () => {
             {/* --- FIX #2: Fix Log Viewer Conditional Rendering --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                 {showOrchestratorLogs && (
-                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                 )}
                 {showFailedIngredientsLogs && (
                     <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
@@ -1342,5 +1342,4 @@ const App = () => {
 };
 
 export default App;
-
 
