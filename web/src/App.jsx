@@ -71,11 +71,6 @@ const MAX_SUBSTITUTES = 5;
 const FIRESTORE_PROFILE_COLLECTION = 'profile';
 const FIRESTORE_PROFILE_DOC_ID = 'userProfile';
 
-// --- FIX 2.1: Add new constants for plan persistence ---
-const FIRESTORE_PLAN_COLLECTION = 'plan';
-const FIRESTORE_PLAN_DOC_ID = 'userPlan';
-
-
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = {
     name: "Placeholder (API DOWN)", brand: "MOCK DATA", price: 15.99, size: "1kg",
@@ -224,9 +219,6 @@ const App = () => {
     const [db, setDb] = useState(null);
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
-
-    // --- FIX 2.2: Add state to track if plan load is complete ---
-    const [isPlanLoaded, setIsPlanLoaded] = useState(false);
 
     const [appId, setAppId] = useState('default-app-id');
     
@@ -379,58 +371,11 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, appId]);
 
-    // --- FIX 2.3: Create new handleLoadPlan function ---
-    const handleLoadPlan = useCallback(async () => {
-        if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            console.warn('[FIREBASE LOAD] Skipping plan load: Firebase not ready.');
-            setIsPlanLoaded(true); // Mark as "loaded" to unblock saving
-            return;
-        }
-        
-        console.log('[FIREBASE LOAD] Attempting plan load...');
-        try {
-            const planDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PLAN_COLLECTION, FIRESTORE_PLAN_DOC_ID);
-            const docSnap = await getDoc(planDocRef);
-
-            if (docSnap.exists()) {
-                const loadedData = docSnap.data();
-                console.log('[FIREBASE LOAD] Plan data found:', loadedData);
-
-                if (loadedData.mealPlan && loadedData.mealPlan.length > 0) {
-                    setMealPlan(loadedData.mealPlan || []);
-                    setResults(loadedData.results || {});
-                    setUniqueIngredients(loadedData.uniqueIngredients || []);
-                    setNutritionalTargets(loadedData.nutritionalTargets || { calories: 0, protein: 0, fat: 0, carbs: 0 });
-                    setEatenMeals(loadedData.eatenMeals || {});
-                    setSelectedDay(loadedData.selectedDay || 1);
-                    
-                    // Important: Recalculate total cost from loaded results
-                    recalculateTotalCost(loadedData.results || {});
-                    
-                    showToast('Loaded previous plan from session!', 'success');
-                } else {
-                    console.log('[FIREBASE LOAD] Plan document found, but it was empty.');
-                }
-            } else {
-                console.log('[FIREBASE LOAD] No saved plan document found.');
-            }
-        } catch (loadError) {
-            console.error('[FIREBASE LOAD] Error loading plan:', loadError);
-            showToast(`Error loading plan: ${loadError.message}`, 'error');
-        } finally {
-            // This is CRITICAL. It tells the app it's safe to start auto-saving.
-            setIsPlanLoaded(true);
-        }
-    // --- FIX: Add all dependencies to handleLoadPlan ---
-    }, [isAuthReady, userId, db, appId, recalculateTotalCost, showToast, setMealPlan, setResults, setUniqueIngredients, setNutritionalTargets, setEatenMeals, setSelectedDay]);
-
-    // --- FIX 2.4: Update startup useEffect to call handleLoadPlan ---
     useEffect(() => {
         if (isAuthReady && userId && db && appId) {
             handleLoadProfile(true);
-            handleLoadPlan(); // <-- ADDED
         }
-    }, [isAuthReady, userId, db, appId, handleLoadProfile, handleLoadPlan]); // <-- ADDED
+    }, [isAuthReady, userId, db, appId, handleLoadProfile]);
 
 
     // --- Handlers ---
@@ -446,15 +391,13 @@ const App = () => {
             }
         });
         setTotalCost(newTotal);
-    // --- FIX: Add dependency to recalculateTotalCost ---
-    }, [setTotalCost]);
+    }, []);
 
     // ===== TOAST HELPERS =====
     const showToast = useCallback((message, type = 'info', duration = 3000) => {
       const id = Date.now();
       setToasts(prev => [...prev, { id, message, type, duration }]);
-    // --- FIX: Add dependency to showToast ---
-    }, [setToasts]);
+    }, []);
     
     const removeToast = useCallback((id) => {
       setToasts(prev => prev.filter(toast => toast.id !== id));
@@ -832,7 +775,7 @@ const App = () => {
             logContent += `Failure ${index + 1}:\nTimestamp: ${new Date(item.timestamp).toLocaleString()}\nIngredient: ${item.originalIngredient}\nTight Query: ${item.tightQuery || 'N/A'}\nNormal Query: ${item.normalQuery || 'N/A'}\nWide Query: ${item.wideQuery || 'N/A'}\n${item.error ? `Error: ${item.error}\n` : ''}\n`;
         });
         const blob = new Blob([logContent], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(url);
         const link = document.createElement('a');
         link.href = url;
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -953,69 +896,6 @@ const App = () => {
         }
         return sortedGroups;
     }, [results]); 
-
-
-    // --- FIX 2.5: Add auto-save logic ---
-    const saveTimerRef = useRef(null);
-
-    const savePlan = useCallback(() => {
-        // Stop if auth isn't ready OR if the initial plan load isn't finished
-        if (!isAuthReady || !userId || !db || !appId || !isPlanLoaded) {
-            return;
-        }
-
-        // Don't save if there's no plan
-        if (mealPlan.length === 0 && Object.keys(results).length === 0) {
-            console.log("[FIREBASE SAVE] Skipping save, plan is empty.");
-            return;
-        }
-
-        const planData = {
-            mealPlan,
-            results,
-            uniqueIngredients,
-            nutritionalTargets,
-            eatenMeals,
-            selectedDay
-        };
-
-        try {
-            const planDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PLAN_COLLECTION, FIRESTORE_PLAN_DOC_ID);
-            // setDoc (not updateDoc) to overwrite the entire plan
-            setDoc(planDocRef, planData); 
-            console.log("[FIREBASE SAVE] Plan data auto-saved.");
-        } catch (saveError) {
-            console.error('[FIREBASE SAVE] Error auto-saving plan:', saveError);
-            setStatusMessage({ text: `Error auto-saving plan: ${saveError.message}`, type: 'error' });
-        }
-    }, [isAuthReady, userId, db, appId, isPlanLoaded, mealPlan, results, uniqueIngredients, nutritionalTargets, eatenMeals, selectedDay]);
-
-    // Debounced save effect
-    useEffect(() => {
-        // Only run auto-save *after* the initial plan load is complete
-        if (!isPlanLoaded) {
-            return;
-        }
-
-        // Clear any existing timer
-        if (saveTimerRef.current) {
-            clearTimeout(saveTimerRef.current);
-        }
-
-        // Set a new timer
-        saveTimerRef.current = setTimeout(() => {
-            console.log("[FIREBASE SAVE] Debounced save triggered.");
-            savePlan();
-        }, 1500); // 1.5 second debounce
-
-        // Cleanup
-        return () => {
-            if (saveTimerRef.current) {
-                clearTimeout(saveTimerRef.current);
-            }
-        };
-    }, [isPlanLoaded, mealPlan, results, uniqueIngredients, nutritionalTargets, eatenMeals, selectedDay, savePlan]);
-    // --- END: FIX 2.5 ---
 
 
     const PlanCalculationErrorPanel = () => (
@@ -1365,23 +1245,29 @@ const App = () => {
                                         */}
                                         
                                         {/* Content rendering - Profile displays always */}
+                                        {/*
                                         {contentView === 'profile' && (
                                             <ProfileTab 
                                                 formData={formData} 
                                                 nutritionalTargets={nutritionalTargets} 
                                             />
                                         )}
+                                        */}
                                         
                                         {/* Meals and Ingredients only show if results exist */}
+                                        {/*
                                         {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
                                         {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
+                                        */}
                                         
                                         {/* Placeholder when on Meals/Ingredients but no results yet */}
+                                        {/*
                                         {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
                                             <div className="p-6 text-center text-gray-500">
                                                 Generate a plan to view {contentView}.
                                             </div>
                                         )}
+                                        */}
                                 
                                     </div>
                                 )}
