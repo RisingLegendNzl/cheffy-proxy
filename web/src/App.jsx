@@ -324,7 +324,16 @@ const App = () => {
     
     // ===== START HOOK RE-ORDERING (FIX) =====
 
-    // --- Base Helpers (no dependencies) ---
+    // --- Base Helpers (MUST BE DEFINED FIRST) ---
+    const showToast = useCallback((message, type = 'info', duration = 3000) => {
+      const id = Date.now();
+      setToasts(prev => [...prev, { id, message, type, duration }]);
+    }, []);
+    
+    const removeToast = useCallback((id) => {
+      setToasts(prev => prev.filter(toast => toast.id !== id));
+    }, []);
+
     const recalculateTotalCost = useCallback((currentResults) => {
         let newTotal = 0;
         Object.values(currentResults).forEach(item => {
@@ -337,15 +346,6 @@ const App = () => {
             }
         });
         setTotalCost(newTotal);
-    }, []);
-
-    const showToast = useCallback((message, type = 'info', duration = 3000) => {
-      const id = Date.now();
-      setToasts(prev => [...prev, { id, message, type, duration }]);
-    }, []);
-    
-    const removeToast = useCallback((id) => {
-      setToasts(prev => prev.filter(toast => toast.id !== id));
     }, []);
 
     // --- Profile & Settings Handlers (depend on base helpers) ---
@@ -1228,7 +1228,7 @@ const App = () => {
                                                 isLoadingNutrition={isLoading}
                                             />
                                         );
-loca                                    })}
+                                    })}
                                 </div>
                             </CollapsibleSection>
                         ))}
