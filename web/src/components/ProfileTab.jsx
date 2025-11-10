@@ -1,6 +1,6 @@
 // web/src/components/ProfileTab.jsx
 import React, { useMemo } from 'react';
-import { Target, Flame, Soup, Droplet, Wheat, User as UserIcon } from 'lucide-react';
+import { Target, Flame, Soup, Droplet, Wheat, User as UserIcon, Zap } from 'lucide-react';
 import MacroRing from './MacroRing';
 import MacroBar from './MacroBar';
 
@@ -38,6 +38,29 @@ const ProfileCard = ({ formData }) => (
 
 // Enhanced component displaying nutritional targets with rings and bars
 const TargetsCard = ({ nutritionalTargets }) => {
+  const hasTargets = nutritionalTargets.calories > 0;
+
+  // 🆕 EMPTY STATE: Show before generation
+  if (!hasTargets) {
+    return (
+      <div className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl shadow-lg border border-indigo-200 p-8 text-center">
+        <div className="w-20 h-20 mx-auto mb-4 bg-indigo-100 rounded-full flex items-center justify-center">
+          <Target className="w-10 h-10 text-indigo-400" />
+        </div>
+        <h3 className="text-xl font-bold text-indigo-700 mb-2">
+          No Targets Yet
+        </h3>
+        <p className="text-gray-600 text-sm mb-4">
+          Generate a plan to see your personalized nutritional targets
+        </p>
+        <div className="flex items-center justify-center text-sm text-indigo-500">
+          <Zap className="w-4 h-4 mr-1" />
+          Click "Generate Plan" to get started
+        </div>
+      </div>
+    );
+  }
+
   // Calculate macro ratios
   const macroRatios = useMemo(() => {
     const { protein, fat, carbs } = nutritionalTargets;
@@ -144,9 +167,7 @@ const ProfileTab = ({ formData, nutritionalTargets }) => {
   return (
     <div className="p-4 md:p-6 space-y-6">
       <ProfileCard formData={formData} />
-      {nutritionalTargets.calories > 0 && (
-        <TargetsCard nutritionalTargets={nutritionalTargets} />
-      )}
+      <TargetsCard nutritionalTargets={nutritionalTargets} />
     </div>
   );
 };
