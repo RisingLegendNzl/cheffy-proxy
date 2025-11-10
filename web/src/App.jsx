@@ -1327,7 +1327,7 @@ const App = () => {
             {/* --- FIX #2: Fix Log Viewer Conditional Rendering --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                 {showOrchestratorLogs && (
-                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
                 )}
                 {showFailedIngredientsLogs && (
                     <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
