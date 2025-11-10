@@ -36,7 +36,7 @@ const DiagnosticLogViewer = ({ logs, height, setHeight, isOpen, setIsOpen, onDow
         };
         document.addEventListener('mousemove', doDrag);
         document.addEventListener('mouseup', stopDrag);
-    }, [height, setHeight, setIsOpen]); // <-- *** THE FIX IS HERE *** I've added `setHeight` to this array.
+    }, [height, setHeight, setIsOpen, minHeight]); // ✅ FIXED: Added all dependencies
 
     const toggleOpen = () => {
         if (isOpen) {
@@ -69,5 +69,3 @@ const DiagnosticLogViewer = ({ logs, height, setHeight, isOpen, setIsOpen, onDow
 };
 
 export default DiagnosticLogViewer;
-
-
