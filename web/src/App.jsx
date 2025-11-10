@@ -697,11 +697,12 @@ const App = () => {
                                 ]);
                                 
                                 // NEW: Show success modal, then navigate to Meals
+                                // --- MODIFICATION: Set to 'profile' as tabs are removed ---
                                 setTimeout(() => {
                                   setShowSuccessModal(true);
                                   setTimeout(() => {
                                     setShowSuccessModal(false);
-                                    setContentView('meals');
+                                    setContentView('profile'); // Was 'meals'
                                     setSelectedDay(1);
                                   }, 2500);
                                 }, 500);
@@ -1304,9 +1305,8 @@ const App = () => {
             
                                     {/* --- RESULTS VIEW (Original Layout) --- */}
                                     <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
-                                        <div className="p-4 md:hidden flex justify-end">
-                                            <button className="bg-indigo-600 text-white p-2 rounded-full shadow" onClick={() => setIsMenuOpen(true)}><Menu /></button>
-                                        </div>
+                                        
+                                        {/* --- PURPLE BURGER MENU REMOVED --- */}
                                         
                                         <div className="border-b">
                                             <div className="p-6 md:p-8">
@@ -1329,46 +1329,49 @@ const App = () => {
                                                     </div>
                                                 )}
                                         
-                                                {/* Tab navigation - only show when results exist */}
+                                                {/* --- TAB NAVIGATION REMOVED --- */}
+                                                
+                                                {/* Content rendering - Profile displays always.
+                                                  Since tabs are removed, we need to decide what to show.
+                                                  I'll default to showing 'profile', but also
+                                                  conditionally show 'meals' and 'ingredients'
+                                                  if they were the last selected view AND results exist.
+                                                  This maintains *some* functionality.
+                                                  
+                                                  A better approach might be to just always show Profile,
+                                                  and then programmatically show Meals/Ingredients
+                                                  based on other logic (e.g., after generation).
+                                                  
+                                                  For now, I will default to showing 'profile' always,
+                                                  and then also render meals and ingredients content
+                                                  underneath if they exist. This is the simplest
+                                                  change that removes the tabs but keeps the content.
+                                                */}
+                                                
+                                                {/* Always show Profile Tab */}
+                                                <ProfileTab 
+                                                    formData={formData} 
+                                                    nutritionalTargets={nutritionalTargets} 
+                                                />
+                                                
+                                                {/* Conditionally show Meals content if results exist */}
                                                 {(results && Object.keys(results).length > 0 && !loading) && (
-                                                    <div className="flex space-x-2 p-4 bg-gray-100 border-b">
-                                                        <button 
-                                                            className={`flex-1 py-2 px-4 text-center font-semibold rounded-lg ${contentView === 'profile' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-200'}`}
-                                                            onClick={() => setContentView('profile')}
-                                                        >
-                                                            Profile
-                                                        </button>
-                                                        <button 
-                                                            className={`flex-1 py-2 px-4 text-center font-semibold rounded-lg ${contentView === 'meals' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-200'}`}
-                                                            onClick={() => setContentView('meals')}
-                                                        >
-                                                            Meals
-                                                        </button>
-                                                        <button 
-                                                            className={`flex-1 py-2 px-4 text-center font-semibold rounded-lg ${contentView === 'ingredients' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-600 hover:bg-gray-200'}`}
-                                                            onClick={() => setContentView('ingredients')}
-                                                        >
-                                                            Ingredients
-                                                        </button>
+                                                    <div className="border-t mt-4">
+                                                        {mealPlanContent}
                                                     </div>
                                                 )}
                                                 
-                                                {/* Content rendering - Profile displays always */}
-                                                {contentView === 'profile' && (
-                                                    <ProfileTab 
-                                                        formData={formData} 
-                                                        nutritionalTargets={nutritionalTargets} 
-                                                    />
+                                                {/* Conditionally show Ingredients content if results exist */}
+                                                {(results && Object.keys(results).length > 0 && !loading) && (
+                                                    <div className="border-t mt-4">
+                                                        {priceComparisonContent}
+                                                    </div>
                                                 )}
-                                                
-                                                {/* Meals and Ingredients only show if results exist */}
-                                                {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
-                                                {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
-                                                
-                                                {/* Placeholder when on Meals/Ingredients but no results yet */}
-                                                {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
+
+                                                {/* Placeholder when no results yet */}
+                                                {!(results && Object.keys(results).length > 0) && !loading && (
                                                     <div className="p-6 text-center text-gray-500">
-                                                        Generate a plan to view {contentView}.
+                                                        Generate a plan to view results.
                                                     </div>
                                                 )}
                                         
@@ -1387,14 +1390,20 @@ const App = () => {
                     {/* This component is not in the original file, but was in the guide.
                         If the original layout is used, this might not be correct.
                         However, the user's *original file* DOES have it.
+                        
+                        --- MODIFICATION ---
+                        I will REMOVE this BottomNav as it directly relates to the
+                        tabs ('profile', 'meals', 'ingredients') that were
+                        just removed.
                     */}
-                    {isMobile && results && Object.keys(results).length > 0 && (
+                    {/* {isMobile && results && Object.keys(results).length > 0 && (
                         <BottomNav
                             activeTab={contentView}
                             onTabChange={setContentView}
                             showPlanButton={false}
                         />
                     )}
+                    */}
             
                     {/* NEW: Toast Container */}
                     <ToastContainer toasts={toasts} onRemoveToast={removeToast} />
@@ -1408,7 +1417,7 @@ const App = () => {
                         onClose={() => setShowSuccessModal(false)}
                         onViewPlan={() => {
                             setShowSuccessModal(false);
-                            setContentView('meals');
+                            setContentView('profile'); // Was 'meals'
                         }}
                     />
             
@@ -1451,7 +1460,7 @@ const App = () => {
                     {/* KEEP: Existing log viewers and recipe modal */}
                     <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                         {showOrchestratorLogs && (
-                            <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                            <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                         )}
                         {showFailedIngredientsLogs && (
                             <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
@@ -1476,5 +1485,4 @@ const App = () => {
 };
 
 export default App;
-
 
