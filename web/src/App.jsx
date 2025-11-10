@@ -951,34 +951,38 @@ const App = () => {
     );
     
     const mealPlanContent = (
-    <div className="p-0">
-        {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
-            <MealPlanDisplay
-                key={selectedDay}
-                mealPlan={mealPlan}
-                selectedDay={selectedDay}
-                nutritionalTargets={nutritionalTargets}
-                eatenMeals={eatenMeals}
-                onToggleMealEaten={onToggleMealEaten}
-                onViewRecipe={setSelectedMeal}
-                loading={loading}
-            />
-        ) : (
-            <div className="flex-1 text-center p-8 text-gray-500">
-                {error && !loading ? (
-                    <div className="p-4 bg-red-50 text-red-800 rounded-lg">
-                        <AlertTriangle className="inline w-6 h-6 mr-2" />
-                        <strong>Error generating plan. Check logs for details.</strong>
-                        <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
-                    </div>
-                ) : mealPlan.length === 0 && !loading ? (
-                    'Generate a plan to see your meals.'
-                ) : (
-                    !loading && 'Select a valid day to view meals.'
-                )}
-            </div>
-        )}
-    </div>
+        <div className="flex flex-col md:flex-row p-4 gap-6">
+            {mealPlan.length > 0 && (
+                <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white rounded-lg shadow p-4">
+                    <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
+                </div>
+            )}
+            {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
+                <MealPlanDisplay
+                    key={selectedDay}
+                    mealPlan={mealPlan}
+                    selectedDay={selectedDay}
+                    nutritionalTargets={nutritionalTargets}
+                    eatenMeals={eatenMeals}
+                    onToggleMealEaten={onToggleMealEaten}
+                    onViewRecipe={setSelectedMeal} 
+                />
+            ) : (
+                <div className="flex-1 text-center p-8 text-gray-500">
+                    {error && !loading ? (
+                         <div className="p-4 bg-red-50 text-red-800 rounded-lg">
+                             <AlertTriangle className="inline w-6 h-6 mr-2" />
+                             <strong>Error generating plan. Check logs for details.</strong>
+                             <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
+                         </div>
+                    ) : mealPlan.length === 0 && !loading ? (
+                         'Generate a plan to see your meals.'
+                    ) : (
+                         !loading && 'Select a valid day to view meals.'
+                    )}
+                </div>
+            )}
+        </div>
     );
 
     const totalLogHeight = (failedIngredientsHistory.length > 0 ? 60 : 0) + (isLogOpen ? Math.max(minLogHeight, logHeight) : minLogHeight);
