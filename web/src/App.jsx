@@ -1050,7 +1050,7 @@ const App = () => {
     style={{ 
         paddingTop: '80px', // Offset for fixed header
         // --- THIS IS THE FIX ---
-        paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '80px' : (Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight) + 'px'}`
+        paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '64px' : (Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight) + 'px'}`
     }}
 >
 
