@@ -1027,14 +1027,20 @@ const App = () => {
     return (
         <>
             {/* NEW: Header Component */}
+            {/* --- THIS IS THE CHANGE --- */}
             <Header 
                 userId={userId}
                 onOpenSettings={() => setIsSettingsOpen(true)}
+                onNavigateToProfile={() => {
+                    setContentView('profile');
+                    setIsMenuOpen(false); // Close mobile menu if open
+                }}
                 onSignOut={() => {
                     if (auth) auth.signOut();
                     showToast('Signed out successfully', 'success');
                 }}
             />
+            {/* --- END OF CHANGE --- */}
     
             {/* NEW: Pull to Refresh Wrapper */}
             <PullToRefresh onRefresh={handleRefresh} refreshing={loading}>
@@ -1335,4 +1341,5 @@ const App = () => {
 };
 
 export default App;
+
 
