@@ -697,12 +697,11 @@ const App = () => {
                                 ]);
                                 
                                 // NEW: Show success modal, then navigate to Meals
-                                // --- MODIFICATION: Set to 'profile' as tabs are removed ---
                                 setTimeout(() => {
                                   setShowSuccessModal(true);
                                   setTimeout(() => {
                                     setShowSuccessModal(false);
-                                    setContentView('profile'); // Was 'meals'
+                                    setContentView('meals'); // <<< RESTORED 'meals'
                                     setSelectedDay(1);
                                   }, 2500);
                                 }, 500);
@@ -1329,51 +1328,28 @@ const App = () => {
                                                     </div>
                                                 )}
                                         
-                                                {/* --- TAB NAVIGATION REMOVED --- */}
+                                                {/* --- INLINE TAB NAVIGATION REMOVED --- */}
                                                 
-                                                {/* Content rendering - Profile displays always.
-                                                  Since tabs are removed, we need to decide what to show.
-                                                  I'll default to showing 'profile', but also
-                                                  conditionally show 'meals' and 'ingredients'
-                                                  if they were the last selected view AND results exist.
-                                                  This maintains *some* functionality.
-                                                  
-                                                  A better approach might be to just always show Profile,
-                                                  and then programmatically show Meals/Ingredients
-                                                  based on other logic (e.g., after generation).
-                                                  
-                                                  For now, I will default to showing 'profile' always,
-                                                  and then also render meals and ingredients content
-                                                  underneath if they exist. This is the simplest
-                                                  change that removes the tabs but keeps the content.
-                                                */}
-                                                
-                                                {/* Always show Profile Tab */}
-                                                <ProfileTab 
-                                                    formData={formData} 
-                                                    nutritionalTargets={nutritionalTargets} 
-                                                />
-                                                
-                                                {/* Conditionally show Meals content if results exist */}
-                                                {(results && Object.keys(results).length > 0 && !loading) && (
-                                                    <div className="border-t mt-4">
-                                                        {mealPlanContent}
-                                                    </div>
+                                                {/* --- CONTENT VIEW LOGIC RESTORED --- */}
+                                                {/* Content rendering - Profile displays always */}
+                                                {contentView === 'profile' && (
+                                                    <ProfileTab 
+                                                        formData={formData} 
+                                                        nutritionalTargets={nutritionalTargets} 
+                                                    />
                                                 )}
                                                 
-                                                {/* Conditionally show Ingredients content if results exist */}
-                                                {(results && Object.keys(results).length > 0 && !loading) && (
-                                                    <div className="border-t mt-4">
-                                                        {priceComparisonContent}
-                                                    </div>
-                                                )}
-
-                                                {/* Placeholder when no results yet */}
-                                                {!(results && Object.keys(results).length > 0) && !loading && (
+                                                {/* Meals and Ingredients only show if results exist */}
+                                                {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
+                                                {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
+                                                
+                                                {/* Placeholder when on Meals/Ingredients but no results yet */}
+                                                {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
                                                     <div className="p-6 text-center text-gray-500">
-                                                        Generate a plan to view results.
+                                                        Generate a plan to view {contentView}.
                                                     </div>
                                                 )}
+                                                {/* --- END OF RESTORED LOGIC --- */}
                                         
                                             </div>
                                         )}
@@ -1386,24 +1362,15 @@ const App = () => {
                         </div>
                     </PullToRefresh>
             
-                    {/* NEW: Mobile Bottom Navigation */}
-                    {/* This component is not in the original file, but was in the guide.
-                        If the original layout is used, this might not be correct.
-                        However, the user's *original file* DOES have it.
-                        
-                        --- MODIFICATION ---
-                        I will REMOVE this BottomNav as it directly relates to the
-                        tabs ('profile', 'meals', 'ingredients') that were
-                        just removed.
-                    */}
-                    {/* {isMobile && results && Object.keys(results).length > 0 && (
+                    {/* --- BOTTOM NAV RESTORED --- */}
+                    {isMobile && results && Object.keys(results).length > 0 && (
                         <BottomNav
                             activeTab={contentView}
                             onTabChange={setContentView}
                             showPlanButton={false}
                         />
                     )}
-                    */}
+                    {/* --- END OF RESTORED BLOCK --- */}
             
                     {/* NEW: Toast Container */}
                     <ToastContainer toasts={toasts} onRemoveToast={removeToast} />
@@ -1417,7 +1384,7 @@ const App = () => {
                         onClose={() => setShowSuccessModal(false)}
                         onViewPlan={() => {
                             setShowSuccessModal(false);
-                            setContentView('profile'); // Was 'meals'
+                            setContentView('meals'); // <<< RESTORED 'meals'
                         }}
                     />
             
@@ -1463,7 +1430,7 @@ const App = () => {
                             <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                         )}
                         {showFailedIngredientsLogs && (
-                            <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
+                            <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadLogs} />
                         )}
                         {!showOrchestratorLogs && !showFailedIngredientsLogs && (
                             <div className="bg-gray-800 text-white p-2 text-xs text-center cursor-pointer hover:bg-gray-700" onClick={() => { setShowOrchestratorLogs(true); setShowFailedIngredientsLogs(true); }}>
@@ -1485,4 +1452,5 @@ const App = () => {
 };
 
 export default App;
+
 
