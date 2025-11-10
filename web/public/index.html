@@ -1,12 +1,29 @@
-<!-- web/public/index.html -->
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Cheffy Plan</title>
     
-    <!-- [FIX] Uncommented Tailwind and Fonts to fix "white screen" bug -->
+    <!-- SEO Meta Tags -->
+    <title>Cheffy - AI-Powered Meal Planning & Macro Tracking</title>
+    <meta name="description" content="Generate personalized meal plans, track your macros, and achieve your health goals with AI-powered nutrition insights." />
+    <meta name="keywords" content="meal planning, macro tracking, nutrition, AI, fitness, health goals" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://cheffy.app/" />
+    <meta property="og:title" content="Cheffy - Your Personal Meal Companion" />
+    <meta property="og:description" content="Generate personalized meal plans, track your macros, and achieve your health goals with AI-powered nutrition insights." />
+    <meta property="og:image" content="/og-image.jpg" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content="https://cheffy.app/" />
+    <meta property="twitter:title" content="Cheffy - Your Personal Meal Companion" />
+    <meta property="twitter:description" content="Generate personalized meal plans, track your macros, and achieve your health goals." />
+    <meta property="twitter:image" content="/og-image.jpg" />
+    
+    <!-- Tailwind CSS and Fonts -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -19,12 +36,6 @@
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
 
-    <!-- 
-      [FIX] Changed src from "/src/index.js" to "/src/index.jsx".
-      This was the main cause of the "white screen" as the app was not loading.
-    -->
     <script type="module" src="/src/index.jsx"></script>
   </body>
 </html>
-
-
