@@ -56,7 +56,7 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                     <Target className="w-5 h-5 mr-2"/>Daily Progress
                 </h4>
                 
-                {/* Main Calorie Bar */}
+                {/* Main Calorie Bar - FIXED: Added relative and overflow-hidden */}
                 <div className="mb-4">
                     <div className="flex justify-between items-center mb-1">
                         <span className="text-sm font-semibold text-gray-700">Calories</span>
@@ -68,14 +68,19 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                             <span className="text-gray-600">{calTarget} kcal</span>
                         </span>
                     </div>
-                    <div className="w-full bg-gray-200 rounded-full h-4 mb-1">
+                    {/* FIXED: Added relative and overflow-hidden to container */}
+                    <div className="relative w-full bg-gray-200 rounded-full h-4 mb-1 overflow-hidden">
+                        {/* FIXED: Added absolute positioning and will-change */}
                         <div 
-                            className={`h-4 rounded-full transition-all duration-500 ${
+                            className={`absolute top-0 left-0 h-full rounded-full transition-all duration-500 ${
                                 dailyMacrosEaten.calories > calTarget * 1.05 ? 'bg-red-500' : 
                                 dailyMacrosEaten.calories >= calTarget * 0.95 ? 'bg-green-500' : 
                                 'bg-indigo-500'
                             }`}
-                            style={{ width: `${calTarget > 0 ? Math.min(100, (dailyMacrosEaten.calories / calTarget) * 100) : 0}%` }}
+                            style={{ 
+                                width: `${calTarget > 0 ? Math.min(100, (dailyMacrosEaten.calories / calTarget) * 100) : 0}%`,
+                                willChange: 'width'
+                            }}
                         />
                     </div>
                     <p className="text-xs text-gray-500 text-right">
@@ -175,7 +180,7 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                         <p className="text-gray-600 leading-relaxed mt-2">{mealDesc}</p>
 
                         {/* Macro Breakout with Visual Indicators */}
-                        <div className="grid grid-cols-3 gap-2 mt-4 text-center">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4 text-center">
                             <div className="bg-green-50 p-2 rounded-lg border border-green-200">
                                 <p className="text-sm font-semibold text-green-800">Protein</p>
                                 <p className="text-lg font-bold">{mealMacros.p}g</p>
