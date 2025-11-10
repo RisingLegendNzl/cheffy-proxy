@@ -184,7 +184,7 @@ const App = () => {
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
     
-    // --- CHANGE 4: Add State Variables for Log Visibility Toggles ---
+    // --- State Variables for Log Visibility Toggles ---
     const [showOrchestratorLogs, setShowOrchestratorLogs] = useState(
       () => JSON.parse(localStorage.getItem('cheffy_show_orchestrator_logs') ?? 'true')
     );
@@ -222,7 +222,7 @@ const App = () => {
 
     const [appId, setAppId] = useState('default-app-id');
     
-    // --- CHANGE 5: Persist Log Visibility Preferences ---
+    // --- Persist Log Visibility Preferences ---
     useEffect(() => {
       localStorage.setItem('cheffy_show_orchestrator_logs', JSON.stringify(showOrchestratorLogs));
     }, [showOrchestratorLogs]);
@@ -840,7 +840,7 @@ const App = () => {
         }
     }, [isAuthReady, userId, db, formData, appId]);
 
-    // --- CHANGE 7: Handle Edit Profile Navigation from Settings ---
+    // --- Handle Edit Profile Navigation from Settings ---
     const handleEditProfile = useCallback(() => {
         setIsSettingsOpen(false);
         setContentView('profile');
@@ -1285,7 +1285,7 @@ const App = () => {
             />
     
             {/* NEW: Settings Panel */}
-            {/* --- CHANGE 8: Pass New Props to Settings Panel --- */}
+            {/* --- FIX #1: Add Missing Props to SettingsPanel --- */}
             <SettingsPanel
                 isOpen={isSettingsOpen}
                 onClose={() => setIsSettingsOpen(false)}
@@ -1309,7 +1309,7 @@ const App = () => {
             />
     
             {/* KEEP: Existing log viewers and recipe modal */}
-            {/* --- CHANGE 6: Conditionally Render Log Viewers --- */}
+            {/* --- FIX #2: Fix Log Viewer Conditional Rendering --- */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                 {showOrchestratorLogs && (
                     <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
