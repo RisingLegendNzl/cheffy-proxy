@@ -61,7 +61,7 @@ const MacroBar = ({
                 </div>
             </div>
             
-            {/* Progress Bar */}
+            {/* Progress Bar - FIXED: Added overflow-hidden */}
             <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
                 <div 
                     className={`h-3 rounded-full transition-all duration-500 ease-out ${getBarColor()}`}
