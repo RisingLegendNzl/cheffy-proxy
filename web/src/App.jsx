@@ -1190,6 +1190,7 @@ const App = () => {
                                     </div>
                                 </div>
     
+                                {/* --- REPLACEMENT BLOCK FOR RENDERING LOGIC --- */}
                                 {hasInvalidMeals ? (
                                     <PlanCalculationErrorPanel />
                                 ) : (
@@ -1203,8 +1204,8 @@ const App = () => {
                                                 />
                                             </div>
                                         )}
-    
-                                        {/* --- 4. REPLACED BUTTONS WITH TAB NAVIGATION --- */}
+                                
+                                        {/* Tab navigation - only show when results exist */}
                                         {(results && Object.keys(results).length > 0 && !loading) && (
                                             <div className="flex space-x-2 p-4 bg-gray-100 border-b">
                                                 <button 
@@ -1228,18 +1229,29 @@ const App = () => {
                                             </div>
                                         )}
                                         
-                                        {/* --- 5. UPDATED CONTENT RENDER LOGIC --- */}
+                                        {/* Content rendering - Profile displays always */}
                                         {contentView === 'profile' && (
                                             <ProfileTab 
                                                 formData={formData} 
                                                 nutritionalTargets={nutritionalTargets} 
                                             />
                                         )}
-                                        {contentView === 'meals' && mealPlanContent}
-                                        {contentView === 'ingredients' && priceComparisonContent}
-    
+                                        
+                                        {/* Meals and Ingredients only show if results exist */}
+                                        {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
+                                        {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
+                                        
+                                        {/* Placeholder when on Meals/Ingredients but no results yet */}
+                                        {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
+                                            <div className="p-6 text-center text-gray-500">
+                                                Generate a plan to view {contentView}.
+                                            </div>
+                                        )}
+                                
                                     </div>
                                 )}
+                                {/* --- END OF REPLACEMENT BLOCK --- */}
+
                             </div>
                         </div>
                     </div>
@@ -1323,4 +1335,5 @@ const App = () => {
 };
 
 export default App;
+
 
