@@ -31,7 +31,7 @@ const MealPlanDisplay = ({
   selectedDay, 
   setSelectedDay, 
   eatenMeals, 
-  handleToggleMealEaten, 
+  onToggleMealEaten, 
   setSelectedMeal,
   nutritionalTargets,
   loading = false 
@@ -319,7 +319,7 @@ const MealPlanDisplay = ({
                   <MealCard
                     meal={meal}
                     isEaten={isEaten}
-                    onToggleEaten={() => handleToggleMealEaten(selectedDay, index)}
+                    onToggleEaten={() => onToggleMealEaten(selectedDay, index)}
                     onViewRecipe={() => setSelectedMeal(meal)}
                     showNutrition={true}
                     nutritionalTargets={nutritionalTargets}
