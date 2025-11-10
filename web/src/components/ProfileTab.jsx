@@ -1,8 +1,6 @@
 // web/src/components/ProfileTab.jsx
 import React, { useMemo } from 'react';
-import { Target, Flame, Soup, Droplet, Wheat, User as UserIcon, Zap } from 'lucide-react';
-import MacroRing from './MacroRing';
-import MacroBar from './MacroBar';
+import { Target, Flame, Soup, Droplet, Wheat, User as UserIcon, Zap, TrendingUp } from 'lucide-react';
 
 // A simple display card for the User Profile
 const ProfileCard = ({ formData }) => (
@@ -36,7 +34,33 @@ const ProfileCard = ({ formData }) => (
   </div>
 );
 
-// Enhanced component displaying nutritional targets with rings and bars
+// Mini progress bar component for the macro breakdown
+const MacroProgressBar = ({ label, amount, unit, kcal, color, Icon, percentage }) => {
+  return (
+    <div className="space-y-2">
+      <div className="flex justify-between items-center">
+        <div className="flex items-center">
+          {Icon && <Icon size={16} className={`mr-2 text-${color}-600`} />}
+          <span className="text-sm font-semibold text-gray-700">{label}</span>
+        </div>
+        <div className="text-right">
+          <span className="text-lg font-bold text-gray-900">{amount}{unit}</span>
+          <span className="text-xs text-gray-500 ml-1">({kcal} kcal)</span>
+        </div>
+      </div>
+      {/* Progress bar filled to 100% */}
+      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+        <div 
+          className={`h-2 rounded-full bg-gradient-to-r from-${color}-400 to-${color}-600 transition-all duration-700 ease-out`}
+          style={{ width: '100%' }}
+        />
+      </div>
+      <p className="text-xs text-gray-500 text-right">{percentage}% of daily calories</p>
+    </div>
+  );
+};
+
+// Enhanced SPLIT VIEW component for nutritional targets
 const TargetsCard = ({ nutritionalTargets }) => {
   const hasTargets = nutritionalTargets.calories > 0;
 
@@ -78,83 +102,140 @@ const TargetsCard = ({ nutritionalTargets }) => {
     };
   }, [nutritionalTargets]);
 
+  // SVG Circle calculations for the calorie ring
+  const size = 180;
+  const strokeWidth = 12;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const offset = 0; // Always show as "full" since this is a target, not progress
+
   return (
-    <div className="bg-white rounded-xl shadow-lg border p-6">
-      <h3 className="text-xl font-bold text-indigo-700 text-center mb-2">
-        Daily Targets
-      </h3>
-      
-      {/* Macro Ratio Display */}
-      <p className="text-center text-sm text-gray-600 mb-6">
-        {macroRatios.protein}% P • {macroRatios.fat}% F • {macroRatios.carbs}% C
-      </p>
-
-      {/* Circular Rings Section */}
-      <div className="grid grid-cols-2 gap-6 mb-6">
-        <MacroRing
-          current={0}
-          target={nutritionalTargets.calories}
-          label="Calories"
-          color="red"
-          size={100}
-          unit="kcal"
-        />
-        <MacroRing
-          current={0}
-          target={nutritionalTargets.protein}
-          label="Protein"
-          color="green"
-          size={100}
-          unit="g"
-        />
+    <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white p-6">
+        <h3 className="text-2xl font-bold text-center flex items-center justify-center">
+          <Target className="w-6 h-6 mr-2" />
+          Your Daily Nutritional Blueprint
+        </h3>
+        <p className="text-center text-indigo-100 text-sm mt-1">
+          Personalized for your goals
+        </p>
       </div>
 
-      {/* Progress Bars Section */}
-      <div className="space-y-4">
-        <MacroBar
-          label="Protein"
-          current={0}
-          target={nutritionalTargets.protein}
-          unit="g"
-          color="green"
-          Icon={Soup}
-        />
-        <MacroBar
-          label="Fat"
-          current={0}
-          target={nutritionalTargets.fat}
-          unit="g"
-          color="yellow"
-          Icon={Droplet}
-        />
-        <MacroBar
-          label="Carbs"
-          current={0}
-          target={nutritionalTargets.carbs}
-          unit="g"
-          color="orange"
-          Icon={Wheat}
-        />
+      {/* SPLIT VIEW LAYOUT */}
+      <div className="grid md:grid-cols-2 gap-0">
+        
+        {/* LEFT SIDE: Calorie Target with Ring */}
+        <div className="bg-gradient-to-br from-indigo-50 to-purple-50 p-8 flex flex-col items-center justify-center border-r">
+          <p className="text-sm font-semibold text-gray-600 uppercase tracking-wide mb-2">
+            Daily Target
+          </p>
+          
+          {/* Calorie Ring */}
+          <div className="relative mb-4" style={{ width: size, height: size }}>
+            {/* Background Circle */}
+            <svg className="transform -rotate-90" width={size} height={size}>
+              <circle
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                stroke="currentColor"
+                strokeWidth={strokeWidth}
+                fill="none"
+                className="text-gray-200"
+              />
+              {/* Filled Circle (100% for target display) */}
+              <circle
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                stroke="url(#gradient)"
+                strokeWidth={strokeWidth}
+                fill="none"
+                strokeDasharray={circumference}
+                strokeDashoffset={offset}
+                strokeLinecap="round"
+                className="transition-all duration-1000 ease-out"
+              />
+              {/* Gradient Definition */}
+              <defs>
+                <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#6366f1" />
+                  <stop offset="100%" stopColor="#8b5cf6" />
+                </linearGradient>
+              </defs>
+            </svg>
+            {/* Center Text */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className="text-5xl font-extrabold text-indigo-700">
+                {nutritionalTargets.calories.toLocaleString()}
+              </span>
+              <span className="text-sm text-gray-500 font-medium mt-1">
+                calories
+              </span>
+            </div>
+          </div>
+
+          <p className="text-xs text-gray-500 text-center max-w-xs">
+            This is your daily calorie target based on your profile and goals
+          </p>
+        </div>
+
+        {/* RIGHT SIDE: Macro Breakdown */}
+        <div className="p-6 flex flex-col justify-center">
+          <div className="mb-4">
+            <h4 className="text-lg font-bold text-gray-800 mb-1">Macro Split</h4>
+            <p className="text-sm text-gray-600">
+              {macroRatios.protein}% Protein • {macroRatios.fat}% Fat • {macroRatios.carbs}% Carbs
+            </p>
+          </div>
+
+          <div className="space-y-6">
+            {/* Protein */}
+            <MacroProgressBar
+              label="Protein"
+              amount={nutritionalTargets.protein}
+              unit="g"
+              kcal={nutritionalTargets.protein * 4}
+              color="green"
+              Icon={Soup}
+              percentage={macroRatios.protein}
+            />
+
+            {/* Fat */}
+            <MacroProgressBar
+              label="Fat"
+              amount={nutritionalTargets.fat}
+              unit="g"
+              kcal={nutritionalTargets.fat * 9}
+              color="yellow"
+              Icon={Droplet}
+              percentage={macroRatios.fat}
+            />
+
+            {/* Carbs */}
+            <MacroProgressBar
+              label="Carbs"
+              amount={nutritionalTargets.carbs}
+              unit="g"
+              kcal={nutritionalTargets.carbs * 4}
+              color="orange"
+              Icon={Wheat}
+              percentage={macroRatios.carbs}
+            />
+          </div>
+        </div>
       </div>
 
-      {/* Calorie Breakdown */}
-      <div className="mt-6 p-4 bg-gradient-to-br from-indigo-50 to-purple-50 rounded-lg">
-        <h4 className="text-sm font-bold text-gray-700 mb-2 flex items-center">
-          <Flame className="w-4 h-4 mr-1 text-red-500" />
-          Calorie Breakdown
-        </h4>
-        <div className="space-y-1 text-xs">
-          <div className="flex justify-between">
-            <span className="text-gray-600">From Protein:</span>
-            <span className="font-semibold">{nutritionalTargets.protein * 4} kcal ({macroRatios.protein}%)</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-600">From Fat:</span>
-            <span className="font-semibold">{nutritionalTargets.fat * 9} kcal ({macroRatios.fat}%)</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-600">From Carbs:</span>
-            <span className="font-semibold">{nutritionalTargets.carbs * 4} kcal ({macroRatios.carbs}%)</span>
+      {/* Footer Info Card */}
+      <div className="bg-blue-50 border-t p-4">
+        <div className="flex items-start">
+          <TrendingUp className="w-5 h-5 text-blue-600 mr-3 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-gray-700">
+            <p className="font-semibold text-blue-900 mb-1">Track Your Progress</p>
+            <p className="text-gray-600">
+              Head to the <span className="font-semibold">Meals tab</span> to track your daily intake and see real-time progress towards these targets.
+            </p>
           </div>
         </div>
       </div>
