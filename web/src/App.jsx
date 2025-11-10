@@ -1,6 +1,6 @@
 // web/src/App.jsx
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered, Utensils, Settings, Info, Store, Trash2, ArrowDown } from 'lucide-react';
+import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered, Utensils } from 'lucide-react';
 
 // --- Firebase Imports ---
 import { initializeApp } from 'firebase/app';
@@ -174,7 +174,7 @@ const App = () => {
     const [eatenMeals, setEatenMeals] = useState({});
     const [selectedDay, setSelectedDay] = useState(1);
     const [contentView, setContentView] = useState('profile'); // <-- Set default tab
-    // const [isMenuOpen, setIsMenuOpen] = useState(false); // ❌ REMOVED
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [diagnosticLogs, setDiagnosticLogs] = useState([]);
     const [nutritionCache, setNutritionCache] = useState({});
     const [loadingNutritionFor, setLoadingNutritionFor] = useState(null);
@@ -302,12 +302,12 @@ const App = () => {
     const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
             const msg = 'Firebase not ready or App ID is missing. Cannot load profile.';
-            if (!isInitialLoad) showToast(msg, 'error'); // Use toast
+            if (!isInitialLoad) setStatusMessage({ text: msg, type: 'error' });
             console.error(`[FIREBASE LOAD] ${msg}`, { isAuthReady, userId: !!userId, db: !!db, appId });
             return;
         }
         if (!isInitialLoad) {
-            showToast('Loading profile...', 'info'); // Use toast
+            setStatusMessage({ text: 'Loading profile...', type: 'info' });
         } else {
              console.log('[FIREBASE LOAD] Attempting initial profile load...');
          }
@@ -323,30 +323,36 @@ const App = () => {
                 if (loadedData && typeof loadedData === 'object' && Object.keys(loadedData).length > 0) {
                      setFormData(prev => ({ ...prev, ...loadedData }));
                      if (!isInitialLoad) {
-                         showToast('Profile loaded successfully!', 'success'); // Use toast
+                         setStatusMessage({ text: 'Profile loaded successfully!', type: 'success' });
                      } else {
                           console.log('[FIREBASE LOAD] Initial profile loaded.');
-                          showToast('Profile loaded from previous session.', 'success'); // Use toast
+                          setStatusMessage({ text: 'Profile loaded from previous session.', type: 'success'});
                      }
                 } else {
                      console.warn('[FIREBASE LOAD] Loaded data is empty or not an object.');
                       if (!isInitialLoad) {
-                        showToast('Found profile document, but data is invalid.', 'warn'); // Use toast
+                        setStatusMessage({ text: 'Found profile document, but data is invalid.', type: 'warn' });
                       }
                 }
             } else {
                 console.log('[FIREBASE LOAD] No profile document found.');
                  if (!isInitialLoad) {
-                    showToast('No saved profile found.', 'info'); // Use toast
+                    setStatusMessage({ text: 'No saved profile found.', type: 'info' });
                  }
             }
         } catch (loadError) {
             console.error('[FIREBASE LOAD] Error loading profile:', loadError);
              if (!isInitialLoad) {
-                showToast(`Error loading profile: ${loadError.message}`, 'error'); // Use toast
+                setStatusMessage({ text: `Error loading profile: ${loadError.message}`, type: 'error' });
              }
+        } finally {
+            if (!isInitialLoad) {
+                setTimeout(() => {
+                    setStatusMessage(prev => prev.text === 'Loading profile...' ? { text: '', type: '' } : prev);
+                }, 3000);
+            }
         }
-    }, [isAuthReady, userId, db, appId, showToast]); // Added showToast dependency
+    }, [isAuthReady, userId, db, appId]);
 
     useEffect(() => {
         if (isAuthReady && userId && db && appId) {
@@ -796,22 +802,26 @@ const App = () => {
 
     const handleSaveProfile = useCallback(async () => {
         if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            showToast('Firebase not ready or App ID is missing. Cannot save profile.', 'error'); // Use toast
+            setStatusMessage({ text: 'Firebase not ready or App ID is missing. Cannot save profile.', type: 'error' });
             console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
             return;
         }
-        showToast('Saving profile...', 'info'); // Use toast
+        setStatusMessage({ text: 'Saving profile...', type: 'info' });
         try {
             const profileDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PROFILE_COLLECTION, FIRESTORE_PROFILE_DOC_ID);
             console.log(`[FIREBASE SAVE] Saving profile to: ${profileDocRef.path}`);
             await setDoc(profileDocRef, formData); 
-            showToast('Profile saved successfully!', 'success'); // Use toast
+            setStatusMessage({ text: 'Profile saved successfully!', type: 'success' });
             console.log('[FIREBASE SAVE] Profile saved.');
         } catch (saveError) {
             console.error('[FIREBASE SAVE] Error saving profile:', saveError);
-            showToast(`Error saving profile: ${saveError.message}`, 'error'); // Use toast
+            setStatusMessage({ text: `Error saving profile: ${saveError.message}`, type: 'error' });
+        } finally {
+             setTimeout(() => {
+                 setStatusMessage(prev => prev.text === 'Saving profile...' ? { text: '', type: '' } : prev);
+             }, 3000);
         }
-    }, [isAuthReady, userId, db, formData, appId, showToast]); // Added showToast dependency
+    }, [isAuthReady, userId, db, formData, appId]);
 
 
     const handleChange = (e) => {
@@ -1011,14 +1021,23 @@ const App = () => {
                     {/* --- EXISTING CONTENT --- */}
                     <h1 className="text-5xl font-extrabold text-center mb-8 font-['Poppins']"><span className="relative"><ChefHat className="inline w-12 h-12 text-indigo-600 absolute -top-5 -left-5 transform -rotate-12" /><span className="text-indigo-700">C</span>heffy</span></h1>
     
-                    {/* ❌ REMOVED: Status message display */}
-                    {/* ❌ REMOVED: User ID display */}
+                    {statusMessage.text && (
+                        <div className={`p-3 mb-4 rounded-lg text-sm font-medium text-center max-w-xl mx-auto ${getStatusColor(statusMessage.type)}`}>
+                            {statusMessage.text}
+                        </div>
+                    )}
+    
+                     {userId && isAuthReady && (
+                        <div className="text-center text-xs text-gray-500 mb-4 flex items-center justify-center">
+                            <User size={12} className="mr-1" /> User ID: <span className="font-mono ml-1">{userId}</span>
+                        </div>
+                     )}
     
     
                     <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
                         <div className="flex flex-col md:flex-row">
                             {/* --- SETUP FORM --- */}
-                            <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r hidden md:block`}>
+                            <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
                                 <div className="flex justify-between items-center mb-6">
                                     <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
                                     <div className="flex space-x-2">
@@ -1038,7 +1057,7 @@ const App = () => {
                                         >
                                             <Save size={14} className="mr-1" /> Save
                                         </button>
-                                        {/* ❌ REMOVED: X button */}
+                                        <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
                                     </div>
                                 </div>
                                 
@@ -1111,9 +1130,9 @@ const App = () => {
                             </div>
     
                             {/* --- RESULTS VIEW --- */}
-                            <div className={`w-full md:w-1/2 block`}>
+                            <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
                                 <div className="p-4 md:hidden flex justify-end">
-                                    {/* ❌ REMOVED: Menu button */}
+                                    <button className="bg-indigo-600 text-white p-2 rounded-full shadow" onClick={() => setIsMenuOpen(true)}><Menu /></button>
                                 </div>
                                 <div className="border-b">
                                     <div className="p-6 md:p-8">
@@ -1265,5 +1284,4 @@ const App = () => {
 };
 
 export default App;
-
 
