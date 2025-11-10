@@ -1182,7 +1182,7 @@ const App = () => {
                                                     onClick={() => setContentView('ingredients')}
                                                 >
                                                     Ingredients
-                                                </Dbutton>
+                                                </button>
                                             </div>
                                         )}
                                         
