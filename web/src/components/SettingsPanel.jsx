@@ -9,7 +9,11 @@ import {
   Shield,
   ChevronRight,
   Save,
-  Trash2
+  Trash2,
+  Eye,
+  EyeOff,
+  Terminal,
+  ListX
 } from 'lucide-react';
 import { COLORS, Z_INDEX, SHADOWS } from '../constants';
 import { APP_CONFIG } from '../constants';
@@ -23,6 +27,11 @@ const SettingsPanel = ({
   currentStore = 'Woolworths',
   onStoreChange,
   onClearData,
+  onEditProfile,
+  showOrchestratorLogs = true,
+  onToggleOrchestratorLogs,
+  showFailedIngredientsLogs = true,
+  onToggleFailedIngredientsLogs,
 }) => {
   const [selectedStore, setSelectedStore] = useState(currentStore);
 
@@ -33,6 +42,12 @@ const SettingsPanel = ({
       onStoreChange(selectedStore);
     }
     onClose();
+  };
+
+  const handleEditProfileClick = () => {
+    if (onEditProfile) {
+      onEditProfile();
+    }
   };
 
   const handleClearAllData = () => {
@@ -83,6 +98,7 @@ const SettingsPanel = ({
               </h3>
             </div>
             <button
+              onClick={handleEditProfileClick}
               className="w-full flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-fast"
             >
               <span style={{ color: COLORS.gray[700] }}>Edit Profile</span>
@@ -134,6 +150,60 @@ const SettingsPanel = ({
                 <option value="imperial">Imperial (lb, oz)</option>
               </select>
             </div>
+          </div>
+
+          {/* Diagnostics Section */}
+          <div>
+            <div className="flex items-center mb-4">
+              <Terminal size={20} className="mr-2" style={{ color: COLORS.primary[600] }} />
+              <h3 className="font-bold" style={{ color: COLORS.gray[900] }}>
+                Diagnostics
+              </h3>
+            </div>
+
+            {/* Show Orchestrator Logs Toggle */}
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-3 hover:bg-gray-100 transition-fast">
+              <div className="flex items-center">
+                <Terminal size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
+                <label className="text-sm font-semibold" style={{ color: COLORS.gray[700] }}>
+                  Orchestrator Logs
+                </label>
+              </div>
+              <button
+                onClick={() => onToggleOrchestratorLogs && onToggleOrchestratorLogs(!showOrchestratorLogs)}
+                className="p-2 rounded-lg transition-fast"
+                style={{
+                  backgroundColor: showOrchestratorLogs ? COLORS.success.light : COLORS.gray[200],
+                  color: showOrchestratorLogs ? COLORS.success.dark : COLORS.gray[600],
+                }}
+              >
+                {showOrchestratorLogs ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
+
+            {/* Show Failed Ingredients Logs Toggle */}
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-fast">
+              <div className="flex items-center">
+                <ListX size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
+                <label className="text-sm font-semibold" style={{ color: COLORS.gray[700] }}>
+                  Failed Ingredients Log
+                </label>
+              </div>
+              <button
+                onClick={() => onToggleFailedIngredientsLogs && onToggleFailedIngredientsLogs(!showFailedIngredientsLogs)}
+                className="p-2 rounded-lg transition-fast"
+                style={{
+                  backgroundColor: showFailedIngredientsLogs ? COLORS.success.light : COLORS.gray[200],
+                  color: showFailedIngredientsLogs ? COLORS.success.dark : COLORS.gray[600],
+                }}
+              >
+                {showFailedIngredientsLogs ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
+
+            <p className="text-xs mt-3" style={{ color: COLORS.gray[500] }}>
+              Toggle diagnostic logs on/off. These are useful for troubleshooting but can clutter the interface.
+            </p>
           </div>
 
           {/* App Info */}
