@@ -69,8 +69,7 @@ const ORCHESTRATOR_FULL_PLAN_API_URL = '/api/plan/generate-full-plan'; // New ba
 
 const NUTRITION_API_URL = '/api/nutrition-search';
 const MAX_SUBSTITUTES = 5;
-const FIRESTORE_PROFILE_COLLECTION = 'profile';
-const FIRESTORE_PROFILE_DOC_ID = 'userProfile';
+// --- REMOVED Firestore constants (Change 1) ---
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = {
@@ -290,7 +289,7 @@ const App = () => {
                         console.log("[FIREBASE] User is signed in:", user.uid);
                         setUserId(user.uid);
                     } else {
-                        console.log("[FIREBASE] User is signed out. Attempting sign-in...");
+                        console.log("[FIREBASE] User is signed out.");
                         setUserId(null);
                         // Don't auto-sign-in anonymously anymore, let the user choose
                         // We will show the landing page instead
@@ -311,67 +310,153 @@ const App = () => {
 
 
     // --- Load Profile on Auth Ready ---
-    const handleLoadProfile = useCallback(async (isInitialLoad = false) => {
-        if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            const msg = 'Firebase not ready or App ID is missing. Cannot load profile.';
-            if (!isInitialLoad) setStatusMessage({ text: msg, type: 'error' });
-            console.error(`[FIREBASE LOAD] ${msg}`, { isAuthReady, userId: !!userId, db: !!db, appId });
+    // --- REPLACED per Change 3 ---
+    const handleLoadProfile = useCallback(async (silent = false) => {
+        // Check if user is authenticated (not anonymous)
+        if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
+            if (!silent) {
+                showToast('Please sign in to load your profile', 'warning');
+            }
+            return false;
+        }
+    
+        try {
+            // Load from simplified path: profile/{userId}
+            const profileRef = doc(db, 'profile', userId);
+            const profileSnap = await getDoc(profileRef);
+    
+            if (profileSnap.exists()) {
+                const data = profileSnap.data();
+                
+                // Load form data
+                setFormData({
+                    name: data.name || '',
+                    height: data.height || '180',
+                    weight: data.weight || '75',
+                    age: data.age || '30',
+                    gender: data.gender || 'male',
+                    bodyFat: data.bodyFat || '',
+                    activityLevel: data.activityLevel || 'moderate',
+                    goal: data.goal || 'cut_moderate',
+                    dietary: data.dietary || 'None',
+                    cuisine: data.cuisine || '',
+                    days: data.days || 7,
+                    eatingOccasions: data.eatingOccasions || '3',
+                    store: data.store || 'Woolworths',
+                    costPriority: data.costPriority || 'Best Value',
+                    mealVariety: data.mealVariety || 'Balanced Variety'
+                });
+                
+                // Load nutritional targets if they exist
+                if (data.nutritionalTargets) {
+                    setNutritionalTargets(data.nutritionalTargets);
+                }
+                
+                console.log("[PROFILE] Profile loaded successfully");
+                if (!silent) {
+                    showToast('Profile loaded successfully!', 'success');
+                }
+                
+                return true; // Profile exists
+                
+            } else {
+                console.log("[PROFILE] No saved profile found");
+                if (!silent) {
+                    showToast('No saved profile found', 'info');
+                }
+                return false; // No profile
+            }
+            
+        } catch (error) {
+            console.error("[PROFILE] Error loading profile:", error);
+            if (!silent) {
+                showToast('Failed to load profile', 'error');
+            }
+            return false;
+        }
+    }, [userId, db, isAuthReady, showToast]);
+
+    // --- ADDED per Change 4 ---
+    // Auto-save profile 2 seconds after user stops typing
+    useEffect(() => {
+        // Only auto-save if user is authenticated
+        if (!userId || userId.startsWith('local_') || !isAuthReady) return;
+        
+        // Debounce: wait 2 seconds after last change
+        const timeoutId = setTimeout(() => {
+            handleSaveProfile(true); // Silent save (no toast)
+        }, 2000);
+        
+        // Cleanup: cancel previous timer if user types again
+        return () => clearTimeout(timeoutId);
+    }, [formData, nutritionalTargets, userId, isAuthReady, handleSaveProfile]);
+
+
+    // --- ADDED per Change 5 ---
+    // Save settings to Firestore
+    const handleSaveSettings = useCallback(async () => {
+        if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
             return;
         }
-        if (!isInitialLoad) {
-            setStatusMessage({ text: 'Loading profile...', type: 'info' });
-        } else {
-             console.log('[FIREBASE LOAD] Attempting initial profile load...');
-         }
+
         try {
-            // This loads the *meal plan profile*
-            const profileDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PROFILE_COLLECTION, FIRESTORE_PROFILE_DOC_ID);
-            console.log(`[FIREBASE LOAD] Loading from path: ${profileDocRef.path}`);
-            const docSnap = await getDoc(profileDocRef);
+            const settingsData = {
+                showOrchestratorLogs: showOrchestratorLogs,
+                showFailedIngredientsLogs: showFailedIngredientsLogs,
+                lastUpdated: new Date().toISOString()
+            };
 
-            if (docSnap.exists()) {
-                const loadedData = docSnap.data();
-                console.log('[FIREBASE LOAD] Profile data found:', loadedData);
-                
-                if (loadedData && typeof loadedData === 'object' && Object.keys(loadedData).length > 0) {
-                     setFormData(prev => ({ ...prev, ...loadedData }));
-                     if (!isInitialLoad) {
-                         setStatusMessage({ text: 'Profile loaded successfully!', type: 'success' });
-                     } else {
-                          console.log('[FIREBASE LOAD] Initial profile loaded.');
-                          setStatusMessage({ text: 'Profile loaded from previous session.', type: 'success'});
-                     }
-                } else {
-                     console.warn('[FIREBASE LOAD] Loaded data is empty or not an object.');
-                      if (!isInitialLoad) {
-                        setStatusMessage({ text: 'Found profile document, but data is invalid.', type: 'warn' });
-                      }
-                }
-            } else {
-                console.log('[FIREBASE LOAD] No profile document found.');
-                 if (!isInitialLoad) {
-                    setStatusMessage({ text: 'No saved profile found.', type: 'info' });
-                 }
-            }
-        } catch (loadError) {
-            console.error('[FIREBASE LOAD] Error loading profile:', loadError);
-             if (!isInitialLoad) {
-                setStatusMessage({ text: `Error loading profile: ${loadError.message}`, type: 'error' });
-             }
-        } finally {
-            if (!isInitialLoad) {
-                setTimeout(() => {
-                    setStatusMessage(prev => prev.text === 'Loading profile...' ? { text: '', type: '' } : prev);
-                }, 3000);
-            }
+            // Save to: settings/{userId}
+            await setDoc(doc(db, 'settings', userId), settingsData);
+            console.log("[SETTINGS] Settings saved successfully");
+            
+        } catch (error) {
+            console.error("[SETTINGS] Error saving settings:", error);
         }
-    }, [isAuthReady, userId, db, appId]);
+    }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, db, isAuthReady]);
 
+    // Load settings from Firestore
+    const handleLoadSettings = useCallback(async () => {
+        if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
+            return;
+        }
+
+        try {
+            const settingsRef = doc(db, 'settings', userId);
+            const settingsSnap = await getDoc(settingsRef);
+
+            if (settingsSnap.exists()) {
+                const data = settingsSnap.data();
+                setShowOrchestratorLogs(data.showOrchestratorLogs ?? true);
+                setShowFailedIngredientsLogs(data.showFailedIngredientsLogs ?? true);
+                console.log("[SETTINGS] Settings loaded successfully");
+            }
+            
+        } catch (error) {
+            console.error("[SETTINGS] Error loading settings:", error);
+        }
+    }, [userId, db, isAuthReady]);
+
+    // --- ADDED per Change 6 ---
+    // Auto-save settings when they change
     useEffect(() => {
-        if (isAuthReady && userId && db && appId) {
-            handleLoadProfile(true);
+        if (userId && !userId.startsWith('local_') && isAuthReady) {
+            handleSaveSettings();
         }
-    }, [isAuthReady, userId, db, appId, handleLoadProfile]);
+    }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, isAuthReady, handleSaveSettings]);
+
+    // --- ADDED per Change 7 ---
+    // Load profile and settings after user signs in
+    useEffect(() => {
+        if (userId && !userId.startsWith('local_') && isAuthReady && db) {
+            // Load both profile and settings
+            handleLoadProfile(true); // Silent load
+            handleLoadSettings();
+        }
+    }, [userId, isAuthReady, db, handleLoadProfile, handleLoadSettings]);
+
+
+    // --- DELETED old auto-load effect per Change 9 ---
 
     // <<< STEP 3: (from previous guide) Landing page visibility >>>
     useEffect(() => {
@@ -428,7 +513,10 @@ const App = () => {
         setError(null);
         setDiagnosticLogs([]);
         setNutritionCache({});
-        setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+        // Don't reset targets if they are already loaded
+        if (nutritionalTargets.calories === 0) {
+            setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+        }
         setResults({});
         setUniqueIngredients([]);
         setMealPlan([]);
@@ -455,7 +543,7 @@ const App = () => {
 
             const targetsData = await targetsResponse.json();
             targets = targetsData.nutritionalTargets;
-            setNutritionalTargets(targets); 
+            setNutritionalTargets(targets); // This will trigger auto-save
             setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
             
         } catch (err) {
@@ -701,7 +789,7 @@ const App = () => {
                                   setShowSuccessModal(true);
                                   setTimeout(() => {
                                     setShowSuccessModal(false);
-                                    setContentView('meals'); // <<< RESTORED 'meals'
+                                    setContentView('meals');
                                     setSelectedDay(1);
                                   }, 2500);
                                 }, 500);
@@ -724,7 +812,7 @@ const App = () => {
                  setTimeout(() => setLoading(false), 2000);
             }
         }
-    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode, showToast]); // Added showToast dependency
+    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode, showToast, nutritionalTargets.calories]); // Added nutritionalTargets.calories
     // --- END: handleGeneratePlan Modifications ---
 
 
@@ -825,28 +913,69 @@ const App = () => {
         URL.revokeObjectURL(url);
     }, [diagnosticLogs]); 
 
-    const handleSaveProfile = useCallback(async () => {
-        if (!isAuthReady || !userId || !db || !appId || appId === 'default-app-id') {
-            setStatusMessage({ text: 'Firebase not ready or App ID is missing. Cannot save profile.', type: 'error' });
-            console.error('[FIREBASE SAVE] Auth not ready or DB/userId/appId missing.');
+    // --- REPLACED per Change 2 ---
+    const handleSaveProfile = useCallback(async (silent = false) => {
+        // Check if user is authenticated (not anonymous)
+        if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
+            if (!silent) {
+                showToast('Please sign in to save your profile', 'warning');
+            }
             return;
         }
-        setStatusMessage({ text: 'Saving profile...', type: 'info' });
+
         try {
-            const profileDocRef = doc(db, 'artifacts', appId, 'users', userId, FIRESTORE_PROFILE_COLLECTION, FIRESTORE_PROFILE_DOC_ID);
-            console.log(`[FIREBASE SAVE] Saving profile to: ${profileDocRef.path}`);
-            await setDoc(profileDocRef, formData); 
-            setStatusMessage({ text: 'Profile saved successfully!', type: 'success' });
-            console.log('[FIREBASE SAVE] Profile saved.');
-        } catch (saveError) {
-            console.error('[FIREBASE SAVE] Error saving profile:', saveError);
-            setStatusMessage({ text: `Error saving profile: ${saveError.message}`, type: 'error' });
-        } finally {
-             setTimeout(() => {
-                 setStatusMessage(prev => prev.text === 'Saving profile...' ? { text: '', type: '' } : prev);
-             }, 3000);
+            // Prepare profile data with all form fields
+            const profileData = {
+                // Personal info
+                name: formData.name,
+                height: formData.height,
+                weight: formData.weight,
+                age: formData.age,
+                gender: formData.gender,
+                bodyFat: formData.bodyFat,
+                
+                // Fitness goals
+                activityLevel: formData.activityLevel,
+                goal: formData.goal,
+                
+                // Diet preferences
+                dietary: formData.dietary,
+                cuisine: formData.cuisine,
+                
+                // Meal planning
+                days: formData.days,
+                eatingOccasions: formData.eatingOccasions,
+                store: formData.store,
+                costPriority: formData.costPriority,
+                mealVariety: formData.mealVariety,
+                
+                // Calculated targets
+                nutritionalTargets: {
+                    calories: nutritionalTargets.calories,
+                    protein: nutritionalTargets.protein,
+                    fat: nutritionalTargets.fat,
+                    carbs: nutritionalTargets.carbs
+                },
+                
+                // Metadata
+                lastUpdated: new Date().toISOString()
+            };
+
+            // Save to simplified Firestore path: profile/{userId}
+            await setDoc(doc(db, 'profile', userId), profileData);
+            
+            console.log("[PROFILE] Profile saved successfully");
+            if (!silent) {
+                showToast('Profile saved successfully!', 'success');
+            }
+            
+        } catch (error) {
+            console.error("[PROFILE] Error saving profile:", error);
+            if (!silent) {
+                showToast('Failed to save profile', 'error');
+            }
         }
-    }, [isAuthReady, userId, db, formData, appId]);
+    }, [formData, nutritionalTargets, userId, db, isAuthReady, showToast]);
 
     // <<< STEP 3: REMOVED old handleGetStarted function >>>
 
@@ -897,7 +1026,7 @@ const App = () => {
             }
 
             // Update local state
-            setUserId(user.uid);
+            setUserId(user.uid); // This will trigger auto-load
             setShowLandingPage(false);
             setContentView('profile');
             
@@ -933,7 +1062,7 @@ const App = () => {
             console.log("[AUTH] User signed in:", user.uid);
 
             // Update local state
-            setUserId(user.uid);
+            setUserId(user.uid); // This will trigger auto-load
             setShowLandingPage(false);
             setContentView('profile');
             
@@ -970,6 +1099,11 @@ const App = () => {
             setMealPlan([]);
             setContentView('profile');
             setAuthError(null); // Added this line
+            
+            // Reset form data to default
+            setFormData({ name: '', height: '180', weight: '75', age: '30', gender: 'male', activityLevel: 'moderate', goal: 'cut_moderate', dietary: 'None', days: 7, store: 'Woolworths', eatingOccasions: '3', costPriority: 'Best Value', mealVariety: 'Balanced Variety', cuisine: '', bodyFat: '' });
+            setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+            
             showToast('Signed out successfully', 'success');
         } catch (error) {
             console.error("[FIREBASE] Sign out error:", error);
@@ -1223,7 +1357,7 @@ const App = () => {
                                                     <FolderDown size={14} className="mr-1" /> Load
                                                 </button>
                                                  <button
-                                                    onClick={handleSaveProfile}
+                                                    onClick={() => handleSaveProfile(false)}
                                                     disabled={!isAuthReady || !userId || !db} 
                                                     className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
                                                     title="Save Current Profile"
@@ -1384,7 +1518,7 @@ const App = () => {
                         onClose={() => setShowSuccessModal(false)}
                         onViewPlan={() => {
                             setShowSuccessModal(false);
-                            setContentView('meals'); // <<< RESTORED 'meals'
+                            setContentView('meals');
                         }}
                     />
             
@@ -1404,11 +1538,11 @@ const App = () => {
                             setEatenMeals({});
                             showToast('All data cleared', 'success');
                         }}
-                        onEditProfile={handleEditProfile} // This now calls the fixed function
+                        onEditProfile={handleEditProfile}
                         showOrchestratorLogs={showOrchestratorLogs}
-                        onToggleOrchestratorLogs={setShowOrchestratorLogs}
+                        onToggleOrchestratorLogs={setShowOrchestratorLogs} // This will trigger auto-save
                         showFailedIngredientsLogs={showFailedIngredientsLogs}
-                        onToggleFailedIngredientsLogs={setShowFailedIngredientsLogs}
+                        onToggleFailedIngredientsLogs={setShowFailedIngredientsLogs} // This will trigger auto-save
                         
                         // Merging settings props as they were duplicated
                         settings={{
@@ -1430,7 +1564,7 @@ const App = () => {
                             <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
                         )}
                         {showFailedIngredientsLogs && (
-                            <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadLogs} />
+                            <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
                         )}
                         {!showOrchestratorLogs && !showFailedIngredientsLogs && (
                             <div className="bg-gray-800 text-white p-2 text-xs text-center cursor-pointer hover:bg-gray-700" onClick={() => { setShowOrchestratorLogs(true); setShowFailedIngredientsLogs(true); }}>
