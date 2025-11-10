@@ -308,9 +308,47 @@ const App = () => {
         }
     }, []); // Removed isAuthReady from dep array logic as it's set inside
 
+    // <<< STEP 3: (from previous guide) Landing page visibility >>>
+    useEffect(() => {
+        // Show landing page only if:
+        // 1. User is not authenticated (no userId)
+        if (!userId) {
+            setShowLandingPage(true);
+        } else {
+            setShowLandingPage(false);
+        }
+    }, [userId]);
 
-    // --- Load Profile on Auth Ready ---
-    // --- REPLACED per Change 3 ---
+
+    // --- Handlers ---
+    
+    // ===== START HOOK RE-ORDERING (FIX) =====
+
+    // --- Base Helpers (no dependencies) ---
+    const recalculateTotalCost = useCallback((currentResults) => {
+        let newTotal = 0;
+        Object.values(currentResults).forEach(item => {
+            const qty = item.userQuantity || 1;
+            if (item.source === 'discovery' && item.allProducts && item.currentSelectionURL) {
+                const selected = item.allProducts.find(p => p && p.url === item.currentSelectionURL);
+                if (selected?.price) {
+                    newTotal += selected.price * qty;
+                }
+            }
+        });
+        setTotalCost(newTotal);
+    }, []);
+
+    const showToast = useCallback((message, type = 'info', duration = 3000) => {
+      const id = Date.now();
+      setToasts(prev => [...prev, { id, message, type, duration }]);
+    }, []);
+    
+    const removeToast = useCallback((id) => {
+      setToasts(prev => prev.filter(toast => toast.id !== id));
+    }, []);
+
+    // --- Profile & Settings Handlers (depend on base helpers) ---
     const handleLoadProfile = useCallback(async (silent = false) => {
         // Check if user is authenticated (not anonymous)
         if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
@@ -376,8 +414,6 @@ const App = () => {
         }
     }, [userId, db, isAuthReady, showToast]);
 
-    // --- ADDED per Change 5 ---
-    // Save settings to Firestore
     const handleSaveSettings = useCallback(async () => {
         if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
             return;
@@ -399,7 +435,6 @@ const App = () => {
         }
     }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, db, isAuthReady]);
 
-    // Load settings from Firestore
     const handleLoadSettings = useCallback(async () => {
         if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
             return;
@@ -421,48 +456,71 @@ const App = () => {
         }
     }, [userId, db, isAuthReady]);
 
-
-    // --- DELETED old auto-load effect per Change 9 ---
-
-    // <<< STEP 3: (from previous guide) Landing page visibility >>>
-    useEffect(() => {
-        // Show landing page only if:
-        // 1. User is not authenticated (no userId)
-        if (!userId) {
-            setShowLandingPage(true);
-        } else {
-            setShowLandingPage(false);
-        }
-    }, [userId]);
-
-
-    // --- Handlers ---
-    const recalculateTotalCost = useCallback((currentResults) => {
-        let newTotal = 0;
-        Object.values(currentResults).forEach(item => {
-            const qty = item.userQuantity || 1;
-            if (item.source === 'discovery' && item.allProducts && item.currentSelectionURL) {
-                const selected = item.allProducts.find(p => p && p.url === item.currentSelectionURL);
-                if (selected?.price) {
-                    newTotal += selected.price * qty;
-                }
+    const handleSaveProfile = useCallback(async (silent = false) => {
+        // Check if user is authenticated (not anonymous)
+        if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
+            if (!silent) {
+                showToast('Please sign in to save your profile', 'warning');
             }
-        });
-        setTotalCost(newTotal);
-    }, []);
+            return;
+        }
 
-    // ===== TOAST HELPERS =====
-    // <<< STEP 8: showToast function (already exists) >>>
-    const showToast = useCallback((message, type = 'info', duration = 3000) => {
-      const id = Date.now();
-      setToasts(prev => [...prev, { id, message, type, duration }]);
-    }, []);
+        try {
+            // Prepare profile data with all form fields
+            const profileData = {
+                // Personal info
+                name: formData.name,
+                height: formData.height,
+                weight: formData.weight,
+                age: formData.age,
+                gender: formData.gender,
+                bodyFat: formData.bodyFat,
+                
+                // Fitness goals
+                activityLevel: formData.activityLevel,
+                goal: formData.goal,
+                
+                // Diet preferences
+                dietary: formData.dietary,
+                cuisine: formData.cuisine,
+                
+                // Meal planning
+                days: formData.days,
+                eatingOccasions: formData.eatingOccasions,
+                store: formData.store,
+                costPriority: formData.costPriority,
+                mealVariety: formData.mealVariety,
+                
+                // Calculated targets
+                nutritionalTargets: {
+                    calories: nutritionalTargets.calories,
+                    protein: nutritionalTargets.protein,
+                    fat: nutritionalTargets.fat,
+                    carbs: nutritionalTargets.carbs
+                },
+                
+                // Metadata
+                lastUpdated: new Date().toISOString()
+            };
+
+            // Save to simplified Firestore path: profile/{userId}
+            await setDoc(doc(db, 'profile', userId), profileData);
+            
+            console.log("[PROFILE] Profile saved successfully");
+            if (!silent) {
+                showToast('Profile saved successfully!', 'success');
+            }
+            
+        } catch (error) {
+            console.error("[PROFILE] Error saving profile:", error);
+            if (!silent) {
+                showToast('Failed to save profile', 'error');
+            }
+        }
+    }, [formData, nutritionalTargets, userId, db, isAuthReady, showToast]);
+
+    // --- App Feature Handlers (depend on above) ---
     
-    const removeToast = useCallback((id) => {
-      setToasts(prev => prev.filter(toast => toast.id !== id));
-    }, []);
-    
-    // ===== REFRESH HANDLER =====
     const handleRefresh = useCallback(async () => {
       if (mealPlan.length > 0) {
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -470,7 +528,6 @@ const App = () => {
       }
     }, [mealPlan, showToast]);
 
-    // --- handleGeneratePlan ---
     const handleGeneratePlan = useCallback(async (e) => {
         e.preventDefault();
         
@@ -879,74 +936,6 @@ const App = () => {
         URL.revokeObjectURL(url);
     }, [diagnosticLogs]); 
 
-    // --- REPLACED per Change 2 ---
-    const handleSaveProfile = useCallback(async (silent = false) => {
-        // Check if user is authenticated (not anonymous)
-        if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
-            if (!silent) {
-                showToast('Please sign in to save your profile', 'warning');
-            }
-            return;
-        }
-
-        try {
-            // Prepare profile data with all form fields
-            const profileData = {
-                // Personal info
-                name: formData.name,
-                height: formData.height,
-                weight: formData.weight,
-                age: formData.age,
-                gender: formData.gender,
-                bodyFat: formData.bodyFat,
-                
-                // Fitness goals
-                activityLevel: formData.activityLevel,
-                goal: formData.goal,
-                
-                // Diet preferences
-                dietary: formData.dietary,
-                cuisine: formData.cuisine,
-                
-                // Meal planning
-                days: formData.days,
-                eatingOccasions: formData.eatingOccasions,
-                store: formData.store,
-                costPriority: formData.costPriority,
-                mealVariety: formData.mealVariety,
-                
-                // Calculated targets
-                nutritionalTargets: {
-                    calories: nutritionalTargets.calories,
-                    protein: nutritionalTargets.protein,
-                    fat: nutritionalTargets.fat,
-                    carbs: nutritionalTargets.carbs
-                },
-                
-                // Metadata
-                lastUpdated: new Date().toISOString()
-            };
-
-            // Save to simplified Firestore path: profile/{userId}
-            await setDoc(doc(db, 'profile', userId), profileData);
-            
-            console.log("[PROFILE] Profile saved successfully");
-            if (!silent) {
-                showToast('Profile saved successfully!', 'success');
-            }
-            
-        } catch (error) {
-            console.error("[PROFILE] Error saving profile:", error);
-            if (!silent) {
-                showToast('Failed to save profile', 'error');
-            }
-        }
-    }, [formData, nutritionalTargets, userId, db, isAuthReady, showToast]);
-
-    // <<< STEP 3: REMOVED old handleGetStarted function >>>
-
-    // <<< STEP 4: ADDED handleSignUp function >>>
-    // Handle user sign up with email/password
     const handleSignUp = useCallback(async ({ name, email, password }) => {
         setAuthLoading(true);
         setAuthError(null);
@@ -1078,8 +1067,6 @@ const App = () => {
     }, [auth, showToast]);
 
     // --- Handle Edit Profile Navigation from Settings ---
-    // <<< THIS IS THE FIX >>>
-    // Re-added setIsMenuOpen(true) as it's required by the *original* layout
     const handleEditProfile = useCallback(() => {
         setIsSettingsOpen(false); // Close settings panel
         setIsMenuOpen(true); // <-- *** THIS IS THE FIX: Open the setup form panel ***
@@ -1117,7 +1104,11 @@ const App = () => {
         });
     }, []); 
 
-    // --- ADDED per Change 4 (MOVED HERE) ---
+    // ===== END HOOK RE-ORDERING (FIX) =====
+
+
+    // --- Auto-Save/Load Effects (NOW DEFINED AFTER ALL CALLBACK DEPS) ---
+
     // Auto-save profile 2 seconds after user stops typing
     useEffect(() => {
         // Only auto-save if user is authenticated
@@ -1132,7 +1123,6 @@ const App = () => {
         return () => clearTimeout(timeoutId);
     }, [formData, nutritionalTargets, userId, isAuthReady, handleSaveProfile]);
 
-    // --- ADDED per Change 6 (MOVED HERE) ---
     // Auto-save settings when they change
     useEffect(() => {
         if (userId && !userId.startsWith('local_') && isAuthReady) {
@@ -1140,7 +1130,6 @@ const App = () => {
         }
     }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, isAuthReady, handleSaveSettings]);
 
-    // --- ADDED per Change 7 (MOVED HERE) ---
     // Load profile and settings after user signs in
     useEffect(() => {
         if (userId && !userId.startsWith('local_') && isAuthReady && db) {
@@ -1149,6 +1138,9 @@ const App = () => {
             handleLoadSettings();
         }
     }, [userId, isAuthReady, db, handleLoadProfile, handleLoadSettings]);
+
+
+    // --- Memos & Render Variables ---
 
     const categorizedResults = useMemo(() => {
         const groups = {};
@@ -1188,11 +1180,6 @@ const App = () => {
     }, [mealPlan]); 
 
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
-
-    // --- Content Views (Progressive Rendering) ---
-    // NOTE: This is the *original* layout's content.
-    // This is NOT the layout from the user's Guide 1.
-    // This logic seems to be what the user is *actually* running.
     
     const priceComparisonContent = (
         <div className="space-y-0 p-4">
@@ -1241,7 +1228,7 @@ const App = () => {
                                                 isLoadingNutrition={isLoading}
                                             />
                                         );
-                                    })}
+loca                                    })}
                                 </div>
                             </CollapsibleSection>
                         ))}
@@ -1302,9 +1289,8 @@ const App = () => {
         }
     };
 
-    // <<< STEP 6: REPLACED LandingPage props in RETURN STATEMENT >>>
-    // <<< THIS RETURN STATEMENT IS FROM THE *ORIGINAL* FILE, NOT GUIDE 1 >>>
-    // <<< This is to match what the user is actually running. >>>
+
+    // --- Render ---
     return (
         <>
             {showLandingPage ? (
@@ -1317,17 +1303,15 @@ const App = () => {
             ) : (
                 <>
                     {/* NEW: Header Component */}
-                    {/* --- THIS IS THE CHANGE (Fix 1) --- */}
                     <Header 
                         userId={userId}
                         onOpenSettings={() => setIsSettingsOpen(true)}
                         onNavigateToProfile={() => {
                             setContentView('profile');
-                            setIsMenuOpen(true); // <-- *** RE-ADDED THIS LINE ***
+                            setIsMenuOpen(true);
                         }}
                         onSignOut={handleSignOut} // Use the updated handleSignOut
                     />
-                    {/* --- END OF CHANGE --- */}
             
                     {/* NEW: Pull to Refresh Wrapper */}
                     <PullToRefresh onRefresh={handleRefresh} refreshing={loading}>
