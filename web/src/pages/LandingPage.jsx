@@ -8,13 +8,19 @@ import HowItWorksSection from '../components/landing/HowItWorksSection';
 import TestimonialsSection from '../components/landing/TestimonialsSection';
 import CTASection from '../components/landing/CTASection';
 import Footer from '../components/landing/Footer';
+import AuthModal from '../components/AuthModal';
 
 /**
  * Main Landing Page Component
  * Entry point for non-authenticated users
  */
-const LandingPage = ({ onGetStarted }) => {
+const LandingPage = ({ onSignUp, onSignIn, authLoading = false }) => {
   const [showDemoVideo, setShowDemoVideo] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
+  const handleGetStarted = () => {
+    setShowAuthModal(true);
+  };
 
   const handleWatchDemo = () => {
     setShowDemoVideo(true);
@@ -22,6 +28,22 @@ const LandingPage = ({ onGetStarted }) => {
 
   const handleCloseDemoVideo = () => {
     setShowDemoVideo(false);
+  };
+
+  const handleCloseAuthModal = () => {
+    if (!authLoading) {
+      setShowAuthModal(false);
+    }
+  };
+
+  const handleSignUp = async (credentials) => {
+    await onSignUp(credentials);
+    // Modal will close automatically from parent on success
+  };
+
+  const handleSignIn = async (credentials) => {
+    await onSignIn(credentials);
+    // Modal will close automatically from parent on success
   };
 
   return (
@@ -50,7 +72,7 @@ const LandingPage = ({ onGetStarted }) => {
 
             {/* Get Started Button */}
             <button
-              onClick={onGetStarted}
+              onClick={handleGetStarted}
               className="px-6 py-2.5 rounded-full font-semibold text-white transition-all hover:shadow-lg hover:scale-105"
               style={{ 
                 backgroundColor: COLORS.primary[600],
@@ -64,15 +86,24 @@ const LandingPage = ({ onGetStarted }) => {
 
       {/* Main Content */}
       <main className="pt-16">
-        <HeroSection onGetStarted={onGetStarted} onWatchDemo={handleWatchDemo} />
+        <HeroSection onGetStarted={handleGetStarted} onWatchDemo={handleWatchDemo} />
         <FeaturesSection />
         <HowItWorksSection />
         <TestimonialsSection />
-        <CTASection onGetStarted={onGetStarted} onScheduleDemo={handleWatchDemo} />
+        <CTASection onGetStarted={handleGetStarted} onScheduleDemo={handleWatchDemo} />
       </main>
 
       {/* Footer */}
       <Footer />
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={handleCloseAuthModal}
+        onSignUp={handleSignUp}
+        onSignIn={handleSignIn}
+        loading={authLoading}
+      />
 
       {/* Demo Video Modal */}
       {showDemoVideo && (
