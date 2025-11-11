@@ -5,14 +5,18 @@
   "private": true,
   "scripts": {
     "build:canon": "node scripts/build-canon.js",
+    "build:opennutrition": "cd mcp-opennutrition && npm install && npm run build",
     "build:web": "cd web && npm install && npm run build",
-    "build": "npm run build:canon && npm run build:web"
+    "build": "npm run build:canon && npm run build:opennutrition && npm run build:web",
+    "test": "jest",
+    "test:opennutrition": "jest api/__tests__/opennutrition-client.test.js"
   },
   "dependencies": {
     "@vercel/kv": "^2.0.0",
     "node-fetch": "^2.7.0",
     "axios": "^1.7.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }
-
-
