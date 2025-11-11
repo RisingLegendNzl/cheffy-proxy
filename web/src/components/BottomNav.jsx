@@ -5,7 +5,7 @@ import { COLORS, Z_INDEX, SHADOWS } from '../constants';
 
 /**
  * Mobile bottom navigation bar
- * Shows on mobile devices for easy thumb navigation
+ * Enhanced with larger touch targets (44px min) and better accessibility
  */
 const BottomNav = ({ 
   activeTab, 
@@ -26,9 +26,10 @@ const BottomNav = ({
         zIndex: Z_INDEX.fixed,
         borderColor: COLORS.gray[200],
         boxShadow: SHADOWS.xl,
+        paddingBottom: 'env(safe-area-inset-bottom)', // iOS safe area
       }}
     >
-      <div className="flex items-center justify-around h-16 px-2">
+      <div className="flex items-center justify-around px-2" style={{ height: '72px' }}>
         {tabs.map((tab, index) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -40,30 +41,36 @@ const BottomNav = ({
                 {/* Generate Plan FAB */}
                 <button
                   onClick={onNewPlan}
-                  className="relative -mt-8 w-14 h-14 rounded-full flex items-center justify-center shadow-lg hover:scale-110 transition-transform"
+                  className="relative -mt-8 w-16 h-16 rounded-full flex items-center justify-center shadow-lg hover:scale-110 transition-transform active:scale-95"
                   style={{
-                    background: `linear-gradient(135deg, ${COLORS.primary[500]}, ${COLORS.secondary[500]})`,
+                    background: COLORS.gradients.primary,
+                    minWidth: '64px',
+                    minHeight: '64px',
                   }}
                   aria-label="Generate new plan"
                 >
-                  <Plus size={28} className="text-white" />
+                  <Plus size={32} className="text-white" />
                 </button>
 
                 {/* Regular tab */}
                 <button
                   onClick={() => onTabChange(tab.id)}
-                  className={`flex-1 flex flex-col items-center justify-center h-full transition-all ${
+                  className={`flex-1 flex flex-col items-center justify-center transition-all active:scale-95 ${
                     isActive ? 'scale-105' : 'scale-100'
                   }`}
                   style={{
                     color: isActive ? COLORS.primary[600] : COLORS.gray[400],
+                    minHeight: '44px',
+                    minWidth: '44px',
                   }}
+                  aria-label={tab.label}
+                  aria-current={isActive ? 'page' : undefined}
                 >
-                  <Icon size={22} className="mb-1" />
+                  <Icon size={24} className="mb-1" />
                   <span className="text-xs font-semibold">{tab.label}</span>
                   {isActive && (
                     <div
-                      className="absolute bottom-0 w-12 h-1 rounded-t-full"
+                      className="absolute bottom-0 w-12 h-1 rounded-t-full transition-all"
                       style={{ backgroundColor: COLORS.primary[600] }}
                     />
                   )}
@@ -76,18 +83,22 @@ const BottomNav = ({
             <button
               key={tab.id}
               onClick={() => onTabChange(tab.id)}
-              className={`flex-1 flex flex-col items-center justify-center h-full relative transition-all ${
+              className={`flex-1 flex flex-col items-center justify-center relative transition-all active:scale-95 ${
                 isActive ? 'scale-105' : 'scale-100'
               }`}
               style={{
                 color: isActive ? COLORS.primary[600] : COLORS.gray[400],
+                minHeight: '44px',
+                minWidth: '44px',
               }}
+              aria-label={tab.label}
+              aria-current={isActive ? 'page' : undefined}
             >
-              <Icon size={22} className="mb-1" />
+              <Icon size={24} className="mb-1" />
               <span className="text-xs font-semibold">{tab.label}</span>
               {isActive && (
                 <div
-                  className="absolute bottom-0 w-12 h-1 rounded-t-full"
+                  className="absolute bottom-0 w-12 h-1 rounded-t-full transition-all"
                   style={{ backgroundColor: COLORS.primary[600] }}
                 />
               )}
@@ -95,6 +106,15 @@ const BottomNav = ({
           );
         })}
       </div>
+
+      {/* Bottom padding for devices with notches/home indicators */}
+      <style jsx>{`
+        @supports (padding: env(safe-area-inset-bottom)) {
+          nav {
+            padding-bottom: calc(env(safe-area-inset-bottom) + 8px);
+          }
+        }
+      `}</style>
     </nav>
   );
 };
