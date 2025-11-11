@@ -41,8 +41,8 @@ const TRANSFORM_CONFIG_VERSION = TRANSFORM_VERSION || 'v13.3-hybrid';
 
 const USE_SOLVER_V1 = process.env.CHEFFY_USE_SOLVER === '1'; // Default to false (use legacy reconcile)
 
-const PLAN_MODEL_NAME_PRIMARY = 'gemini-1.5-flash';
-const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-flash';
+const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
+const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro';
 
 const getGeminiApiUrl = (modelName) => `https://generativelanguage
 .googleapis.com/v1beta/models/${modelName}:generateContent`;
