@@ -1,7 +1,8 @@
 // web/src/components/landing/FeaturesSection.jsx
-import React from 'react';
+import React, { useRef } from 'react';
 import { Sparkles, Target, Calendar, Heart } from 'lucide-react';
 import { COLORS } from '../../constants';
+import { useInView } from '../../hooks/useResponsive'; // <-- Import useInView
 
 /**
  * Features Section Component
@@ -9,6 +10,7 @@ import { COLORS } from '../../constants';
  */
 const FeaturesSection = () => {
   const features = [
+    // ... (features array remains the same)
     {
       icon: <Sparkles size={32} />,
       title: 'AI Meal Generation',
@@ -39,11 +41,30 @@ const FeaturesSection = () => {
     }
   ];
 
+  // --- Add Animation Hooks ---
+  const sectionRef = useRef(null);
+  // Trigger when 10% of the section is visible
+  const isInView = useInView(sectionRef, { threshold: 0.1, triggerOnce: true });
+  // --- End Animation Hooks ---
+
   return (
-    <section className="py-20 md:py-32 bg-white">
+    <section
+      ref={sectionRef} // <-- Assign ref to section
+      className="py-20 md:py-32 bg-white transition-opacity duration-500"
+      style={{ opacity: isInView ? 1 : 0 }} // <-- Fade in section
+    >
       <div className="max-w-7xl mx-auto px-4 md:px-8">
         {/* Section Header */}
-        <div className="text-center mb-16">
+        {/*
+          ADD:
+          - Animate class based on isInView
+          - Opacity 0 to hide before animation
+        */}
+        <div
+          className={`text-center mb-16 ${
+            isInView ? 'animate-fadeInUp' : 'opacity-0'
+          }`}
+        >
           <h2 className="text-4xl md:text-5xl font-bold mb-4 font-poppins">
             <span style={{ color: COLORS.gray[900] }}>Everything You Need to</span>
             <br />
@@ -64,10 +85,20 @@ const FeaturesSection = () => {
           {features.map((feature, index) => (
             <div
               key={index}
-              className="p-8 rounded-2xl border-2 transition-all hover:shadow-xl hover:-translate-y-1"
+              /*
+                ADD:
+                - stagger-item class for animation
+                - Opacity 0 to hide before animation
+                - isInView check to trigger animation
+              */
+              className={`p-8 rounded-2xl border-2 transition-all hover:shadow-xl hover:-translate-y-1 ${
+                isInView ? 'stagger-item' : 'opacity-0'
+              }`}
+              // Add inline style for animation delay (optional but nice)
               style={{ 
                 borderColor: COLORS.gray[200],
-                backgroundColor: 'white'
+                backgroundColor: 'white',
+                animationDelay: `${index * 100}ms` // <-- Stagger delay
               }}
             >
               {/* Icon */}
@@ -105,3 +136,4 @@ const FeaturesSection = () => {
 };
 
 export default FeaturesSection;
+
