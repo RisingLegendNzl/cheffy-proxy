@@ -1,41 +1,20 @@
 // web/src/App.jsx
-import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered, Utensils, Plus } from 'lucide-react';
+import React, { useState, useCallback } from 'react';
+import { AlertTriangle, Utensils, ShoppingBag, ChefHat, DollarSign } from 'lucide-react';
 
-// --- Firebase Imports ---
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, setLogLevel } from 'firebase/firestore';
+// Custom Hooks
+import { useProfileManagement } from './hooks/useProfileManagement';
+import { usePlanGeneration } from './hooks/usePlanGeneration';
+import { useResponsive } from './hooks/useResponsive';
 
-// --- Phase 1: Foundation ---
-import { COLORS, SPACING, SHADOWS, Z_INDEX, TRANSITIONS, RADIUS, TYPOGRAPHY, CATEGORY_ICONS, GLASS } from './constants';
-import {
-formatGoalText,
-formatPrice,
-formatCalories,
-formatGrams,
-copyToClipboard,
-getGoalData,
-formatActivityLevel,
-groupBy
-} from './helpers';
+// Constants & Helpers
+import { COLORS, SHADOWS, Z_INDEX } from './constants';
 
-// --- Phase 1: Hooks ---
-import useReducedMotion from './hooks/useReducedMotion';
-import useSpringAnimation from './hooks/useSpringAnimation';
-
-// --- Original Component Imports ---
-import InputField from './components/InputField';
-import DaySlider from './components/DaySlider';
-import DaySidebar from './components/DaySidebar';
-import ProductCard from './components/ProductCard';
+// Original Components
 import CollapsibleSection from './components/CollapsibleSection';
-import SubstituteMenu from './components/SubstituteMenu';
 import GenerationProgressDisplay from './components/GenerationProgressDisplay';
-import NutritionalInfo from './components/NutritionalInfo';
 import IngredientResultBlock from './components/IngredientResultBlock';
 import MealPlanDisplay from './components/MealPlanDisplay';
-import LogEntry from './components/LogEntry';
 import DiagnosticLogViewer from './components/DiagnosticLogViewer';
 import FailedIngredientLogViewer from './components/FailedIngredientLogViewer';
 import RecipeModal from './components/RecipeModal';
@@ -43,48 +22,21 @@ import EmojiIcon from './components/EmojiIcon';
 import ProfileTab from './components/ProfileTab';
 import LandingPage from './pages/LandingPage';
 
-// --- Phase 2: Core UI Components ---
+// Visual Revamp Components
 import Header from './components/Header';
 import { ToastContainer } from './components/Toast';
 import EmptyState from './components/EmptyState';
-import LoadingOverlay from './components/LoadingOverlay';
 import SuccessModal from './components/SuccessModal';
-import ProgressRing from './components/ProgressRing';
-import ShimmerLoader, { SkeletonCard, SkeletonCircle } from './components/ShimmerLoader';
-import GlassmorphismBar from './components/GlassmorphismBar';
-import FloatingActionButton from './components/FloatingActionButton';
-
-// --- Phase 3: Enhanced Components (Updated versions) ---
-import MacroRing from './components/MacroRing';
-import MacroBar from './components/MacroBar';
-import MealCard from './components/MealCard';
 import DayNavigator from './components/DayNavigator';
-import ShoppingListEnhanced from './components/ShoppingListEnhanced';
-import FormSection from './components/FormSection';
 import SettingsPanel from './components/SettingsPanel';
-import CategoryCard from './components/CategoryCard';
-import DayCard from './components/DayCard';
+import BottomNav from './components/BottomNav';
+import PullToRefresh from './components/PullToRefresh';
 import MacroInsightPanel from './components/MacroInsightPanel';
 
-// --- Phase 4: Mobile Components ---
-import BottomNav from './components/BottomNav';
-import { MealCardSkeleton, ProfileCardSkeleton, ShoppingListSkeleton } from './components/SkeletonLoader';
-import PullToRefresh from './components/PullToRefresh';
-import { useResponsive } from './hooks/useResponsive';
-
-// --- Configuration ---
-const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
-const ORCHESTRATOR_DAY_API_URL = '/api/plan/day';
-const ORCHESTRATOR_FULL_PLAN_API_URL = '/api/plan/generate-full-plan';
+// Configuration
 const NUTRITION_API_URL = '/api/nutrition-search';
-const MAX_SUBSTITUTES = 5;
 
-// --- Global Variables ---
-let globalAppId = 'default-app-id';
-let firebaseConfig = null;
-let firebaseInitializationError = null;
-
-// --- Category Icon Map ---
+// Category Icon Map
 const categoryIconMap = {
     'produce': <EmojiIcon code="1f96C" alt="produce" />,
     'meat': <EmojiIcon code="1f969" alt="meat" />,
@@ -102,98 +54,83 @@ const categoryIconMap = {
     'default': <EmojiIcon code="1f6cd" alt="shopping" />
 };
 
-// --- Main App Component ---
+// Main App Component
 const App = () => {
-    // --- Original State Variables ---
-    const [formData, setFormData] = useState({
-        name: '', height: '180', weight: '75', age: '30', gender: 'male',
-        activityLevel: 'moderate', goal: 'cut_moderate', dietary: 'None',
-        days: 7, store: 'Woolworths', eatingOccasions: '3',
-        costPriority: 'Best Value', mealVariety: 'Balanced Variety',
-        cuisine: '', bodyFat: ''
-    });
+    // Custom Hooks
+    const {
+        // Auth & Profile State
+        userId,
+        showLandingPage,
+        authLoading,
+        authError,
+        formData,
+        nutritionalTargets,
+        showOrchestratorLogs,
+        showFailedIngredientsLogs,
+        
+        // Profile Actions
+        setFormData,
+        setNutritionalTargets,
+        handleInputChange,
+        handleClearData,
+        
+        // Settings Actions
+        setShowOrchestratorLogs,
+        setShowFailedIngredientsLogs,
+        
+        // Auth Actions
+        handleSignUp,
+        handleSignIn,
+        handleSignOut,
+    } = useProfileManagement();
 
-    const [nutritionalTargets, setNutritionalTargets] = useState({ 
-        calories: 0, protein: 0, fat: 0, carbs: 0 
-    });
+    const {
+        // Plan State
+        results,
+        mealPlan,
+        totalCost,
+        loading,
+        error,
+        diagnosticLogs,
+        failedIngredientsHistory,
+        generationStepKey,
+        isLogOpen,
+        logHeight,
+        minLogHeight,
+        
+        // Computed
+        latestLog,
+        categorizedResults,
+        hasInvalidMeals,
+        dayCaloriesMap,
+        
+        // Actions
+        generatePlan,
+        handleSubstituteSelection,
+        handleQuantityChange,
+        handleDownloadLogs,
+        handleDownloadFailedLogs,
+        setIsLogOpen,
+        setLogHeight,
+    } = usePlanGeneration(formData, nutritionalTargets, userId);
 
-    const [results, setResults] = useState({});
-    const [uniqueIngredients, setUniqueIngredients] = useState([]);
-    const [mealPlan, setMealPlan] = useState([]);
-    const [totalCost, setTotalCost] = useState(0);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
-    const [eatenMeals, setEatenMeals] = useState({});
+    const { isMobile } = useResponsive();
+
+    // Local UI State
     const [selectedDay, setSelectedDay] = useState(1);
     const [contentView, setContentView] = useState('profile');
-    const [isMenuOpen, setIsMenuOpen] = useState(false);
-    const [diagnosticLogs, setDiagnosticLogs] = useState([]);
+    const [selectedMeal, setSelectedMeal] = useState(null);
+    const [eatenMeals, setEatenMeals] = useState({});
     const [nutritionCache, setNutritionCache] = useState({});
     const [loadingNutritionFor, setLoadingNutritionFor] = useState(null);
-    const [logHeight, setLogHeight] = useState(250);
-    const [isLogOpen, setIsLogOpen] = useState(false);
-    const minLogHeight = 50;
-    const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
-    const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
-
-    const [showOrchestratorLogs, setShowOrchestratorLogs] = useState(
-      () => JSON.parse(localStorage.getItem('cheffy_show_orchestrator_logs') ?? 'true')
-    );
-    const [showFailedIngredientsLogs, setShowFailedIngredientsLogs] = useState(
-      () => JSON.parse(localStorage.getItem('cheffy_show_failed_ingredients_logs') ?? 'true')
-    );
-
-    const [generationStepKey, setGenerationStepKey] = useState(null);
-    const [generationStatus, setGenerationStatus] = useState("Ready to generate plan.");
-    const [selectedMeal, setSelectedMeal] = useState(null);
-    const [useBatchedMode, setUseBatchedMode] = useState(true);
-
-    // --- New State Variables (Phase 2-4) ---
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    
+    // Toast State
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
-    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const { isMobile, isDesktop } = useResponsive();
 
-    // --- Firebase State ---
-    const [auth, setAuth] = useState(null);
-    const [db, setDb] = useState(null);
-    const [userId, setUserId] = useState(null);
-    const [isAuthReady, setIsAuthReady] = useState(false);
-    const [appId, setAppId] = useState('default-app-id');
-    const [showLandingPage, setShowLandingPage] = useState(true);
-    const [authLoading, setAuthLoading] = useState(false);
-    const [authError, setAuthError] = useState(null);
-
-    // --- New: Checked items count for GlassmorphismBar ---
-    const [checkedItemsCount, setCheckedItemsCount] = useState(0);
-
-    // --- Persist Log Visibility Preferences ---
-    useEffect(() => {
-      localStorage.setItem('cheffy_show_orchestrator_logs', JSON.stringify(showOrchestratorLogs));
-    }, [showOrchestratorLogs]);
-
-    useEffect(() => {
-      localStorage.setItem('cheffy_show_failed_ingredients_logs', JSON.stringify(showFailedIngredientsLogs));
-    }, [showFailedIngredientsLogs]);
-
-    // --- New: Derived state for day calories map ---
-    const dayCaloriesMap = useMemo(() => {
-        const map = {};
-        if (results && Object.keys(results).length > 0) {
-            Object.keys(results).forEach(day => {
-                const dayNum = parseInt(day);
-                if (!isNaN(dayNum) && results[day]?.mealPlan) {
-                    map[dayNum] = results[day].mealPlan.reduce((sum, meal) => 
-                        sum + (meal.subtotal_kcal || 0), 0
-                    );
-                }
-            });
-        }
-        return map;
-    }, [results]);
-
-    // --- Toast Helpers ---
+    // Toast Helpers
     const showToast = useCallback((message, type = 'info') => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, message, type }]);
@@ -206,383 +143,57 @@ const App = () => {
         setToasts(prev => prev.filter(t => t.id !== id));
     }, []);
 
-    // --- Firebase Initialization ---
-    useEffect(() => {
-        const firebaseConfigStr = typeof __firebase_config !== 'undefined' 
-            ? __firebase_config 
-            : import.meta.env.VITE_FIREBASE_CONFIG;
-            
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' 
-            ? __initial_auth_token 
-            : import.meta.env.VITE_INITIAL_AUTH_TOKEN;
-
-        const currentAppId = typeof __app_id !== 'undefined' 
-            ? __app_id 
-            : (import.meta.env.VITE_APP_ID || 'default-app-id');
-        
-        setAppId(currentAppId);
-        globalAppId = currentAppId;
-        
-        try {
-            if (firebaseConfigStr && firebaseConfigStr.trim() !== '') {
-                firebaseConfig = JSON.parse(firebaseConfigStr);
-            } else {
-                console.warn("[FIREBASE] Config is not defined or is empty.");
-                firebaseInitializationError = 'Firebase config environment variable is missing.';
-                setIsAuthReady(true);
-                return;
-            }
-
-            const firebaseApp = initializeApp(firebaseConfig);
-            const firebaseAuth = getAuth(firebaseApp);
-            const firebaseDb = getFirestore(firebaseApp);
-            
-            setLogLevel('silent');
-            
-            setAuth(firebaseAuth);
-            setDb(firebaseDb);
-
-            const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
-                if (user) {
-                    setUserId(user.uid);
-                    setShowLandingPage(false);
-                    await loadProfileFromFirestore(user.uid, firebaseDb);
-                } else {
-                    setUserId(null);
-                    setShowLandingPage(true);
-                }
-                setIsAuthReady(true);
-            });
-
-            if (initialAuthToken && initialAuthToken.trim() !== '') {
-                signInWithCustomToken(firebaseAuth, initialAuthToken)
-                    .then(() => console.log("[FIREBASE] Signed in with custom token"))
-                    .catch(err => {
-                        console.error("[FIREBASE] Custom token sign-in failed:", err);
-                        return signInAnonymously(firebaseAuth);
-                    });
-            } else {
-                signInAnonymously(firebaseAuth)
-                    .then(() => console.log("[FIREBASE] Signed in anonymously"))
-                    .catch(err => console.error("[FIREBASE] Anonymous sign-in failed:", err));
-            }
-
-            return () => unsubscribe();
-            
-        } catch (err) {
-            console.error("[FIREBASE] Initialization error:", err);
-            firebaseInitializationError = err.message;
-            setIsAuthReady(true);
-        }
-    }, []);
-
-    // --- Load Profile from Firestore ---
-    const loadProfileFromFirestore = useCallback(async (uid, database) => {
-        if (!uid || !database) return;
-        
-        try {
-            const docRef = doc(database, 'profiles', uid);
-            const docSnap = await getDoc(docRef);
-            
-            if (docSnap.exists()) {
-                const data = docSnap.data();
-                if (data.formData) setFormData(data.formData);
-                if (data.nutritionalTargets) setNutritionalTargets(data.nutritionalTargets);
-            }
-        } catch (error) {
-            console.error("[PROFILE] Error loading profile:", error);
-        }
-    }, []);
-
-    // --- Save Profile to Firestore ---
-    const saveProfileToFirestore = useCallback(async (silent = true) => {
-        if (!userId || !db || !isAuthReady) return;
-        if (userId.startsWith('local_')) return;
-        
-        try {
-            const docRef = doc(db, 'profiles', userId);
-            await setDoc(docRef, {
-                formData,
-                nutritionalTargets,
-                updatedAt: new Date().toISOString(),
-                appId: appId
-            }, { merge: true });
-            
-            if (!silent) {
-                showToast('Profile saved successfully!', 'success');
-            }
-            
-        } catch (error) {
-            console.error("[PROFILE] Error saving profile:", error);
-            if (!silent) {
-                showToast('Failed to save profile', 'error');
-            }
-        }
-    }, [formData, nutritionalTargets, userId, db, isAuthReady, appId, showToast]);
-
-    // --- Auto-save on nutritionalTargets change ---
-    useEffect(() => {
-        if (nutritionalTargets.calories > 0) {
-            saveProfileToFirestore(true);
-        }
-    }, [nutritionalTargets, saveProfileToFirestore]);
-
-    // --- Auth Handlers ---
-    const handleSignUp = useCallback(async ({ email, password, name }) => {
-        setAuthLoading(true);
-        setAuthError(null);
-        try {
-            // Implement actual sign-up logic here
-            showToast('Sign up successful!', 'success');
-            setShowLandingPage(false);
-        } catch (error) {
-            setAuthError(error.message);
-            showToast('Sign up failed', 'error');
-        } finally {
-            setAuthLoading(false);
-        }
-    }, [showToast]);
-
-    const handleSignIn = useCallback(async ({ email, password }) => {
-        setAuthLoading(true);
-        setAuthError(null);
-        try {
-            // Implement actual sign-in logic here
-            showToast('Sign in successful!', 'success');
-            setShowLandingPage(false);
-        } catch (error) {
-            setAuthError(error.message);
-            showToast('Sign in failed', 'error');
-        } finally {
-            setAuthLoading(false);
-        }
-    }, [showToast]);
-
-    const handleSignOut = useCallback(async () => {
-        if (auth) {
-            try {
-                await auth.signOut();
-                setShowLandingPage(true);
-                showToast('Signed out successfully', 'success');
-            } catch (error) {
-                console.error("[AUTH] Sign out error:", error);
-                showToast('Sign out failed', 'error');
-            }
-        }
-    }, [auth, showToast]);
-
-    // --- App Feature Handlers ---
+    // Refresh Handler
     const handleRefresh = useCallback(async () => {
-      if (mealPlan.length > 0) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        showToast('Data refreshed!', 'success');
-      }
+        if (mealPlan.length > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            showToast('Data refreshed!', 'success');
+        }
     }, [mealPlan, showToast]);
 
-    const handleInputChange = useCallback((e) => {
-        const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
-    }, []);
-
-    const recalculateTotalCost = useCallback(() => {
-        const allProducts = Object.values(results).flatMap(dayData => dayData?.products || []);
-        const totalCost = allProducts.reduce((sum, product) => sum + (product.price || 0), 0);
-        setTotalCost(totalCost);
-    }, [results]);
-
-    const latestLog = useMemo(() => {
-        if (diagnosticLogs.length === 0) return null;
-        return diagnosticLogs[diagnosticLogs.length - 1];
-    }, [diagnosticLogs]);
-
-    // --- Generate Plan Handler (Batched Mode) ---
-    const handleGeneratePlan = useCallback(async (e) => {
+    // Form Submit Handler
+    const handleFormSubmit = useCallback(async (e) => {
         e.preventDefault();
         
-        setLoading(true);
-        setError(null);
-        setDiagnosticLogs([]);
-        setNutritionCache({});
-        if (nutritionalTargets.calories === 0) {
-            setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-        }
-        setResults({});
-        setUniqueIngredients([]);
-        setMealPlan([]);
-        setTotalCost(0);
-        setEatenMeals({});
-        setFailedIngredientsHistory([]);
-        setGenerationStepKey('targets');
-        if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
-
-        let targets;
-
-        try {
-            // Fetch Nutritional Targets
-            const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(formData),
-            });
-
-            if (!targetsResponse.ok) {
-                const errorData = await targetsResponse.json();
-                throw new Error(`Failed to calculate targets: ${errorData.message || targetsResponse.statusText}`);
+        await generatePlan(
+            // onSuccess callback
+            (event) => {
+                if (event.type === 'targets') {
+                    setNutritionalTargets(event.data);
+                } else if (event.type === 'complete') {
+                    // Prepare success modal stats
+                    setPlanStats([
+                        { label: 'Days', value: formData.days, color: COLORS.primary[600] },
+                        { label: 'Meals', value: event.data.mealPlan?.length || 0, color: COLORS.success.main },
+                        { label: 'Items', value: event.data.uniqueIngredients?.length || 0, color: COLORS.warning.main },
+                    ]);
+                    
+                    // Show success modal
+                    setTimeout(() => {
+                        setShowSuccessModal(true);
+                        setTimeout(() => {
+                            setShowSuccessModal(false);
+                            setContentView('meals');
+                            setSelectedDay(1);
+                        }, 2500);
+                    }, 500);
+                }
+            },
+            // onError callback
+            (err) => {
+                showToast(`Error: ${err.message}`, 'error');
             }
+        );
+    }, [generatePlan, formData.days, setNutritionalTargets, showToast]);
 
-            const targetsData = await targetsResponse.json();
-            targets = targetsData.nutritionalTargets;
-            setNutritionalTargets(targets);
-            setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
-            
-        } catch (err) {
-            console.error("Plan generation failed at Targets:", err);
-            setError(`Critical failure: ${err.message}`);
-            setGenerationStepKey('error');
-            setLoading(false);
-            setDiagnosticLogs(prev => [...prev, {
-                timestamp: new Date().toISOString(), 
-                level: 'CRITICAL', 
-                tag: 'FRONTEND', 
-                message: `Critical failure: ${err.message}`
-            }]);
+    // Nutrition Fetch Handler
+    const handleFetchNutrition = useCallback(async (product) => {
+        if (!product || !product.url || nutritionCache[product.url]) return;
+        if (product.nutrition && product.nutrition.status === 'found') {
+            setNutritionCache(prev => ({...prev, [product.url]: product.nutrition}));
             return;
         }
-
-        // Batched Mode
-        if (useBatchedMode) {
-            try {
-                setGenerationStepKey('planning');
-                
-                const eventSource = await fetch(ORCHESTRATOR_FULL_PLAN_API_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        ...formData,
-                        nutritionalTargets: targets,
-                        app_id: appId
-                    }),
-                });
-
-                if (!eventSource.ok) {
-                    throw new Error(`HTTP ${eventSource.status}: ${eventSource.statusText}`);
-                }
-
-                const reader = eventSource.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        if (!line.trim()) continue;
-                        if (!line.startsWith('data: ')) continue;
-
-                        const dataStr = line.slice(6);
-                        if (dataStr === '[DONE]') {
-                            setGenerationStepKey('complete');
-                            break;
-                        }
-
-                        let eventData;
-                        try {
-                            eventData = JSON.parse(dataStr);
-                        } catch (parseErr) {
-                            console.error("Failed to parse SSE data:", dataStr, parseErr);
-                            continue;
-                        }
-
-                        switch (eventData.type) {
-                            case 'log':
-                                setDiagnosticLogs(prev => [...prev, eventData.log]);
-                                
-                                if (eventData.log.tag === 'PHASE' && eventData.log.message.includes('targets calculated')) {
-                                    setGenerationStepKey('targets');
-                                } else if (eventData.log.tag === 'LLM' || eventData.log.tag === 'LLM_PROMPT' || eventData.log.tag === 'LLM_CHEF') {
-                                    setGenerationStepKey('planning');
-                                } else if (eventData.log.tag === 'MARKET_RUN' || eventData.log.tag === 'CHECKLIST') {
-                                    setGenerationStepKey('market');
-                                } else if (eventData.log.tag === 'CALC' || eventData.log.tag === 'CANON' || eventData.log.tag === 'DATA') {
-                                    setGenerationStepKey('finalizing');
-                                }
-                                break;
-
-                            case 'day_complete':
-                                const completedDay = eventData.day;
-                                const completedData = eventData.data;
-                                
-                                setResults(prev => ({
-                                    ...prev,
-                                    [completedDay]: completedData
-                                }));
-                                
-                                if (completedData.products) {
-                                    recalculateTotalCost();
-                                }
-                                break;
-
-                            case 'complete':
-                                setResults(eventData.fullResults);
-                                setUniqueIngredients(eventData.uniqueIngredients || []);
-                                setMealPlan(eventData.mealPlan || []);
-                                if (eventData.totalCost) setTotalCost(eventData.totalCost);
-                                if (eventData.failedIngredients && eventData.failedIngredients.length > 0) {
-                                    setFailedIngredientsHistory(eventData.failedIngredients);
-                                }
-                                setGenerationStepKey('complete');
-                                
-                                setPlanStats([
-                                  { label: 'Days', value: formData.days, color: COLORS.primary[600] },
-                                  { label: 'Meals', value: eventData.mealPlan?.length || 0, color: COLORS.success.main },
-                                  { label: 'Items', value: eventData.uniqueIngredients?.length || 0, color: COLORS.warning.main },
-                                ]);
-                                
-                                setTimeout(() => {
-                                  setShowSuccessModal(true);
-                                  setTimeout(() => {
-                                    setShowSuccessModal(false);
-                                    setContentView('meals');
-                                    setSelectedDay(1);
-                                  }, 2500);
-                                }, 500);
-                                break;
-
-                            case 'error':
-                                throw new Error(eventData.message || 'Unknown backend error');
-                        }
-                    }
-                }
-                
-            } catch (err) {
-                console.error("Batched plan generation failed:", err);
-                setError(`Critical failure: ${err.message}`);
-                setGenerationStepKey('error');
-                setDiagnosticLogs(prev => [...prev, {
-                    timestamp: new Date().toISOString(), 
-                    level: 'CRITICAL', 
-                    tag: 'FRONTEND', 
-                    message: `Critical failure: ${err.message}`
-                }]);
-            } finally {
-                 setTimeout(() => setLoading(false), 2000);
-            }
-        }
-    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode, showToast, nutritionalTargets.calories, appId, useBatchedMode]);
-
-    // --- Other Handlers (Simplified) ---
-    const handleFetchNutrition = useCallback(async (product) => {
-        // Nutrition fetching logic (keeping original implementation)
-        if (!product || !product.url || nutritionCache[product.url]) { return; }
-        if (product.nutrition && product.nutrition.status === 'found') {
-             setNutritionCache(prev => ({...prev, [product.url]: product.nutrition}));
-             return;
-        }
+        
         setLoadingNutritionFor(product.url);
         try {
             const params = product.barcode 
@@ -599,54 +210,24 @@ const App = () => {
         }
     }, [nutritionCache]);
 
-    const handleDownloadLogs = useCallback(() => {
-        const logsText = diagnosticLogs.map(log => 
-            `[${log.timestamp}] [${log.level}] [${log.tag}] ${log.message}`
-        ).join('\n');
-        
-        const blob = new Blob([logsText], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `cheffy-logs-${new Date().toISOString()}.txt`;
-        a.click();
-        URL.revokeObjectURL(url);
-    }, [diagnosticLogs]);
-
-    const handleDownloadFailedLogs = useCallback(() => {
-        const logsText = JSON.stringify(failedIngredientsHistory, null, 2);
-        const blob = new Blob([logsText], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `cheffy-failed-ingredients-${new Date().toISOString()}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-    }, [failedIngredientsHistory]);
-
-    const toggleMealEaten = useCallback((mealName) => {
-        setEatenMeals(prev => ({
-            ...prev,
-            [mealName]: !prev[mealName]
-        }));
+    // Toggle Meal Eaten
+    const onToggleMealEaten = useCallback((day, mealName) => {
+        setEatenMeals(prev => {
+            const dayKey = `day${day}`;
+            const dayMeals = { ...(prev[dayKey] || {}) };
+            dayMeals[mealName] = !dayMeals[mealName];
+            return { ...prev, [dayKey]: dayMeals };
+        });
     }, []);
 
-    const handleClearData = useCallback(() => {
-        setResults({});
-        setUniqueIngredients([]);
-        setMealPlan([]);
-        setTotalCost(0);
-        setEatenMeals({});
-        setNutritionCache({});
-        setDiagnosticLogs([]);
-        setFailedIngredientsHistory([]);
-        showToast('All data cleared', 'success');
-    }, [showToast]);
-
-    // --- Render Logic ---
-    const currentDayData = results[selectedDay];
-    const currentMealPlan = currentDayData?.mealPlan || [];
-    const currentProducts = currentDayData?.products || [];
+    // Error Panel Component
+    const PlanCalculationErrorPanel = () => (
+        <div className="p-6 text-center bg-red-100 text-red-800 rounded-lg shadow-lg m-4">
+            <AlertTriangle className="inline mr-2 w-8 h-8" />
+            <h3 className="text-xl font-bold">Plan Calculation Error</h3>
+            <p className="mt-2">A critical error occurred while calculating meal nutrition. The generated plan is incomplete and cannot be displayed. Please check the logs for details.</p>
+        </div>
+    );
 
     // Meal Plan Content
     const mealPlanContent = (
@@ -654,59 +235,52 @@ const App = () => {
             {/* Day Navigator */}
             <DayNavigator
                 currentDay={selectedDay}
-                totalDays={parseInt(formData.days)}
+                totalDays={Math.max(1, mealPlan.length)}
                 onSelectDay={setSelectedDay}
                 completedDays={[]}
                 dayCalories={dayCaloriesMap}
             />
 
-            {/* Macro Insight Panel (Optional - can replace or supplement existing rings) */}
-            {currentDayData && (
+            {/* Macro Insight Panel */}
+            {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length && mealPlan[selectedDay - 1] && (
                 <MacroInsightPanel
                     calories={{ 
-                        current: currentDayData.subtotal_kcal || 0, 
+                        current: mealPlan[selectedDay - 1].meals?.reduce((sum, m) => sum + (m.subtotal_kcal || 0), 0) || 0,
                         target: nutritionalTargets.calories 
                     }}
                     protein={{ 
-                        current: currentDayData.subtotal_protein || 0, 
+                        current: mealPlan[selectedDay - 1].meals?.reduce((sum, m) => sum + (m.subtotal_protein || 0), 0) || 0,
                         target: nutritionalTargets.protein 
                     }}
                     carbs={{ 
-                        current: currentDayData.subtotal_carbs || 0, 
+                        current: mealPlan[selectedDay - 1].meals?.reduce((sum, m) => sum + (m.subtotal_carbs || 0), 0) || 0,
                         target: nutritionalTargets.carbs 
                     }}
                     fats={{ 
-                        current: currentDayData.subtotal_fat || 0, 
+                        current: mealPlan[selectedDay - 1].meals?.reduce((sum, m) => sum + (m.subtotal_fat || 0), 0) || 0,
                         target: nutritionalTargets.fat 
                     }}
                     fiber={{ current: 0, target: 30 }}
                     sugar={{ current: 0, target: 50 }}
                     sodium={{ current: 0, target: 2300 }}
-                    showMicroTargets={true}
+                    showMicroTargets={false}
                     showInsights={true}
                 />
             )}
 
-            {/* Meals Grid */}
-            {currentMealPlan.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {currentMealPlan.map((meal, idx) => (
-                        <MealCard
-                            key={`${meal.name}-${idx}`}
-                            meal={meal}
-                            isEaten={eatenMeals[meal.name]}
-                            onToggleEaten={() => toggleMealEaten(meal.name)}
-                            onViewRecipe={() => setSelectedMeal(meal)}
-                            showNutrition={true}
-                            nutritionalTargets={nutritionalTargets}
-                        />
-                    ))}
-                </div>
-            ) : (
-                <EmptyState 
-                    message="No meals for this day"
-                    icon={Utensils}
+            {/* Meals Display */}
+            {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
+                <MealPlanDisplay
+                    key={selectedDay}
+                    mealPlan={mealPlan}
+                    selectedDay={selectedDay}
+                    nutritionalTargets={nutritionalTargets}
+                    eatenMeals={eatenMeals}
+                    onToggleMealEaten={onToggleMealEaten}
+                    onViewRecipe={setSelectedMeal}
                 />
+            ) : (
+                <EmptyState message="Select a day to view meals" icon={Utensils} />
             )}
         </div>
     );
@@ -714,21 +288,91 @@ const App = () => {
     // Shopping List Content
     const priceComparisonContent = (
         <div className="space-y-6">
-            <ShoppingListEnhanced
-                ingredients={uniqueIngredients}
-                totalCost={totalCost}
-                storeName={formData.store}
-                onShowToast={showToast}
-            />
+            {error && !loading && (
+                <div className="p-4 bg-red-50 text-red-800 rounded-lg">
+                    <AlertTriangle className="inline w-6 h-6 mr-2" />
+                    <strong>Error(s) occurred during plan generation:</strong>
+                    <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
+                </div>
+            )}
+
+            {!loading && Object.keys(results).length > 0 && (
+                <>
+                    <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-xl font-bold flex items-center">
+                                <DollarSign className="w-5 h-5 mr-2"/>
+                                Total Estimated Cost
+                            </h3>
+                            <p className="text-3xl font-extrabold text-green-700">${totalCost.toFixed(2)}</p>
+                        </div>
+                        <p className="text-sm text-gray-500">
+                            Cost reflects selected products multiplied by units purchased from {formData.store}.
+                        </p>
+                    </div>
+
+                    <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
+                        {Object.keys(categorizedResults).map((category) => (
+                            <CollapsibleSection
+                                key={category}
+                                title={`${category} (${categorizedResults[category].length})`}
+                                icon={categoryIconMap[category.toLowerCase()] || categoryIconMap['default']}
+                                defaultOpen={false}
+                            >
+                                <div className="grid grid-cols-1 gap-6 pt-4">
+                                    {categorizedResults[category].map(({ normalizedKey, ingredient, ...result }) => {
+                                        if (!result) return null;
+                                        const selection = result.allProducts?.find(p => p && p.url === result.currentSelectionURL);
+                                        const nutriData = selection ? nutritionCache[selection.url] : null;
+                                        const isLoading = selection ? loadingNutritionFor === selection.url : false;
+                                        return (
+                                            <IngredientResultBlock
+                                                key={normalizedKey}
+                                                ingredientKey={ingredient}
+                                                normalizedKey={normalizedKey}
+                                                result={result}
+                                                onSelectSubstitute={handleSubstituteSelection}
+                                                onQuantityChange={handleQuantityChange}
+                                                onFetchNutrition={handleFetchNutrition}
+                                                nutritionData={nutriData}
+                                                isLoadingNutrition={isLoading}
+                                            />
+                                        );
+                                    })}
+                                </div>
+                            </CollapsibleSection>
+                        ))}
+                    </div>
+                </>
+            )}
+
+            {!loading && Object.keys(results).length === 0 && !error && (
+                <EmptyState message="Generate a plan to see results" icon={ShoppingBag} />
+            )}
         </div>
     );
 
     const totalLogHeight = (failedIngredientsHistory.length > 0 ? 60 : 0) + 
                           (isLogOpen ? Math.max(minLogHeight, logHeight) : minLogHeight);
 
-    // --- Main Render ---
+    // Main Render
     return (
         <>
+            {/* Toast Container - Always render */}
+            <ToastContainer toasts={toasts} onRemoveToast={removeToast} />
+            
+            {/* Success Modal */}
+            <SuccessModal
+                isVisible={showSuccessModal}
+                title="Your Plan is Ready!"
+                message="Your personalized meal plan has been generated successfully."
+                stats={planStats}
+                onViewPlan={() => {
+                    setShowSuccessModal(false);
+                    setContentView('meals');
+                }}
+            />
+
             {showLandingPage ? (
                 <LandingPage 
                     onSignUp={handleSignUp}
@@ -744,7 +388,6 @@ const App = () => {
                         onOpenSettings={() => setIsSettingsOpen(true)}
                         onNavigateToProfile={() => {
                             setContentView('profile');
-                            setIsMenuOpen(false);
                         }}
                         onSignOut={handleSignOut}
                     />
@@ -756,6 +399,7 @@ const App = () => {
                             style={{ 
                                 paddingTop: '100px',
                                 backgroundColor: COLORS.background.secondary,
+                                paddingBottom: isMobile ? '6rem' : `${totalLogHeight + 32}px`,
                             }}
                         >
                             <div className="max-w-7xl mx-auto">
@@ -764,15 +408,9 @@ const App = () => {
                                     className="bg-white rounded-2xl p-6 mb-6"
                                     style={{ boxShadow: SHADOWS.md }}
                                 >
-                                    <form onSubmit={handleGeneratePlan}>
+                                    <form onSubmit={handleFormSubmit}>
                                         <div className="mb-6">
-                                            <h2 
-                                                className="text-2xl font-bold mb-2"
-                                                style={{ 
-                                                    color: COLORS.gray[900],
-                                                    fontFamily: TYPOGRAPHY.fontFamily.display,
-                                                }}
-                                            >
+                                            <h2 className="text-2xl font-bold mb-2" style={{ color: COLORS.gray[900] }}>
                                                 Your Profile
                                             </h2>
                                             <p className="text-sm" style={{ color: COLORS.gray[500] }}>
@@ -797,7 +435,6 @@ const App = () => {
                                         >
                                             {loading ? (
                                                 <span className="flex items-center justify-center">
-                                                    <Loader size={20} className="mr-2 animate-spin" />
                                                     Generating Plan...
                                                 </span>
                                             ) : (
@@ -821,8 +458,13 @@ const App = () => {
                                     </div>
                                 )}
 
+                                {/* Error Panel */}
+                                {hasInvalidMeals && !loading && (
+                                    <PlanCalculationErrorPanel />
+                                )}
+
                                 {/* Content Tabs (Desktop) */}
-                                {!isMobile && results && Object.keys(results).length > 0 && (
+                                {!isMobile && results && Object.keys(results).length > 0 && !hasInvalidMeals && (
                                     <div className="mb-6">
                                         <div 
                                             className="flex space-x-2 bg-white p-2 rounded-xl"
@@ -867,46 +509,33 @@ const App = () => {
                                 )}
 
                                 {/* Main Content Area */}
-                                <div>
-                                    {contentView === 'meals' && results && Object.keys(results).length > 0 && mealPlanContent}
-                                    {contentView === 'ingredients' && results && Object.keys(results).length > 0 && priceComparisonContent}
-                                    
-                                    {(contentView === 'meals' || contentView === 'ingredients') && 
-                                     !(results && Object.keys(results).length > 0) && 
-                                     !loading && (
-                                        <EmptyState 
-                                            message="Generate a plan to view your content"
-                                            icon={ChefHat}
-                                        />
-                                    )}
-                                </div>
+                                {!hasInvalidMeals && (
+                                    <div>
+                                        {contentView === 'meals' && results && Object.keys(results).length > 0 && mealPlanContent}
+                                        {contentView === 'ingredients' && results && Object.keys(results).length > 0 && priceComparisonContent}
+                                        
+                                        {(contentView === 'meals' || contentView === 'ingredients') && 
+                                         !(results && Object.keys(results).length > 0) && 
+                                         !loading && (
+                                            <EmptyState 
+                                                message="Generate a plan to view your content"
+                                                icon={ChefHat}
+                                            />
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </PullToRefresh>
             
                     {/* Bottom Navigation (Mobile) */}
-                    {isMobile && results && Object.keys(results).length > 0 && (
+                    {isMobile && results && Object.keys(results).length > 0 && !hasInvalidMeals && (
                         <BottomNav
                             activeTab={contentView}
                             onTabChange={setContentView}
                             showPlanButton={false}
                         />
                     )}
-            
-                    {/* Toast Container */}
-                    <ToastContainer toasts={toasts} onRemoveToast={removeToast} />
-                    
-                    {/* Success Modal */}
-                    <SuccessModal
-                        isVisible={showSuccessModal}
-                        title="Your Plan is Ready!"
-                        message="Your personalized meal plan has been generated successfully."
-                        stats={planStats}
-                        onViewPlan={() => {
-                            setShowSuccessModal(false);
-                            setContentView('meals');
-                        }}
-                    />
 
                     {/* Settings Panel */}
                     <SettingsPanel
@@ -959,5 +588,3 @@ const App = () => {
 };
 
 export default App;
-
-
