@@ -134,6 +134,46 @@ export const SPACING = {
 };
 
 // ============================================
+// COMPONENT SIZES
+// ============================================
+export const SIZES = {
+  input: {
+    sm: {
+      height: '36px',
+      padding: '8px 12px',
+      fontSize: '14px',
+    },
+    md: {
+      height: '40px',
+      padding: '10px 14px',
+      fontSize: '16px',
+    },
+    lg: {
+      height: '44px',
+      padding: '12px 16px',
+      fontSize: '16px',
+    },
+  },
+  button: {
+    sm: {
+      height: '32px',
+      padding: '6px 12px',
+      fontSize: '14px',
+    },
+    md: {
+      height: '40px',
+      padding: '10px 20px',
+      fontSize: '16px',
+    },
+    lg: {
+      height: '48px',
+      padding: '12px 24px',
+      fontSize: '18px',
+    },
+  },
+};
+
+// ============================================
 // TYPOGRAPHY
 // ============================================
 export const TYPOGRAPHY = {
@@ -182,6 +222,7 @@ export const SHADOWS = {
   md: '0 4px 12px 0 rgba(0, 0, 0, 0.08)',
   lg: '0 8px 24px 0 rgba(0, 0, 0, 0.12)',
   xl: '0 16px 48px 0 rgba(0, 0, 0, 0.16)',
+  '2xl': '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
   // Colored shadows
   primary: '0 4px 12px 0 rgba(168, 85, 247, 0.2)',
   accent: '0 4px 12px 0 rgba(249, 117, 131, 0.2)',
@@ -342,4 +383,3 @@ export const ACTIVITY_LABELS = {
     icon: '⚡'
   }
 };
-
