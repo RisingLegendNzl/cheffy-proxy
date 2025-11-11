@@ -989,20 +989,8 @@ const App = () => {
             
         } catch (error) {
             console.error("[AUTH] Sign up error:", error);
-            
-            // --- MODIFICATION START ---
-            let errorMessage = 'Failed to create account. Please try again.'; // Default fallback
-            
-            if (error.code === 'auth/email-already-in-use') {
-                errorMessage = 'An account with this email already exists. Please sign in.';
-            } else if (error.message) {
-                errorMessage = error.message;
-            }
-            
-            setAuthError(errorMessage);
-            showToast(errorMessage, 'error');
-            // --- MODIFICATION END ---
-            
+            setAuthError(error.message);
+            showToast(error.message || 'Failed to create account', 'error');
         } finally {
             setAuthLoading(false);
         }
@@ -1217,7 +1205,7 @@ const App = () => {
                         {Object.keys(categorizedResults).map((category, index) => (
                             <CollapsibleSection
                                 key={category}
-                                title={`${category} (${categorIZEDResults[category].length})`}
+                                title={`${category} (${categorizedResults[category].length})`}
                                 icon={categoryIconMap[category.toLowerCase()] || categoryIconMap['default']}
                                 defaultOpen={false}
                             >
@@ -1556,7 +1544,7 @@ const App = () => {
                     {/* KEEP: Existing log viewers and recipe modal */}
                     <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                         {showOrchestratorLogs && (
-                            <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsOpen} onDownloadLogs={handleDownloadLogs} />
+                            <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
                         )}
                         {showFailedIngredientsLogs && (
                             <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
@@ -1581,3 +1569,5 @@ const App = () => {
 };
 
 export default App;
+
+
