@@ -2,19 +2,17 @@
 import React, { useState, useMemo } from 'react';
 import { 
   ShoppingBag, 
-  Download, 
   Share2, 
-  Check, 
-  ChevronDown, 
-  ChevronUp,
   Copy,
   Printer
 } from 'lucide-react';
-import { COLORS, SHADOWS } from '../constants';
+import { COLORS, SHADOWS, CATEGORY_ICONS } from '../constants';
 import { formatGrams, copyToClipboard, groupBy } from '../helpers';
+import CategoryCard from './CategoryCard';
 
 /**
- * Enhanced shopping list with checkboxes, export, and better organization
+ * Enhanced shopping list with CategoryCard components
+ * Features: glassmorphism summary, staggered animations, smooth interactions
  */
 const ShoppingListEnhanced = ({ 
   ingredients = [], 
@@ -107,42 +105,52 @@ const ShoppingListEnhanced = ({
     }
   };
 
-  // Category icon map (reuse from constants if needed)
+  // Get category icon
   const getCategoryIcon = (category) => {
-    const iconMap = {
-      produce: '🥕',
-      fruit: '🍎',
-      veg: '🥬',
-      grains: '🌾',
-      meat: '🥩',
-      seafood: '🐟',
-      dairy: '🥛',
-      pantry: '🥫',
-      frozen: '❄️',
-      bakery: '🍞',
-      snacks: '🍿',
+    const categoryLower = category.toLowerCase();
+    return CATEGORY_ICONS[categoryLower] || CATEGORY_ICONS.pantry || '🛒';
+  };
+
+  // Get category gradient
+  const getCategoryGradient = (category) => {
+    const categoryLower = category.toLowerCase();
+    const gradientMap = {
+      produce: [COLORS.success.main, COLORS.success.dark],
+      fruit: [COLORS.success.main, COLORS.success.dark],
+      vegetables: [COLORS.success.main, COLORS.success.dark],
+      meat: [COLORS.error.main, COLORS.error.dark],
+      seafood: [COLORS.info.main, COLORS.info.dark],
+      dairy: [COLORS.primary[400], COLORS.primary[200]],
+      grains: [COLORS.warning.main, COLORS.warning.dark],
+      pantry: [COLORS.gray[400], COLORS.gray[300]],
     };
-    return iconMap[category.toLowerCase()] || '🛒';
+    return gradientMap[categoryLower] || null;
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header Card */}
+    <div className="space-y-6">
+      {/* Header Card - Moved to GlassmorphismBar, kept simple version here */}
       <div
-        className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl p-6 shadow-lg"
+        className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl p-6 shadow-lg"
+        style={{ boxShadow: SHADOWS.lg }}
       >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center">
             <ShoppingBag size={32} className="mr-3" />
             <div>
-              <h2 className="text-2xl font-bold">Shopping List</h2>
+              <h2 
+                className="text-2xl font-bold"
+                style={{ fontFamily: 'var(--font-family-display)' }}
+              >
+                Shopping List
+              </h2>
               <p className="text-indigo-100 text-sm">
                 {totalItems} items from {storeName}
               </p>
             </div>
           </div>
           <div className="text-right">
-            <p className="text-3xl font-bold">${totalCost.toFixed(2)}</p>
+            <p className="text-3xl font-bold tabular-nums">${totalCost.toFixed(2)}</p>
             <p className="text-indigo-100 text-sm">Total Cost</p>
           </div>
         </div>
@@ -164,7 +172,11 @@ const ShoppingListEnhanced = ({
         <button
           onClick={handleCopyList}
           className="flex items-center px-4 py-2 bg-white border rounded-lg hover-lift transition-spring"
-          style={{ borderColor: COLORS.gray[300], color: COLORS.gray[700] }}
+          style={{ 
+            borderColor: COLORS.gray[300], 
+            color: COLORS.gray[700],
+            boxShadow: SHADOWS.sm,
+          }}
         >
           <Copy size={16} className="mr-2" />
           Copy List
@@ -173,7 +185,11 @@ const ShoppingListEnhanced = ({
         <button
           onClick={handleShare}
           className="flex items-center px-4 py-2 bg-white border rounded-lg hover-lift transition-spring"
-          style={{ borderColor: COLORS.gray[300], color: COLORS.gray[700] }}
+          style={{ 
+            borderColor: COLORS.gray[300], 
+            color: COLORS.gray[700],
+            boxShadow: SHADOWS.sm,
+          }}
         >
           <Share2 size={16} className="mr-2" />
           Share
@@ -182,7 +198,11 @@ const ShoppingListEnhanced = ({
         <button
           onClick={handlePrint}
           className="flex items-center px-4 py-2 bg-white border rounded-lg hover-lift transition-spring"
-          style={{ borderColor: COLORS.gray[300], color: COLORS.gray[700] }}
+          style={{ 
+            borderColor: COLORS.gray[300], 
+            color: COLORS.gray[700],
+            boxShadow: SHADOWS.sm,
+          }}
         >
           <Printer size={16} className="mr-2" />
           Print
@@ -191,7 +211,11 @@ const ShoppingListEnhanced = ({
         <button
           onClick={handleExpandAll}
           className="flex items-center px-4 py-2 bg-white border rounded-lg hover-lift transition-spring ml-auto"
-          style={{ borderColor: COLORS.gray[300], color: COLORS.gray[700] }}
+          style={{ 
+            borderColor: COLORS.gray[300], 
+            color: COLORS.gray[700],
+            boxShadow: SHADOWS.sm,
+          }}
         >
           Expand All
         </button>
@@ -199,98 +223,31 @@ const ShoppingListEnhanced = ({
         <button
           onClick={handleCollapseAll}
           className="flex items-center px-4 py-2 bg-white border rounded-lg hover-lift transition-spring"
-          style={{ borderColor: COLORS.gray[300], color: COLORS.gray[700] }}
+          style={{ 
+            borderColor: COLORS.gray[300], 
+            color: COLORS.gray[700],
+            boxShadow: SHADOWS.sm,
+          }}
         >
           Collapse All
         </button>
       </div>
 
-      {/* Categorized List */}
-      <div className="space-y-3">
-        {Object.entries(categorizedIngredients).map(([category, items]) => {
-          const isExpanded = expandedCategories[category];
-          const categoryCheckedCount = items.filter(item => 
-            checkedItems[item.originalIngredient]
-          ).length;
-
-          return (
-            <div
-              key={category}
-              className="bg-white rounded-xl overflow-hidden border"
-              style={{ 
-                borderColor: COLORS.gray[200],
-                boxShadow: SHADOWS.sm 
-              }}
-            >
-              {/* Category Header */}
-              <button
-                onClick={() => handleToggleCategory(category)}
-                className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-fast"
-              >
-                <div className="flex items-center">
-                  <span className="text-2xl mr-3">{getCategoryIcon(category)}</span>
-                  <div className="text-left">
-                    <h3 className="font-bold" style={{ color: COLORS.gray[900] }}>
-                      {category}
-                    </h3>
-                    <p className="text-sm" style={{ color: COLORS.gray[500] }}>
-                      {categoryCheckedCount} of {items.length} items
-                    </p>
-                  </div>
-                </div>
-                {isExpanded ? (
-                  <ChevronUp style={{ color: COLORS.gray[400] }} />
-                ) : (
-                  <ChevronDown style={{ color: COLORS.gray[400] }} />
-                )}
-              </button>
-
-              {/* Category Items */}
-              {isExpanded && (
-                <div className="border-t" style={{ borderColor: COLORS.gray[200] }}>
-                  {items.map((item, index) => {
-                    const isChecked = checkedItems[item.originalIngredient] || false;
-
-                    return (
-                      <div
-                        key={item.originalIngredient || index}
-                        className={`flex items-center p-4 border-b last:border-b-0 transition-all ${
-                          isChecked ? 'bg-gray-50 opacity-60' : 'hover:bg-gray-50'
-                        }`}
-                        style={{ borderColor: COLORS.gray[100] }}
-                      >
-                        {/* Checkbox */}
-                        <button
-                          onClick={() => handleToggleItem(item.originalIngredient)}
-                          className={`w-6 h-6 rounded border-2 flex items-center justify-center mr-3 transition-all ${
-                            isChecked ? 'bg-green-500 border-green-500' : 'border-gray-300'
-                          }`}
-                        >
-                          {isChecked && <Check size={16} className="text-white" />}
-                        </button>
-
-                        {/* Item Details */}
-                        <div className="flex-1 min-w-0">
-                          <p
-                            className={`font-semibold truncate ${
-                              isChecked ? 'line-through' : ''
-                            }`}
-                            style={{ color: COLORS.gray[900] }}
-                          >
-                            {item.originalIngredient}
-                          </p>
-                          <p className="text-sm" style={{ color: COLORS.gray[500] }}>
-                            {formatGrams(item.totalGramsRequired)} • {item.quantityUnits || 'units'}
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
+      {/* Categorized List with CategoryCard */}
+      <div className="space-y-4">
+        {Object.entries(categorizedIngredients).map(([category, items]) => (
+          <CategoryCard
+            key={category}
+            category={category}
+            items={items}
+            categoryIcon={getCategoryIcon(category)}
+            gradientColors={getCategoryGradient(category)}
+            isExpanded={expandedCategories[category]}
+            onToggle={() => handleToggleCategory(category)}
+            checkedItems={checkedItems}
+            onToggleItem={handleToggleItem}
+          />
+        ))}
       </div>
 
       {/* Empty State */}
