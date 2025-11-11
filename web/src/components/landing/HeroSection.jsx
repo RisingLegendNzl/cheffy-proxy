@@ -1,5 +1,5 @@
 // web/src/components/landing/HeroSection.jsx
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { ArrowRight, Play } from 'lucide-react';
 import { COLORS } from '../../constants';
 
@@ -8,10 +8,27 @@ import { COLORS } from '../../constants';
  * Main landing section with headline, CTAs, and social proof
  */
 const HeroSection = ({ onGetStarted, onWatchDemo }) => {
+  // Add state to track component mount for load-in animation
+  const [isMounted, setIsMounted] = useState(false);
+  useEffect(() => {
+    // Set mounted to true after a short delay to ensure animation plays
+    const timer = setTimeout(() => setIsMounted(true), 100);
+    return () => clearTimeout(timer);
+  }, []);
+
   return (
     <section className="relative overflow-hidden bg-gradient-to-b from-indigo-50 to-white py-20 md:py-32">
       <div className="max-w-7xl mx-auto px-4 md:px-8">
-        <div className="text-center mb-12">
+        {/*
+          ADD:
+          - transition-all, duration-700
+          - Ternary for opacity and transform based on isMounted
+        */}
+        <div
+          className={`text-center mb-12 transition-all duration-700 ease-out ${
+            isMounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-5'
+          }`}
+        >
           {/* Badge */}
           <div className="inline-flex items-center space-x-2 px-4 py-2 rounded-full mb-6"
             style={{ 
@@ -69,7 +86,17 @@ const HeroSection = ({ onGetStarted, onWatchDemo }) => {
           </div>
 
           {/* Hero Image - Larger and Cleaner */}
-          <div className="max-w-6xl mx-auto px-4">
+          {/*
+            ADD:
+            - transition-all, duration-1000
+            - Ternary for opacity and scale based on isMounted
+            - Added delay-300 to make it appear after the text
+          */}
+          <div
+            className={`max-w-6xl mx-auto px-4 transition-all duration-1000 ease-out delay-300 ${
+              isMounted ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
+            }`}
+          >
             <div 
               className="rounded-3xl overflow-hidden shadow-2xl"
               style={{ backgroundColor: COLORS.gray[100] }}
@@ -105,3 +132,4 @@ const HeroSection = ({ onGetStarted, onWatchDemo }) => {
 };
 
 export default HeroSection;
+
