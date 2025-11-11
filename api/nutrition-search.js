@@ -1,6 +1,6 @@
 /// ========= NUTRITION-SEARCH-START ========= \\\\
 // File: api/nutrition-search.js
-// [MODIFIED V8] Pipeline: Canonical → OpenNutrition (NEW!) → Avocavo → OFF → USDA
+// [MODIFIED V9] Pipeline: Canonical → OpenNutrition → RapidAPI Food Calories → Avocavo → OFF → USDA
 // Caching: Memory + Upstash (Vercel KV) incl. final-response cache
 
 const fetch = require('node-fetch');
@@ -13,7 +13,6 @@ const { getClient } = require('./opennutrition-client.js');
 let CANON_VERSION = '0.0.0-detached';
 let canonGet = () => null;
 try {
-  // This file is generated at build time. If it fails, we fallback.
   const canonModule = require('./_canon.js'); 
   CANON_VERSION = canonModule.CANON_VERSION;
   canonGet = canonModule.canonGet;
@@ -21,25 +20,24 @@ try {
 } catch (e) {
   console.warn('[nutrition-search] WARN: Could not load _canon.js. Canonical DB will be unavailable. Error:', e.message);
 }
-// --- [END MODIFICATION] ---
 
 const { normalizeKey } = require('../scripts/normalize.js'); 
-// --- [END NEW] ---
 
 // ---------- ENV & CONSTANTS ----------
 const AVOCAVO_URL = 'https://app.avocavo.app/api/v2';
 const AVOCAVO_KEY = process.env.AVOCAVO_API_KEY || '';
 const USDA_KEY    = process.env.USDA_API_KEY || '';
 
+// --- [NEW] RapidAPI Food Calories ---
+const RAPIDAPI_FOOD_KEY = process.env.RAPIDAPI_FOOD_CALORIES_KEY || '';
+const RAPIDAPI_FOOD_URL = 'https://food-calories-and-macros-api.p.rapidapi.com/get_nutritional_info';
+
 const KV_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
 const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
-// --- [NEW] OpenNutrition control flag ---
 const DISABLE_EXTERNAL_NUTRITION_APIS = process.env.DISABLE_EXTERNAL_NUTRITION_APIS === 'true';
 
-// --- [MODIFIED] Cache key now includes CANON_VERSION ---
-const CACHE_PREFIX = `nutri:v8:cv:${CANON_VERSION}`;
-// --- [PERF] TTLs match instructions (7d name, 30d barcode) ---
+const CACHE_PREFIX = `nutri:v9:cv:${CANON_VERSION}`;
 const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
@@ -70,98 +68,113 @@ async function cacheSet(key, val, ttl) {
 // ---------- Utilities ----------
 const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
-// --- [PERF] Reduced default timeout to 8000ms ---
-function withTimeout(promise, ms = 8000) { 
-  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); 
-}
-function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
-
-// ---------- USDA link helpers ----------
-function extractFdcId(any) {
-  const c = [
-    any?.fdc_id, any?.fdcId, any?.fdc_id_str,
-    any?.usda_fdc_id, any?.usda?.fdc_id,
-    any?.match?.fdc_id, any?.matches?.[0]?.fdc_id,
-    any?.product?.fdc_id, any?.meta?.fdc_id
-  ];
-  const id = c.find(v => v != null && String(v).match(/^\d+$/));
-  return id ? String(id) : null;
-}
-function usdaLinkFromId(id) { return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
-
-// ---------- Nutrition validation (calorie balance sanity) ----------
-function accept(out) {
-  const P = Number(out.protein), F = Number(out.fat), C = Number(out.carbs), K = Number(out.calories);
-  if (!(K > 0 && P >= 0 && F >= 0 && C >= 0)) return false;
-  const est = 4 * P + 4 * C + 9 * F;
-  return Math.abs(K - est) / Math.max(1, K) <= 0.12;
+function accept(o) { return o && o.calories > 0 && o.protein >= 0 && o.fat >= 0 && o.carbs >= 0; }
+const softLog = (m, v) => console.log(`[nutrition-search] ${m}:`, v);
+function withTimeout(p, ms = 8000) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 }
 
-// ---------- Avocavo strict extractor ----------
-function pick(obj, keys) { for (const k of keys) { const v = obj && obj[k]; if (v != null) return Number(v); } return null; }
-function extractAvocavoNutrition(n, raw) {
-  if (!n) return null;
-  const src = n.per_100g || n;
-  const calories = pick(src, ['calories_total', 'energy_kcal', 'calories']);
-  const protein  = pick(src, ['protein_total', 'proteins', 'protein']);
-  const fat      = pick(src, ['total_fat_total', 'fat', 'total_fat']);
-  const carbs    = pick(src, ['carbohydrates_total', 'carbohydrates', 'carbs']);
-  if ([calories, protein, fat, carbs].some(v => v == null)) return null;
-  if (calories === 0 && protein === 0 && fat === 0 && carbs === 0) return null;
-  const fdcId = extractFdcId(src) || extractFdcId(n) || extractFdcId(raw);
-  const out = { status: 'found', source: 'avocavo', servingUnit: '100g', calories, protein, fat, carbs, fdcId, usda_link: usdaLinkFromId(fdcId) };
-  return accept(out) ? out : null;
-}
-
-// ---------- Avocavo calls ----------
-async function avocavoIngredient(q) {
-  if (!AVOCAVO_KEY) return null;
-  const key = `${CACHE_PREFIX}:avq:${normalizeKey(q)}`;
-  const c = await cacheGet(key); if (c) return c;
+// ---------- [NEW] RapidAPI Food Calories ----------
+async function tryRapidAPIFood(query, log = console.log) {
+  if (!RAPIDAPI_FOOD_KEY) return null;
+  
+  const key = `${CACHE_PREFIX}:rapidfood:${normalizeKey(query)}`;
+  const c = await cacheGet(key);
+  if (c) return c;
+  
+  const startTime = Date.now();
+  
   try {
-    const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/ingredient`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': AVOCAVO_KEY },
-      body: JSON.stringify({ ingredient: q })
+    log(`[NUTRI] RapidAPI Food Calories search: ${query}`, 'DEBUG', 'RAPIDFOOD');
+    
+    const url = `${RAPIDAPI_FOOD_URL}?food_name=${encodeURIComponent(query)}`;
+    const res = await withTimeout(fetch(url, {
+      method: 'GET',
+      headers: {
+        'X-RapidAPI-Key': RAPIDAPI_FOOD_KEY,
+        'X-RapidAPI-Host': 'food-calories-and-macros-api.p.rapidapi.com'
+      }
     }));
-    const j = await res.json().catch(() => null);
-    const n = j?.nutrition || j?.result?.nutrition || j?.results?.[0]?.nutrition;
-    const out = extractAvocavoNutrition(n, j);
-    if (out) { await cacheSet(key, out, TTL_AVO_Q_MS); return out; }
+    
+    if (!res.ok) return null;
+    
+    const data = await res.json().catch(() => null);
+    if (!data || !data.food_name) return null;
+    
+    // Response format: { food_name, calories, protein_g, fat_g, carbs_g, fiber_g, serving_size }
+    const out = {
+      status: 'found',
+      source: 'rapidapi_food',
+      servingUnit: '100g',
+      usda_link: null,
+      calories: toNumber(data.calories),
+      protein: toNumber(data.protein_g),
+      fat: toNumber(data.fat_g),
+      carbs: toNumber(data.carbs_g),
+      fiber: toNumber(data.fiber_g)
+    };
+    
+    if (!accept(out)) {
+      log(`[NUTRI] RapidAPI Food Calories data invalid`, 'DEBUG', 'RAPIDFOOD');
+      return null;
+    }
+    
+    const latency = Date.now() - startTime;
+    log(`[NUTRI] RapidAPI Food Calories HIT: ${data.food_name} (${latency}ms)`, 'INFO', 'RAPIDFOOD');
+    
+    await cacheSet(key, out, TTL_NAME_MS);
+    return out;
+    
+  } catch (error) {
+    const latency = Date.now() - startTime;
+    log(`[NUTRI] RapidAPI Food Calories ERROR (${latency}ms): ${error.message}`, 'WARN', 'RAPIDFOOD');
     return null;
-  } catch { softLog('avo:ing timeout', q); return null; }
+  }
 }
-async function avocavoUpc(barcode) {
+
+// ---------- Avocavo ----------
+async function tryAvocavo(q, byUPC = false) {
   if (!AVOCAVO_KEY) return null;
-  const key = `${CACHE_PREFIX}:avu:${normalizeKey(barcode)}`;
-  const c = await cacheGet(key); if (c) return c;
+  const prefix = byUPC ? 'upc' : 'query';
+  const key = `${CACHE_PREFIX}:avo:${prefix}:${normalizeKey(q)}`;
+  const c = await cacheGet(key);
+  if (c) return c;
   try {
-    const res = await withTimeout(fetch(`${AVOCAVO_URL}/nutrition/upc/${barcode}`, {
-      headers: { 'X-API-Key': AVOCAVO_KEY }
-    }));
-    const j = await res.json().catch(() => null);
-    const n = j?.nutrition || j?.product?.nutrition;
-    const out = extractAvocavoNutrition(n, j);
-    if (out) { await cacheSet(key, out, TTL_AVO_U_MS); return out; }
-    return null;
-  } catch { softLog('avo:upc timeout', barcode); return null; }
-}
-async function tryAvocavo(arg, isBarcode) {
-  return isBarcode ? avocavoUpc(arg) : avocavoIngredient(arg);
+    const ep = byUPC ? '/product/upc' : '/products/query';
+    const url = `${AVOCAVO_URL}${ep}?${byUPC ? 'upc' : 'q'}=${encodeURIComponent(q)}`;
+    const res = await withTimeout(fetch(url, { headers: { Authorization: `Bearer ${AVOCAVO_KEY}` } }));
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    const prod = byUPC ? json : (json?.products?.[0] || null);
+    if (!prod || !prod.nutritions) return null;
+    const n = prod.nutritions;
+    const out = {
+      status: 'found', source: 'avocavo', servingUnit: n.serving_unit || '100g', usda_link: null,
+      calories: toNumber(n.calories),
+      protein: toNumber(n.protein),
+      fat: toNumber(n.fat),
+      carbs: toNumber(n.carbs)
+    };
+    if (!accept(out)) return null;
+    await cacheSet(key, out, byUPC ? TTL_AVO_U_MS : TTL_AVO_Q_MS);
+    return out;
+  } catch { softLog('avo timeout', q); return null; }
 }
 
 // ---------- OpenFoodFacts ----------
 async function offByBarcode(barcode) {
-  const key = `${CACHE_PREFIX}:off:barcode:${normalizeKey(barcode)}`;
+  const key = `${CACHE_PREFIX}:off:bar:${barcode}`;
   const c = await cacheGet(key); if (c) return c;
   try {
-    const url = `https://world.openfoodfacts.org/api/v2/product/${barcode}`;
+    const url = `https://world.openfoodfacts.org/api/v0/product/${barcode}.json`;
     const res = await withTimeout(fetch(url));
     if (!res.ok) return null;
     const json = await res.json().catch(() => null);
-    const nutr = json?.product?.nutriments;
-    if (!nutr) return null;
-    const kcal = nutr['energy-kcal_100g'] ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
+    const prod = json?.product;
+    if (!prod || !prod.nutriments) return null;
+    const nutr = prod.nutriments;
+    const kcal = nutr['energy-kcal_100g']
+      ?? (nutr['energy-kj_100g'] ? nutr['energy-kj_100g'] / KJ_TO_KCAL : null);
     const out = {
       status: 'found', source: 'openfoodfacts', servingUnit: '100g', usda_link: null,
       calories: toNumber(kcal),
@@ -247,6 +260,7 @@ async function usdaByQuery(q) {
     const carbs    = findAmt([1005, 205]);
     if ([calories, protein, fat, carbs].some(v => v == null)) return null;
 
+    const usdaLinkFromId = (fdcId) => `https://fdc.nal.usda.gov/fdc-app.html#/food-details/${fdcId}/nutrients`;
     const out = {
       status: 'found', source: 'usda', servingUnit: '100g',
       calories, protein, fat, carbs,
@@ -258,7 +272,7 @@ async function usdaByQuery(q) {
   } catch { softLog('usda:query timeout', q); return null; }
 }
 
-// ---------- [NEW] OpenNutrition Integration ----------
+// ---------- OpenNutrition Integration ----------
 async function tryOpenNutrition(barcode, query, log) {
   const onStartTime = Date.now();
   
@@ -266,7 +280,6 @@ async function tryOpenNutrition(barcode, query, log) {
     const onClient = getClient();
     let onResult = null;
 
-    // Try barcode lookup first (most specific)
     if (barcode) {
       log(`[NUTRI] OpenNutrition barcode lookup: ${barcode}`, 'DEBUG', 'ON');
       const barcodeResult = await onClient.lookupByBarcode(barcode);
@@ -282,13 +295,11 @@ async function tryOpenNutrition(barcode, query, log) {
       log(`[NUTRI] OpenNutrition barcode MISS`, 'DEBUG', 'ON');
     }
 
-    // Try name search (semantic matching)
     if (query) {
       log(`[NUTRI] OpenNutrition name search: ${query}`, 'DEBUG', 'ON');
       const searchResults = await onClient.searchByName(query, 5);
       
       if (searchResults && searchResults.length > 0) {
-        // Pick best match (first result is typically most relevant)
         const bestMatch = searchResults[0];
         onResult = onClient.transformToCheffyFormat(bestMatch);
         
@@ -313,11 +324,11 @@ async function tryOpenNutrition(barcode, query, log) {
   } catch (error) {
     const latency = Date.now() - onStartTime;
     log(`[NUTRI] OpenNutrition ERROR (${latency}ms): ${error.message}`, 'WARN', 'ON');
-    return null; // Graceful fallback
+    return null;
   }
 }
 
-// ---------- [MODIFIED] Resolver (Canonical → OpenNutrition → External) ----------
+// ---------- [MODIFIED] Resolver (Canonical → OpenNutrition → RapidAPI → Avocavo → OFF → USDA) ----------
 async function fetchNutritionData(barcode, query, log = console.log) {
   query = query ? normFood(query) : query;
   
@@ -361,7 +372,17 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     return onResult;
   }
 
-  // --- Step 4: External APIs (FALLBACK) ---
+  // --- Step 4: Try RapidAPI Food Calories (NEW!) ---
+  if (query && RAPIDAPI_FOOD_KEY) {
+    log(`[NUTRI] Trying RapidAPI Food Calories...`, 'DEBUG', 'RAPIDFOOD');
+    const rapidResult = await tryRapidAPIFood(query, log);
+    if (rapidResult) {
+      await cacheSet(finalKey, rapidResult, TTL_FINAL_MS);
+      return rapidResult;
+    }
+  }
+
+  // --- Step 5: External APIs (FALLBACK) ---
   if (DISABLE_EXTERNAL_NUTRITION_APIS) {
     log(`[NUTRI] External APIs disabled, returning not_found`, 'INFO', 'EXTERNAL');
     const notFound = {
@@ -400,7 +421,6 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     };
   }
 
-  // --- Step 5: Cache external results ---
   await cacheSet(finalKey, out, TTL_FINAL_MS);
   return out;
 }
