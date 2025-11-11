@@ -6,11 +6,25 @@
  */
 
 // ============================================
-// COLOR PALETTE - Premium Warm-Meets-Cool
+// COLOR PALETTE
 // ============================================
 export const COLORS = {
-  // Primary Brand Colors (Deep Plum)
+  // Primary Brand Colors
   primary: {
+    50: '#eef2ff',
+    100: '#e0e7ff',
+    200: '#c7d2fe',
+    300: '#a5b4fc',
+    400: '#818cf8',
+    500: '#6366f1',  // Main brand color
+    600: '#4f46e5',
+    700: '#4338ca',
+    800: '#3730a3',
+    900: '#312e81',
+  },
+  
+  // Secondary Colors (Purple accent)
+  secondary: {
     50: '#faf5ff',
     100: '#f3e8ff',
     200: '#e9d5ff',
@@ -21,20 +35,6 @@ export const COLORS = {
     700: '#7e22ce',
     800: '#6b21a8',
     900: '#581c87',
-  },
-  
-  // Accent Colors (Coral/Rose)
-  accent: {
-    50: '#fff1f2',
-    100: '#ffe4e6',
-    200: '#fecdd3',
-    300: '#fda4af',
-    400: '#fb7185',
-    500: '#f97583',
-    600: '#e11d48',
-    700: '#be123c',
-    800: '#9f1239',
-    900: '#881337',
   },
   
   // Semantic Colors
@@ -73,30 +73,30 @@ export const COLORS = {
     900: '#111827',
   },
   
-  // Macro Colors - Refined Palette
+  // Macro Colors (for nutrition displays)
   macros: {
     protein: {
-      light: '#dbeafe',
-      main: '#2563eb',  // Deep ocean blue
-      dark: '#1e40af',
+      light: '#d1fae5',
+      main: '#10b981',
+      dark: '#059669',
       icon: '💪',
     },
-    carbs: {
+    fat: {
       light: '#fef3c7',
-      main: '#f59e0b',  // Warm amber
+      main: '#f59e0b',
       dark: '#d97706',
-      icon: '🌾',
-    },
-    fats: {
-      light: '#d1fae5',
-      main: '#10b981',  // Rich avocado green
-      dark: '#059669',
       icon: '🥑',
     },
-    calories: {
+    carbs: {
       light: '#fed7aa',
-      main: '#f97316',  // Vibrant coral
+      main: '#f97316',
       dark: '#ea580c',
+      icon: '🌾',
+    },
+    calories: {
+      light: '#fee2e2',
+      main: '#ef4444',
+      dark: '#dc2626',
       icon: '🔥',
     },
   },
@@ -107,70 +107,25 @@ export const COLORS = {
     secondary: '#f9fafb',
     tertiary: '#f3f4f6',
   },
-  
-  // Gradients
-  gradients: {
-    primary: 'linear-gradient(135deg, #6b21a8 0%, #f97583 100%)',
-    accent: 'linear-gradient(135deg, #f97583 0%, #fb7185 100%)',
-    success: 'linear-gradient(135deg, #10b981 0%, #34d399 100%)',
-    warning: 'linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%)',
-    produce: 'linear-gradient(135deg, #10b981 0%, #34d399 100%)',
-    meat: 'linear-gradient(135deg, #dc2626 0%, #f87171 100%)',
-    dairy: 'linear-gradient(135deg, #a5b4fc 0%, #e0e7ff 100%)',
-  },
 };
 
 // ============================================
-// SPACING SCALE
+// SPACING SYSTEM (8px grid)
 // ============================================
 export const SPACING = {
-  xs: '4px',
-  sm: '8px',
-  md: '16px',
-  lg: '24px',
-  xl: '32px',
-  '2xl': '48px',
-  '3xl': '64px',
-};
-
-// ============================================
-// COMPONENT SIZES
-// ============================================
-export const SIZES = {
-  input: {
-    sm: {
-      height: '36px',
-      padding: '8px 12px',
-      fontSize: '14px',
-    },
-    md: {
-      height: '40px',
-      padding: '10px 14px',
-      fontSize: '16px',
-    },
-    lg: {
-      height: '44px',
-      padding: '12px 16px',
-      fontSize: '16px',
-    },
-  },
-  button: {
-    sm: {
-      height: '32px',
-      padding: '6px 12px',
-      fontSize: '14px',
-    },
-    md: {
-      height: '40px',
-      padding: '10px 20px',
-      fontSize: '16px',
-    },
-    lg: {
-      height: '48px',
-      padding: '12px 24px',
-      fontSize: '18px',
-    },
-  },
+  0: '0',
+  1: '0.25rem',   // 4px
+  2: '0.5rem',    // 8px
+  3: '0.75rem',   // 12px
+  4: '1rem',      // 16px
+  5: '1.25rem',   // 20px
+  6: '1.5rem',    // 24px
+  8: '2rem',      // 32px
+  10: '2.5rem',   // 40px
+  12: '3rem',     // 48px
+  16: '4rem',     // 64px
+  20: '5rem',     // 80px
+  24: '6rem',     // 96px
 };
 
 // ============================================
@@ -178,95 +133,94 @@ export const SIZES = {
 // ============================================
 export const TYPOGRAPHY = {
   fontFamily: {
-    display: "'Poppins', -apple-system, BlinkMacSystemFont, sans-serif",
-    body: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
-    mono: "'SF Mono', 'Monaco', 'Cascadia Code', monospace",
+    sans: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    display: "'Poppins', 'Inter', sans-serif",
+    mono: "'Fira Code', 'Courier New', monospace",
   },
+  
   fontSize: {
-    xs: '0.75rem',    // 12px
-    sm: '0.875rem',   // 14px
-    base: '1rem',     // 16px
-    lg: '1.125rem',   // 18px
-    xl: '1.25rem',    // 20px
-    '2xl': '1.5rem',  // 24px
-    '3xl': '1.875rem', // 30px
-    '4xl': '2.25rem', // 36px
-    '5xl': '3rem',    // 48px
+    xs: '0.75rem',      // 12px
+    sm: '0.875rem',     // 14px
+    base: '1rem',       // 16px
+    lg: '1.125rem',     // 18px
+    xl: '1.25rem',      // 20px
+    '2xl': '1.5rem',    // 24px
+    '3xl': '1.875rem',  // 30px
+    '4xl': '2.25rem',   // 36px
+    '5xl': '3rem',      // 48px
+    '6xl': '3.75rem',   // 60px
   },
+  
   fontWeight: {
-    light: 300,
-    regular: 400,
-    medium: 500,
-    semibold: 600,
-    bold: 700,
+    light: '300',
+    normal: '400',
+    medium: '500',
+    semibold: '600',
+    bold: '700',
+    extrabold: '800',
   },
+  
   lineHeight: {
-    tight: 1.25,
-    normal: 1.5,
-    relaxed: 1.6,
-    loose: 2,
-  },
-  letterSpacing: {
-    tight: '-0.02em',
-    normal: '0',
-    wide: '0.025em',
+    tight: '1.25',
+    normal: '1.5',
+    relaxed: '1.75',
   },
 };
 
 // ============================================
-// SHADOWS
+// SHADOWS (Elevation system)
 // ============================================
 export const SHADOWS = {
-  xs: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
-  sm: '0 2px 8px 0 rgba(0, 0, 0, 0.04)',
-  md: '0 4px 12px 0 rgba(0, 0, 0, 0.08)',
-  lg: '0 8px 24px 0 rgba(0, 0, 0, 0.12)',
-  xl: '0 16px 48px 0 rgba(0, 0, 0, 0.16)',
+  none: 'none',
+  sm: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+  base: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)',
+  md: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
+  lg: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+  xl: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
   '2xl': '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
-  // Colored shadows
-  primary: '0 4px 12px 0 rgba(168, 85, 247, 0.2)',
-  accent: '0 4px 12px 0 rgba(249, 117, 131, 0.2)',
-  success: '0 4px 12px 0 rgba(16, 185, 129, 0.2)',
+  inner: 'inset 0 2px 4px 0 rgba(0, 0, 0, 0.06)',
+  
+  // Colored shadows for brand elements
+  primary: '0 10px 25px -5px rgba(99, 102, 241, 0.3)',
+  success: '0 10px 25px -5px rgba(16, 185, 129, 0.3)',
+  error: '0 10px 25px -5px rgba(239, 68, 68, 0.3)',
 };
 
 // ============================================
 // BORDER RADIUS
 // ============================================
 export const RADIUS = {
-  sm: '6px',
-  md: '8px',
-  lg: '12px',
-  xl: '16px',
-  '2xl': '24px',
-  full: '9999px',
-};
-
-// ============================================
-// Z-INDEX SCALE
-// ============================================
-export const Z_INDEX = {
-  base: 1,
-  dropdown: 100,
-  sticky: 200,
-  fixed: 300,
-  modalBackdrop: 400,
-  modal: 500,
-  popover: 600,
-  tooltip: 700,
+  none: '0',
+  sm: '0.25rem',    // 4px
+  base: '0.5rem',   // 8px
+  md: '0.75rem',    // 12px
+  lg: '1rem',       // 16px
+  xl: '1.5rem',     // 24px
+  '2xl': '2rem',    // 32px
+  full: '9999px',   // Pill shape
 };
 
 // ============================================
 // TRANSITIONS
 // ============================================
 export const TRANSITIONS = {
-  fast: '150ms ease-out',
-  base: '200ms ease-out',
-  slow: '300ms ease-in-out',
-  spring: '350ms cubic-bezier(0.68, -0.55, 0.265, 1.55)',
+  duration: {
+    fast: '150ms',
+    base: '200ms',
+    medium: '300ms',
+    slow: '500ms',
+  },
+  timing: {
+    ease: 'ease',
+    easeIn: 'ease-in',
+    easeOut: 'ease-out',
+    easeInOut: 'ease-in-out',
+    spring: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
+  },
 };
 
 // ============================================
-// BREAKPOINTS
+// BREAKPOINTS (for responsive design)
 // ============================================
 export const BREAKPOINTS = {
   sm: '640px',
@@ -277,109 +231,197 @@ export const BREAKPOINTS = {
 };
 
 // ============================================
-// APP CONFIG
+// Z-INDEX LAYERS
+// ============================================
+export const Z_INDEX = {
+  base: 0,
+  dropdown: 1000,
+  sticky: 1020,
+  fixed: 1030,
+  modalBackdrop: 1040,
+  modal: 1050,
+  popover: 1060,
+  tooltip: 1070,
+};
+
+// ============================================
+// COMPONENT SIZES
+// ============================================
+export const SIZES = {
+  button: {
+    sm: {
+      height: '2rem',      // 32px
+      padding: '0.5rem 1rem',
+      fontSize: TYPOGRAPHY.fontSize.sm,
+    },
+    md: {
+      height: '2.5rem',    // 40px
+      padding: '0.625rem 1.25rem',
+      fontSize: TYPOGRAPHY.fontSize.base,
+    },
+    lg: {
+      height: '3rem',      // 48px
+      padding: '0.75rem 1.5rem',
+      fontSize: TYPOGRAPHY.fontSize.lg,
+    },
+  },
+  
+  input: {
+    sm: {
+      height: '2rem',      // 32px
+      padding: '0.5rem 0.75rem',
+      fontSize: TYPOGRAPHY.fontSize.sm,
+    },
+    md: {
+      height: '2.5rem',    // 40px
+      padding: '0.625rem 1rem',
+      fontSize: TYPOGRAPHY.fontSize.base,
+    },
+    lg: {
+      height: '3rem',      // 48px
+      padding: '0.75rem 1.25rem',
+      fontSize: TYPOGRAPHY.fontSize.lg,
+    },
+  },
+  
+  icon: {
+    xs: '1rem',     // 16px
+    sm: '1.25rem',  // 20px
+    md: '1.5rem',   // 24px
+    lg: '2rem',     // 32px
+    xl: '3rem',     // 48px
+  },
+};
+
+// ============================================
+// ANIMATION PRESETS
+// ============================================
+export const ANIMATIONS = {
+  fadeIn: 'fadeIn',
+  slideUp: 'slideUp',
+  slideDown: 'slideDown',
+  slideLeft: 'slideLeft',
+  slideRight: 'slideRight',
+  scaleIn: 'scaleIn',
+  bounce: 'bounce',
+  spin: 'spin',
+  pulse: 'pulse',
+  shimmer: 'shimmer',
+};
+
+// ============================================
+// APP-SPECIFIC CONSTANTS
 // ============================================
 export const APP_CONFIG = {
   name: 'Cheffy',
-  tagline: 'Your AI Meal Planning Assistant',
+  tagline: 'Your Personal Meal Planning Assistant',
   version: '1.0.0',
+  
+  // Feature flags
+  features: {
+    firebase: true,
+    analytics: false,
+    darkMode: false,
+    mealImages: false, // Enable when image generation is added
+  },
+  
+  // Limits
+  limits: {
+    maxDays: 7,
+    minDays: 1,
+    maxSubstitutes: 5,
+    maxIngredients: 50,
+  },
+  
+  // Default values
+  defaults: {
+    store: 'Woolworths',
+    eatingOccasions: '3',
+    costPriority: 'Best Value',
+    mealVariety: 'Balanced Variety',
+  },
 };
 
 // ============================================
-// CATEGORY ICONS (for shopping list)
-// ============================================
-export const CATEGORY_ICONS = {
-  produce: '🥕',
-  fruit: '🍎',
-  vegetables: '🥬',
-  grains: '🌾',
-  meat: '🥩',
-  seafood: '🐟',
-  dairy: '🥛',
-  pantry: '🥫',
-  frozen: '❄️',
-  bakery: '🍞',
-  snacks: '🍿',
-  beverages: '🥤',
-  condiments: '🧂',
-  spreads: '🥜',
-  canned: '🥫',
-  misc: '🛒',
-  default: '🛒'
-};
-
-// ============================================
-// GLASSMORPHISM
-// ============================================
-export const GLASS = {
-  background: 'rgba(255, 255, 255, 0.9)',
-  border: 'rgba(255, 255, 255, 0.2)',
-  blur: 'blur(10px)',
-};
-
-// ============================================
-// GOAL LABELS (Used in Helpers)
+// GOAL LABELS (human-readable)
 // ============================================
 export const GOAL_LABELS = {
-  'maintain': {
+  maintain: {
     label: 'Maintain Weight',
-    description: 'Keep current weight',
+    description: 'Maintain current weight',
     icon: '⚖️',
-    color: COLORS.info.main
+    color: COLORS.info.main,
   },
-  'cut_moderate': {
+  cut_moderate: {
     label: 'Moderate Cut',
-    description: '~15% Calorie Deficit',
+    description: '15% calorie deficit',
     icon: '📉',
-    color: COLORS.primary[500]
+    color: COLORS.primary[500],
   },
-  'cut_aggressive': {
+  cut_aggressive: {
     label: 'Aggressive Cut',
-    description: '~25% Calorie Deficit',
-    icon: '🔥',
-    color: COLORS.accent[500]
+    description: '25% calorie deficit',
+    icon: '⚡',
+    color: COLORS.error.main,
   },
-  'bulk_lean': {
+  bulk_lean: {
     label: 'Lean Bulk',
-    description: '~15% Calorie Surplus',
-    icon: '💪',
-    color: COLORS.success.main
+    description: '15% calorie surplus',
+    icon: '📈',
+    color: COLORS.success.main,
   },
-  'bulk_aggressive': {
+  bulk_aggressive: {
     label: 'Aggressive Bulk',
-    description: '~25% Calorie Surplus',
-    icon: '🚀',
-    color: COLORS.warning.main
-  }
+    description: '25% calorie surplus',
+    icon: '💪',
+    color: COLORS.success.dark,
+  },
 };
 
 // ============================================
-// ACTIVITY LABELS (Used in Helpers)
+// ACTIVITY LEVEL LABELS
 // ============================================
 export const ACTIVITY_LABELS = {
-  'sedentary': {
+  sedentary: {
     label: 'Sedentary',
-    description: 'Little or no exercise',
-    icon: '🪑'
+    description: 'Little to no exercise',
+    icon: '🛋️',
   },
-  'light': {
+  light: {
     label: 'Lightly Active',
-    description: 'Exercise 1-3 days/week',
-    icon: '🚶'
+    description: 'Light exercise 1-3 days/week',
+    icon: '🚶',
   },
-  'moderate': {
+  moderate: {
     label: 'Moderately Active',
-    description: 'Exercise 3-5 days/week',
-    icon: '🏃'
+    description: 'Moderate exercise 3-5 days/week',
+    icon: '🏃',
   },
-  'active': {
-    label: 'Active',
-    description: 'Exercise 6-7 days/week',
-    icon: '🏋️'
-  },
-  'veryActive': {
+  active: {
     label: 'Very Active',
-    description: 'Physical job or 2x training',
-    icon: '⚡'
-  }
+    description: 'Hard exercise 6-7 days/week',
+    icon: '🏋️',
+  },
+  veryActive: {
+    label: 'Extremely Active',
+    description: 'Very hard exercise & physical job',
+    icon: '💪',
+  },
+};
+
+// Export default for convenience
+export default {
+  COLORS,
+  SPACING,
+  TYPOGRAPHY,
+  SHADOWS,
+  RADIUS,
+  TRANSITIONS,
+  BREAKPOINTS,
+  Z_INDEX,
+  SIZES,
+  ANIMATIONS,
+  APP_CONFIG,
+  GOAL_LABELS,
+  ACTIVITY_LABELS,
 };
