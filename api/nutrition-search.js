@@ -1,7 +1,7 @@
 /// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\\\
 // File: api/nutrition-search.js
 // Version: 3.0.0 - Optimized Pipeline with Hot-Path
-// Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → OFF → USDA
+// Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → RAPIDAPI → OFF → USDA
 // Target: Sub-second lookups, 95%+ hit rate on tiers 1-2
 
 const fetch = require('node-fetch');
