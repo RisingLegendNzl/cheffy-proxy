@@ -263,6 +263,8 @@ export const CATEGORY_ICONS = {
   condiments: '🧂',
   spreads: '🥜',
   canned: '🥫',
+  misc: '🛒',
+  default: '🛒'
 };
 
 // ============================================
@@ -273,3 +275,71 @@ export const GLASS = {
   border: 'rgba(255, 255, 255, 0.2)',
   blur: 'blur(10px)',
 };
+
+// ============================================
+// GOAL LABELS (Used in Helpers)
+// ============================================
+export const GOAL_LABELS = {
+  'maintain': {
+    label: 'Maintain Weight',
+    description: 'Keep current weight',
+    icon: '⚖️',
+    color: COLORS.info.main
+  },
+  'cut_moderate': {
+    label: 'Moderate Cut',
+    description: '~15% Calorie Deficit',
+    icon: '📉',
+    color: COLORS.primary[500]
+  },
+  'cut_aggressive': {
+    label: 'Aggressive Cut',
+    description: '~25% Calorie Deficit',
+    icon: '🔥',
+    color: COLORS.accent[500]
+  },
+  'bulk_lean': {
+    label: 'Lean Bulk',
+    description: '~15% Calorie Surplus',
+    icon: '💪',
+    color: COLORS.success.main
+  },
+  'bulk_aggressive': {
+    label: 'Aggressive Bulk',
+    description: '~25% Calorie Surplus',
+    icon: '🚀',
+    color: COLORS.warning.main
+  }
+};
+
+// ============================================
+// ACTIVITY LABELS (Used in Helpers)
+// ============================================
+export const ACTIVITY_LABELS = {
+  'sedentary': {
+    label: 'Sedentary',
+    description: 'Little or no exercise',
+    icon: '🪑'
+  },
+  'light': {
+    label: 'Lightly Active',
+    description: 'Exercise 1-3 days/week',
+    icon: '🚶'
+  },
+  'moderate': {
+    label: 'Moderately Active',
+    description: 'Exercise 3-5 days/week',
+    icon: '🏃'
+  },
+  'active': {
+    label: 'Active',
+    description: 'Exercise 6-7 days/week',
+    icon: '🏋️'
+  },
+  'veryActive': {
+    label: 'Very Active',
+    description: 'Physical job or 2x training',
+    icon: '⚡'
+  }
+};
+
