@@ -5,6 +5,7 @@ import { COLORS } from '../constants';
 import HeroSection from '../components/landing/HeroSection';
 import FeaturesSection from '../components/landing/FeaturesSection';
 import HowItWorksSection from '../components/landing/HowItWorksSection';
+import PricingSection from '../components/landing/PricingSection'; // <-- 1. Import new component
 import TestimonialsSection from '../components/landing/TestimonialsSection';
 import CTASection from '../components/landing/CTASection';
 import Footer from '../components/landing/Footer';
@@ -89,6 +90,7 @@ const LandingPage = ({ onSignUp, onSignIn, authLoading = false }) => {
         <HeroSection onGetStarted={handleGetStarted} onWatchDemo={handleWatchDemo} />
         <FeaturesSection />
         <HowItWorksSection />
+        <PricingSection onGetStarted={handleGetStarted} /> {/* <-- 2. Add component here */}
         <TestimonialsSection />
         <CTASection onGetStarted={handleGetStarted} onScheduleDemo={handleWatchDemo} />
       </main>
@@ -137,3 +139,4 @@ const LandingPage = ({ onSignUp, onSignIn, authLoading = false }) => {
 };
 
 export default LandingPage;
+
