@@ -1,5 +1,6 @@
 // web/src/hooks/useResponsive.js
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef }
+from 'react';
 import { BREAKPOINTS } from '../constants';
 
 /**
@@ -84,27 +85,58 @@ export const useScrollPosition = () => {
 
 /**
  * Custom hook for detecting if element is in viewport
+ *
+ * @param {React.RefObject} ref - The ref of the element to observe
+ * @param {object} options - IntersectionObserver options (e.g., threshold, rootMargin)
+ * @param {boolean} options.triggerOnce - If true, stops observing after in view
+ * @param {number} options.threshold - Percentage of element in view to trigger
+ * @returns {boolean} - True if element is in view
  */
-export const useInView = (ref, options = {}) => {
+export const useInView = (ref, options = { triggerOnce: true, threshold: 0.1 }) => {
   const [isInView, setIsInView] = useState(false);
+  const [hasTriggered, setHasTriggered] = useState(false);
 
   useEffect(() => {
-    if (!ref.current) return;
+    // Ensure ref.current is valid
+    const element = ref.current;
+    if (!element) return;
 
-    const observer = new IntersectionObserver(([entry]) => {
-      setIsInView(entry.isIntersecting);
-    }, options);
+    // Don't run observer if it has already triggered and triggerOnce is true
+    if (hasTriggered && options.triggerOnce) return;
 
-    observer.observe(ref.current);
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsInView(true);
+          if (options.triggerOnce) {
+            setHasTriggered(true);
+            // Stop observing
+            observer.unobserve(element);
+          }
+        } else {
+          // Only set to false if not triggerOnce
+          if (!options.triggerOnce) {
+            setIsInView(false);
+          }
+        }
+      },
+      {
+        threshold: options.threshold,
+        rootMargin: options.rootMargin,
+      }
+    );
+
+    observer.observe(element);
 
     return () => {
-      if (ref.current) {
-        observer.unobserve(ref.current);
+      if (element) {
+        observer.unobserve(element);
       }
     };
-  }, [ref, options]);
+  }, [ref, options, hasTriggered]); // Rerun if ref or options change
 
   return isInView;
 };
 
 export default useResponsive;
+
