@@ -1,7 +1,8 @@
 // web/src/components/landing/TestimonialsSection.jsx
-import React from 'react';
+import React, { useRef } from 'react';
 import { Star } from 'lucide-react';
 import { COLORS } from '../../constants';
+import { useInView } from '../../hooks/useResponsive'; // <-- Import useInView
 
 /**
  * Testimonials Section Component
@@ -9,6 +10,7 @@ import { COLORS } from '../../constants';
  */
 const TestimonialsSection = () => {
   const testimonials = [
+    // ... (testimonials array remains the same)
     {
       name: 'Sarah Johnson',
       role: 'Fitness Enthusiast',
@@ -32,11 +34,24 @@ const TestimonialsSection = () => {
     }
   ];
 
+  // --- Add Animation Hooks ---
+  const sectionRef = useRef(null);
+  const isInView = useInView(sectionRef, { threshold: 0.1, triggerOnce: true });
+  // --- End Animation Hooks ---
+
   return (
-    <section className="py-20 md:py-32 bg-white">
+    <section
+      ref={sectionRef} // <-- Assign ref to section
+      className="py-20 md:py-32 bg-white transition-opacity duration-500"
+      style={{ opacity: isInView ? 1 : 0 }} // <-- Fade in section
+    >
       <div className="max-w-7xl mx-auto px-4 md:px-8">
         {/* Section Header */}
-        <div className="text-center mb-16">
+        <div
+          className={`text-center mb-16 ${
+            isInView ? 'animate-fadeInUp' : 'opacity-0'
+          }`}
+        >
           <h2 className="text-4xl md:text-5xl font-bold mb-4 font-poppins">
             <span style={{ color: COLORS.gray[900] }}>Loved by</span>
             <br />
@@ -57,9 +72,18 @@ const TestimonialsSection = () => {
           {testimonials.map((testimonial, index) => (
             <div
               key={index}
-              className="bg-white p-8 rounded-2xl border-2 hover:shadow-xl transition-all"
+              /*
+                ADD:
+                - stagger-item class for animation
+                - Opacity 0 to hide before animation
+                - isInView check to trigger animation
+              */
+              className={`bg-white p-8 rounded-2xl border-2 hover:shadow-xl transition-all ${
+                isInView ? 'stagger-item' : 'opacity-0'
+              }`}
               style={{ 
-                borderColor: COLORS.gray[200]
+                borderColor: COLORS.gray[200],
+                animationDelay: `${index * 100}ms` // <-- Stagger delay
               }}
             >
               {/* Star Rating */}
@@ -120,3 +144,4 @@ const TestimonialsSection = () => {
 };
 
 export default TestimonialsSection;
+
