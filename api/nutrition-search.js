@@ -1,4 +1,4 @@
-/// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\
+/// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\\\
 // File: api/nutrition-search.js
 // Version: 3.0.0 - Optimized Pipeline with Hot-Path
 // Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → OFF → USDA
@@ -7,19 +7,19 @@
 const fetch = require('node-fetch');
 const { createClient } = require('@vercel/kv');
 
-// — Hot-Path Module (Ultra-fast, top 50 ingredients) —
+// --- Hot-Path Module (Ultra-fast, top 50 ingredients) ---
 const { getHotPath, isHotPath, getHotPathStats } = require('./nutrition-hotpath.js');
 
-// — Canonical Database —
+// --- Canonical Database ---
 let CANON_VERSION = '0.0.0-detached';
 let canonGet = () => null;
 let CANON_KEYS = [];
 
 try {
-  const canonModule = require('./_canon.js');
+  const canonModule = require('./_canon.js'); 
   CANON_VERSION = canonModule.CANON_VERSION;
   canonGet = canonModule.canonGet;
-
+  
   if (canonModule.CANON && typeof canonModule.CANON === 'object') {
     CANON_KEYS = Object.keys(canonModule.CANON);
     console.log(`[nutrition-search] Successfully loaded _canon.js version ${CANON_VERSION} with ${CANON_KEYS.length} items`);
@@ -28,22 +28,24 @@ try {
   console.warn('[nutrition-search] WARN: Could not load _canon.js. Canonical DB will be unavailable. Error:', e.message);
 }
 
-// — Normalization with Fuzzy Matching —
-const {
-  normalizeKey,
-  getFuzzyMatchCandidates,
-  findBestFuzzyMatch
+// --- Normalization with Fuzzy Matching ---
+const { 
+  normalizeKey, 
+  getFuzzyMatchCandidates, 
+  findBestFuzzyMatch 
 } = require('../scripts/normalize.js');
 
-// ––––– ENV & CONSTANTS –––––
+// ---------- ENV & CONSTANTS ----------
 const AVOCAVO_URL = 'https://app.avocavo.app/api/v2';
 const AVOCAVO_KEY = process.env.AVOCAVO_API_KEY || '';
 const USDA_KEY    = process.env.USDA_API_KEY || '';
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '';
+const RAPIDAPI_FOOD_URL = 'https://food-calories-and-macros-api.p.rapidapi.com/food';
 
 const KV_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
 const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
-// — Cache version includes both hot-path and canon version —
+// --- Cache version includes both hot-path and canon version ---
 const CACHE_PREFIX = `nutri:v9:hot:cv:${CANON_VERSION}`; // Bumped to v9 for hot-path
 const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
@@ -52,7 +54,7 @@ const TTL_NAME_MS  = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_BAR_MS   = 1000 * 60 * 60 * 24 * 30; // 30 days
 const KJ_TO_KCAL   = 4.184;
 
-// ––––– KV + Memory cache –––––
+// ---------- KV + Memory cache ----------
 const kv = createClient({ url: KV_URL, token: KV_TOKEN });
 const kvReady = !!(KV_URL && KV_TOKEN);
 
@@ -72,56 +74,56 @@ async function cacheSet(key, val, ttl) {
   try { await kv.set(key, val, { px: ttl }); } catch {}
 }
 
-// ––––– Utilities –––––
+// ---------- Utilities ----------
 const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
-function withTimeout(promise, ms = 8000) {
-  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+function withTimeout(promise, ms = 8000) { 
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]); 
 }
 function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
 
-// ––––– Tier 1: HOT-PATH Lookup (Target: <5ms) –––––
+// ---------- Tier 1: HOT-PATH Lookup (Target: <5ms) ----------
 /**
- * - Attempts hot-path lookup for ultra-common ingredients.
- * - This is pure in-memory, no I/O.
- * - 
- * - @param {string} query - The ingredient query
- * - @param {function} log - Logger function
- * - @returns {object | null} Nutrition data or null
+ * Attempts hot-path lookup for ultra-common ingredients.
+ * This is pure in-memory, no I/O.
+ * 
+ * @param {string} query - The ingredient query
+ * @param {function} log - Logger function
+ * @returns {object | null} Nutrition data or null
  */
 function lookupHotPath(query, log = console.log) {
   if (!query) return null;
-
+  
   const startTime = Date.now();
   const normalizedKey = normalizeKey(query);
-
+  
   const result = getHotPath(normalizedKey);
   const latency = Date.now() - startTime;
-
+  
   if (result) {
     log(`[NUTRI] HOT-PATH HIT for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'HOT_PATH');
     return result;
   }
-
+  
   log(`[NUTRI] HOT-PATH MISS for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'DEBUG', 'HOT_PATH');
   return null;
 }
 
-// ––––– Tier 2: Canonical Lookup with Fuzzy Matching (Target: <50ms) –––––
+// ---------- Tier 2: Canonical Lookup with Fuzzy Matching (Target: <50ms) ----------
 /**
- * - Attempts to find nutrition data in the canonical database.
- * - Uses exact match first, then fuzzy matching variants.
- * - 
- * - @param {string} query - The ingredient query
- * - @param {function} log - Logger function
- * - @returns {object | null} Nutrition data or null
+ * Attempts to find nutrition data in the canonical database.
+ * Uses exact match first, then fuzzy matching variants.
+ * 
+ * @param {string} query - The ingredient query
+ * @param {function} log - Logger function
+ * @returns {object | null} Nutrition data or null
  */
 function lookupCanonical(query, log = console.log) {
   if (!query) return null;
-
+  
   const startTime = Date.now();
   const normalizedKey = normalizeKey(query);
-
+  
   // 1. Try exact match first
   let canonData = canonGet(normalizedKey);
   if (canonData) {
@@ -129,7 +131,7 @@ function lookupCanonical(query, log = console.log) {
     log(`[NUTRI] CANONICAL HIT (exact) for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'CANON');
     return transformCanonToOutput(canonData, normalizedKey);
   }
-
+  
   // 2. Try fuzzy match candidates
   const candidates = getFuzzyMatchCandidates(normalizedKey);
   for (let i = 1; i < candidates.length; i++) {
@@ -141,7 +143,7 @@ function lookupCanonical(query, log = console.log) {
       return transformCanonToOutput(canonData, candidate);
     }
   }
-
+  
   // 3. Try Levenshtein fuzzy matching
   if (CANON_KEYS.length > 0) {
     const fuzzyMatch = findBestFuzzyMatch(normalizedKey, CANON_KEYS, 2);
@@ -154,7 +156,7 @@ function lookupCanonical(query, log = console.log) {
       }
     }
   }
-
+  
   const latency = Date.now() - startTime;
   log(`[NUTRI] CANONICAL MISS for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'DEBUG', 'CANON');
   return null;
@@ -177,7 +179,7 @@ function transformCanonToOutput(canonData, key) {
   };
 }
 
-// ––––– USDA link helpers –––––
+// ---------- USDA link helpers ----------
 function extractFdcId(any) {
   const c = [
     any?.fdc_id, any?.fdcId, any?.fdc_id_str,
@@ -190,7 +192,7 @@ function extractFdcId(any) {
 }
 function usdaLinkFromId(id) { return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
 
-// ––––– Nutrition validation (calorie balance sanity) –––––
+// ---------- Nutrition validation (calorie balance sanity) ----------
 function accept(out) {
   const P = Number(out.protein), F = Number(out.fat), C = Number(out.carbs), K = Number(out.calories);
   if (!(K > 0 && P >= 0 && F >= 0 && C >= 0)) return false;
@@ -198,7 +200,7 @@ function accept(out) {
   return Math.abs(K - est) / Math.max(1, K) <= 0.12;
 }
 
-// ––––– Tier 3: Avocavo API –––––
+// ---------- Tier 3: Avocavo API ----------
 function pick(obj, keys) { for (const k of keys) { const v = obj && obj[k]; if (v != null) return Number(v); } return null; }
 function extractAvocavoNutrition(n, raw) {
   if (!n) return null;
@@ -253,7 +255,36 @@ function tryAvocavo(qOrB, isBarcode) {
   return isBarcode ? avocavoBarcode(qOrB) : avocavoIngredient(qOrB);
 }
 
-// ––––– Tier 4: OpenFoodFacts –––––
+// ---------- Tier 3.5: RapidAPI Food Calories ----------
+async function rapidApiFoodSearch(q) {
+  if (!RAPIDAPI_KEY) return null;
+  const key = `${CACHE_PREFIX}:rapid:${normalizeKey(q)}`;
+  const c = await cacheGet(key); if (c) return c;
+  try {
+    const res = await withTimeout(fetch(`${RAPIDAPI_FOOD_URL}?food=${encodeURIComponent(q)}`, {
+      method: 'GET',
+      headers: {
+        'X-RapidAPI-Key': RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'food-calories-and-macros-api.p.rapidapi.com'
+      }
+    }));
+    const j = await res.json().catch(() => null);
+    if (!j || !j.food) return null;
+    
+    const food = j.food;
+    const calories = toNumber(food.calories);
+    const protein = toNumber(food.protein);
+    const fat = toNumber(food.fat);
+    const carbs = toNumber(food.carbohydrates);
+    
+    if ([calories, protein, fat, carbs].some(v => v == null)) return null;
+    const out = { status: 'found', source: 'rapidapi', servingUnit: '100g', calories, protein, fat, carbs, fdcId: null, usda_link: null };
+    if (accept(out)) { await cacheSet(key, out, TTL_NAME_MS); return out; }
+  } catch {}
+  return null;
+}
+
+// ---------- Tier 4: OpenFoodFacts ----------
 async function offByBarcode(b) {
   const key = `${CACHE_PREFIX}:offb:${b}`;
   const c = await cacheGet(key); if (c) return c;
@@ -294,7 +325,7 @@ async function offByQuery(q) {
   return null;
 }
 
-// ––––– Tier 5: USDA –––––
+// ---------- Tier 5: USDA ----------
 async function usdaByQuery(q) {
   if (!USDA_KEY) return null;
   const key = `${CACHE_PREFIX}:usda:${normalizeKey(q)}`;
@@ -322,12 +353,12 @@ async function usdaByQuery(q) {
   return null;
 }
 
-// ––––– MAIN FETCH FUNCTION with Optimized Pipeline –––––
+// ---------- MAIN FETCH FUNCTION with Optimized Pipeline ----------
 async function fetchNutritionData(barcode, query, log = console.log) {
   const overallStart = Date.now();
   query = normFood(query);
-
-  // — TIER 1: HOT-PATH (Target: <5ms) —
+  
+  // --- TIER 1: HOT-PATH (Target: <5ms) ---
   if (query) {
     const hotResult = lookupHotPath(query, log);
     if (hotResult) {
@@ -337,7 +368,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     }
   }
 
-  // — TIER 2: CANONICAL (Target: <50ms) —
+  // --- TIER 2: CANONICAL (Target: <50ms) ---
   if (query) {
     const canonResult = lookupCanonical(query, log);
     if (canonResult) {
@@ -347,7 +378,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     }
   }
 
-  // — TIER 3-5: EXTERNAL APIs (Cache first) —
+  // --- TIER 3-5: EXTERNAL APIs (Cache first) ---
   const finalKey = `${CACHE_PREFIX}:final:${normalizeKey(barcode || query || '')}`;
   const cached = await cacheGet(finalKey);
   if (cached) {
@@ -355,13 +386,13 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     log(`[NUTRI] Pipeline complete (CACHE) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
     return cached;
   }
-
+  
   log(`[NUTRI] External API Cache MISS for: ${query || barcode}`, 'DEBUG', 'CACHE');
 
   // Run external APIs in parallel
   const tasks = [];
   if (barcode) tasks.push(tryAvocavo(barcode, true));
-  if (query)   tasks.push(tryAvocavo(query, false), offByQuery(query), usdaByQuery(query));
+  if (query)   tasks.push(tryAvocavo(query, false), rapidApiFoodSearch(query), offByQuery(query), usdaByQuery(query));
 
   let out = null;
   if (tasks.length) {
@@ -371,26 +402,26 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
   if (!out && barcode) out = await offByBarcode(barcode);
   if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
-
+  
   if (!out) {
-    out = {
-      status: 'not_found',
-      source: 'error',
+    out = { 
+      status: 'not_found', 
+      source: 'error', 
       reason: 'no_source_succeeded',
       searchedKey: query ? normalizeKey(query) : null,
-      usda_link: null
+      usda_link: null 
     };
   }
 
   await cacheSet(finalKey, out, TTL_FINAL_MS);
-
+  
   const totalLatency = Date.now() - overallStart;
   log(`[NUTRI] Pipeline complete (EXTERNAL) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
-
+  
   return out;
 }
 
-// ––––– HTTP handler –––––
+// ---------- HTTP handler ----------
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -410,5 +441,4 @@ module.exports = async (req, res) => {
 
 module.exports.fetchNutritionData = fetchNutritionData;
 module.exports.getHotPathStats = getHotPathStats;
-/// ========= NUTRITION-SEARCH-OPTIMIZED-END ========= \\
-
+/// ========= NUTRITION-SEARCH-OPTIMIZED-END ========= \\\\
