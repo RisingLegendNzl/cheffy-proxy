@@ -1319,7 +1319,7 @@ const App = () => {
                             className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" 
                             style={{ 
                                 paddingTop: '80px', // Offset for fixed header
-                                paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '5.5rem' : (Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight) + 'px'}`
+                                paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '6rem' : (Number.isFinite(totalLogHeight) ? totalLogHeight : minLogHeight) + 'px'}`
                             }}
                         >
                             {/* ... (omitting status messages for brevity) ... */}
