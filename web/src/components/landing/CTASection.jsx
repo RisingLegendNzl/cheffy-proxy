@@ -10,7 +10,7 @@ import { useInView } from '../../hooks/useResponsive'; // <-- Import useInView
  */
 const CTASection = ({ onGetStarted, onScheduleDemo }) => {
   const benefits = [
-    '14-day free trial, no credit card required',
+    '7-day free trial, no credit card required', // <-- Updated to 7-Day
     'Cancel anytime, no commitments',
     'Join 50,000+ happy users',
     'Personalized meal plans starting day one'
@@ -56,7 +56,7 @@ const CTASection = ({ onGetStarted, onScheduleDemo }) => {
             className="w-full sm:w-auto px-8 py-4 bg-white rounded-full font-semibold transition-all hover:shadow-xl hover:scale-105 flex items-center justify-center space-x-2"
             style={{ color: COLORS.primary[700] }}
           >
-            <span>Start Free Trial</span>
+            <span>Start 7-Day Trial</span> {/* <-- Updated to 7-Day */}
             <ArrowRight size={20} />
           </button>
 
