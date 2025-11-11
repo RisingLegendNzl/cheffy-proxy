@@ -68,7 +68,7 @@ const HeroSection = ({ onGetStarted, onWatchDemo }) => {
                 backgroundColor: COLORS.primary[600],
               }}
             >
-              <span>Start 7-Day Free Trial</span>
+              <span>Start 7-Day Free Trial</span> {/* <-- Updated to 7-Day */}
               <ArrowRight size={20} />
             </button>
 
