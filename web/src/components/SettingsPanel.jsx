@@ -1,20 +1,25 @@
 // web/src/components/SettingsPanel.jsx
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   X, 
+  User, 
   Store, 
-  Terminal,
+  Globe, 
+  Info, 
+  Shield,
+  ChevronRight,
+  Save,
+  Trash2,
   Eye,
   EyeOff,
-  Trash2,
-  Save
+  Terminal,
+  ListX
 } from 'lucide-react';
 import { COLORS, Z_INDEX, SHADOWS } from '../constants';
 import { APP_CONFIG } from '../constants';
 
 /**
  * Settings panel/modal for app preferences
- * Enhanced with mobile bottom sheet behavior
  */
 const SettingsPanel = ({ 
   isOpen, 
@@ -22,23 +27,13 @@ const SettingsPanel = ({
   currentStore = 'Woolworths',
   onStoreChange,
   onClearData,
+  onEditProfile, // Prop is still received but not used
   showOrchestratorLogs = true,
   onToggleOrchestratorLogs,
   showFailedIngredientsLogs = true,
   onToggleFailedIngredientsLogs,
 }) => {
   const [selectedStore, setSelectedStore] = useState(currentStore);
-  const [isMobile, setIsMobile] = useState(false);
-
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
 
   if (!isOpen) return null;
 
@@ -49,8 +44,16 @@ const SettingsPanel = ({
     onClose();
   };
 
+  // This function is no longer called from the UI, but kept to avoid breaking prop chain
+  const handleEditProfileClick = () => {
+    if (onEditProfile) {
+      onEditProfile();
+    }
+  };
+
   const handleClearAllData = () => {
-    console.log('Attempting to clear all data.');
+    // Replaced window.confirm with a simple console log as per instructions
+    console.log('Attempting to clear all data. (Confirmation skipped)');
     if (onClearData) {
       onClearData();
     }
@@ -66,49 +69,20 @@ const SettingsPanel = ({
         onClick={onClose}
       />
 
-      {/* Panel - Bottom sheet on mobile, side panel on desktop */}
+      {/* Panel */}
       <div
-        className={`fixed bg-white shadow-2xl overflow-y-auto ${
-          isMobile 
-            ? 'bottom-0 left-0 right-0 rounded-t-3xl animate-slideUp max-h-[85vh]' 
-            : 'top-0 right-0 bottom-0 w-full md:w-96 animate-slideLeft'
-        }`}
-        style={{ 
-          zIndex: Z_INDEX.modal,
-          paddingBottom: isMobile ? 'env(safe-area-inset-bottom)' : '0',
-        }}
+        className="fixed top-0 right-0 bottom-0 w-full md:w-96 bg-white shadow-2xl overflow-y-auto animate-slideLeft"
+        style={{ zIndex: Z_INDEX.modal }}
       >
-        {/* Drag Handle (mobile only) */}
-        {isMobile && (
-          <div className="flex justify-center pt-3 pb-2">
-            <div
-              className="w-12 h-1 rounded-full"
-              style={{ backgroundColor: COLORS.gray[300] }}
-            />
-          </div>
-        )}
-
         {/* Header */}
         <div
-          className={`sticky top-0 text-white p-6 flex items-center justify-between ${
-            isMobile ? 'rounded-t-3xl' : ''
-          }`}
-          style={{ 
-            zIndex: 10,
-            background: COLORS.gradients.primary,
-          }}
+          className="sticky top-0 bg-gradient-to-r from-indigo-500 to-purple-600 text-white p-6 flex items-center justify-between"
+          style={{ zIndex: 10 }}
         >
-          <h2 
-            className="text-2xl font-bold"
-            style={{ fontFamily: 'var(--font-family-display)' }}
-          >
-            Settings
-          </h2>
+          <h2 className="text-2xl font-bold">Settings</h2>
           <button
             onClick={onClose}
             className="p-2 rounded-full hover:bg-white hover:bg-opacity-20 transition-fast"
-            style={{ minWidth: '44px', minHeight: '44px' }}
-            aria-label="Close settings"
           >
             <X size={24} />
           </button>
@@ -116,6 +90,9 @@ const SettingsPanel = ({
 
         {/* Content */}
         <div className="p-6 space-y-6">
+          
+          {/* Profile Section Removed */}
+
           {/* Preferences Section */}
           <div>
             <div className="flex items-center mb-4">
@@ -127,22 +104,16 @@ const SettingsPanel = ({
 
             {/* Default Store */}
             <div className="mb-4">
-              <label 
-                className="block text-sm font-semibold mb-2" 
-                style={{ color: COLORS.gray[700] }}
-                htmlFor="store-select"
-              >
+              <label className="block text-sm font-semibold mb-2" style={{ color: COLORS.gray[700] }}>
                 Default Store
               </label>
               <select
-                id="store-select"
                 value={selectedStore}
                 onChange={(e) => setSelectedStore(e.target.value)}
                 className="w-full p-3 border rounded-lg"
                 style={{
                   borderColor: COLORS.gray[300],
                   color: COLORS.gray[900],
-                  minHeight: '44px',
                 }}
               >
                 <option value="Woolworths">Woolworths</option>
@@ -152,20 +123,14 @@ const SettingsPanel = ({
 
             {/* Units */}
             <div className="mb-4">
-              <label 
-                className="block text-sm font-semibold mb-2" 
-                style={{ color: COLORS.gray[700] }}
-                htmlFor="units-select"
-              >
+              <label className="block text-sm font-semibold mb-2" style={{ color: COLORS.gray[700] }}>
                 Measurement Units
               </label>
               <select
-                id="units-select"
                 className="w-full p-3 border rounded-lg"
                 style={{
                   borderColor: COLORS.gray[300],
                   color: COLORS.gray[900],
-                  minHeight: '44px',
                 }}
               >
                 <option value="metric">Metric (kg, g)</option>
@@ -184,131 +149,121 @@ const SettingsPanel = ({
             </div>
 
             {/* Show Orchestrator Logs Toggle */}
-            <div 
-              className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-3 hover:bg-gray-100 transition-fast"
-              style={{ minHeight: '60px' }}
-            >
-              <div className="flex items-center flex-1">
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-3 hover:bg-gray-100 transition-fast">
+              <div className="flex items-center">
                 <Terminal size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
-                <label 
-                  className="text-sm font-semibold cursor-pointer flex-1" 
-                  style={{ color: COLORS.gray[700] }}
-                  htmlFor="orchestrator-logs"
-                >
+                <label className="text-sm font-semibold" style={{ color: COLORS.gray[700] }}>
                   Orchestrator Logs
                 </label>
               </div>
               <button
-                id="orchestrator-logs"
                 onClick={() => onToggleOrchestratorLogs && onToggleOrchestratorLogs(!showOrchestratorLogs)}
                 className="p-2 rounded-lg transition-fast"
                 style={{
                   backgroundColor: showOrchestratorLogs ? COLORS.success.light : COLORS.gray[200],
                   color: showOrchestratorLogs ? COLORS.success.dark : COLORS.gray[600],
-                  minWidth: '44px',
-                  minHeight: '44px',
                 }}
-                aria-label={`${showOrchestratorLogs ? 'Hide' : 'Show'} orchestrator logs`}
               >
-                {showOrchestratorLogs ? <Eye size={20} /> : <EyeOff size={20} />}
+                {showOrchestratorLogs ? <Eye size={18} /> : <EyeOff size={18} />}
               </button>
             </div>
 
             {/* Show Failed Ingredients Logs Toggle */}
-            <div 
-              className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-fast"
-              style={{ minHeight: '60px' }}
-            >
-              <div className="flex items-center flex-1">
-                <Terminal size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
-                <label 
-                  className="text-sm font-semibold cursor-pointer flex-1" 
-                  style={{ color: COLORS.gray[700] }}
-                  htmlFor="failed-logs"
-                >
-                  Failed Ingredients Logs
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-fast">
+              <div className="flex items-center">
+                <ListX size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
+                <label className="text-sm font-semibold" style={{ color: COLORS.gray[700] }}>
+                  Failed Ingredients Log
                 </label>
               </div>
               <button
-                id="failed-logs"
                 onClick={() => onToggleFailedIngredientsLogs && onToggleFailedIngredientsLogs(!showFailedIngredientsLogs)}
                 className="p-2 rounded-lg transition-fast"
                 style={{
                   backgroundColor: showFailedIngredientsLogs ? COLORS.success.light : COLORS.gray[200],
                   color: showFailedIngredientsLogs ? COLORS.success.dark : COLORS.gray[600],
-                  minWidth: '44px',
-                  minHeight: '44px',
                 }}
-                aria-label={`${showFailedIngredientsLogs ? 'Hide' : 'Show'} failed ingredients logs`}
               >
-                {showFailedIngredientsLogs ? <Eye size={20} /> : <EyeOff size={20} />}
+                {showFailedIngredientsLogs ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
+
+            <p className="text-xs mt-3" style={{ color: COLORS.gray[500] }}>
+              Toggle diagnostic logs on/off. These are useful for troubleshooting but can clutter the interface.
+            </p>
+          </div>
+
+          {/* App Info */}
+          <div>
+            <div className="flex items-center mb-4">
+              <Info size={20} className="mr-2" style={{ color: COLORS.primary[600] }} />
+              <h3 className="font-bold" style={{ color: COLORS.gray[900] }}>
+                About
+              </h3>
+            </div>
+            <div className="space-y-2 text-sm">
+              <p style={{ color: COLORS.gray[600] }}>
+                <strong>App Name:</strong> {APP_CONFIG.name}
+              </p>
+              <p style={{ color: COLORS.gray[600] }}>
+                <strong>Version:</strong> {APP_CONFIG.version}
+              </p>
+              <button
+                className="flex items-center text-indigo-600 hover:text-indigo-700"
+              >
+                View Privacy Policy
+                <ChevronRight size={16} className="ml-1" />
               </button>
             </div>
           </div>
 
           {/* Danger Zone */}
           <div>
-            <h3 
-              className="font-bold mb-4 flex items-center" 
-              style={{ color: COLORS.error.main }}
-            >
-              <Trash2 size={20} className="mr-2" />
-              Danger Zone
-            </h3>
-            
+            <div className="flex items-center mb-4">
+              <Trash2 size={20} className="mr-2" style={{ color: COLORS.error.main }} />
+              <h3 className="font-bold" style={{ color: COLORS.error.main }}>
+                Danger Zone
+              </h3>
+            </div>
             <button
               onClick={handleClearAllData}
-              className="w-full p-4 border-2 rounded-lg font-semibold transition-all hover-lift"
-              style={{
-                borderColor: COLORS.error.main,
-                color: COLORS.error.main,
-                backgroundColor: COLORS.error.light,
-                minHeight: '48px',
-              }}
+              className="w-full p-4 bg-red-50 border-2 border-red-200 rounded-lg hover:bg-red-100 transition-fast"
+              style={{ color: COLORS.error.main }}
             >
+              <Trash2 size={20} className="inline mr-2" />
               Clear All Data
             </button>
           </div>
+        </div>
 
-          {/* Save Button */}
+        {/* Footer Actions */}
+        <div
+          className="sticky bottom-0 bg-white border-t p-6 flex space-x-3"
+          style={{ borderColor: COLORS.gray[200] }}
+        >
           <button
-            onClick={handleSave}
-            className="w-full p-4 rounded-lg font-semibold text-white transition-all hover-lift"
+            onClick={onClose}
+            className="flex-1 py-3 rounded-lg font-semibold border transition-fast"
             style={{
-              background: COLORS.gradients.primary,
-              boxShadow: SHADOWS.md,
-              minHeight: '48px',
+              borderColor: COLORS.gray[300],
+              color: COLORS.gray[700],
             }}
           >
-            <Save size={20} className="inline mr-2" />
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="flex-1 py-3 rounded-lg font-semibold text-white hover-lift transition-spring"
+            style={{ backgroundColor: COLORS.primary[500] }}
+          >
+            <Save size={18} className="inline mr-2" />
             Save Changes
           </button>
-
-          {/* App Version */}
-          <div className="text-center pt-4 border-t" style={{ borderColor: COLORS.gray[200] }}>
-            <p className="text-xs" style={{ color: COLORS.gray[400] }}>
-              {APP_CONFIG.name} v{APP_CONFIG.version}
-            </p>
-          </div>
         </div>
       </div>
-
-      {/* Slide up animation for mobile */}
-      <style jsx>{`
-        @keyframes slideUp {
-          from {
-            transform: translateY(100%);
-          }
-          to {
-            transform: translateY(0);
-          }
-        }
-        .animate-slideUp {
-          animation: slideUp 300ms ease-out;
-        }
-      `}</style>
     </>
   );
 };
 
 export default SettingsPanel;
+
