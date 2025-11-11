@@ -1,13 +1,12 @@
 // web/src/components/MealCard.jsx
-import React, { useState } from 'react';
-import { CheckCircle, Clock, ChefHat, Flame, Eye, Circle } from 'lucide-react';
-import { COLORS, SHADOWS } from '../constants';
+import React from 'react';
+import { CheckCircle, Clock, ChefHat, Flame, Heart, Eye } from 'lucide-react';
+import { COLORS, SPACING, SHADOWS } from '../constants';
 import { formatCalories, formatGrams } from '../helpers';
-import useReducedMotion from '../hooks/useReducedMotion';
 
 /**
- * Enhanced meal card component with hover states and gradient overlays
- * Features: image thumbnails, floating badges, smooth transitions
+ * Enhanced meal card component with better visuals and interactions
+ * Extracted from MealPlanDisplay for reusability
  */
 const MealCard = ({
   meal,
@@ -17,15 +16,12 @@ const MealCard = ({
   showNutrition = true,
   nutritionalTargets = {},
 }) => {
-  const [isHovered, setIsHovered] = useState(false);
-  const prefersReducedMotion = useReducedMotion();
-
   if (!meal || typeof meal !== 'object') return null;
 
   const mealName = meal.name || 'Unnamed Meal';
   const mealDesc = meal.description || 'No description available.';
   const mealType = meal.type || 'Meal';
-  const prepTime = meal.prepTime || '15 min';
+  const prepTime = meal.prepTime || '15 min'; // TODO: Add to meal data
 
   const macros = {
     calories: Math.round(meal.subtotal_kcal || 0),
@@ -33,6 +29,18 @@ const MealCard = ({
     fat: Math.round(meal.subtotal_fat || 0),
     carbs: Math.round(meal.subtotal_carbs || 0),
   };
+
+  // Calculate percentage of daily target
+  const percentOfDaily = {
+    cal: nutritionalTargets.calories > 0
+      ? Math.round((macros.calories / nutritionalTargets.calories) * 100)
+      : 0,
+    protein: nutritionalTargets.protein > 0
+      ? Math.round((macros.protein / nutritionalTargets.protein) * 100)
+      : 0,
+  };
+
+  const isHighProtein = percentOfDaily.protein >= 30;
 
   // Meal type badge colors
   const getMealTypeBadge = () => {
@@ -50,97 +58,75 @@ const MealCard = ({
 
   return (
     <div
-      className="rounded-2xl overflow-hidden transition-all duration-300 cursor-pointer group"
+      className={`rounded-xl overflow-hidden transition-all duration-300 cursor-pointer group ${
+        isEaten ? 'opacity-60' : 'hover-lift'
+      }`}
       style={{
         backgroundColor: '#ffffff',
-        border: `2px solid ${isEaten ? COLORS.success.main : COLORS.gray[200]}`,
-        boxShadow: isHovered ? SHADOWS.lg : SHADOWS.sm,
-        transform: isHovered && !prefersReducedMotion ? 'translateY(-4px)' : 'translateY(0)',
-        opacity: isEaten ? 0.7 : 1,
+        border: `2px solid ${isEaten ? COLORS.success.main : COLORS.primary[200]}`,
+        boxShadow: SHADOWS.md,
       }}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      onClick={onViewRecipe}
+      onClick={() => onViewRecipe && onViewRecipe(meal)}
     >
-      {/* Image Thumbnail with Gradient Overlay */}
-      <div className="relative h-48 bg-gradient-to-br from-indigo-100 to-purple-100 overflow-hidden">
-        {/* Placeholder gradient background */}
-        <div 
-          className="absolute inset-0"
-          style={{
-            background: `linear-gradient(135deg, ${COLORS.primary[100]} 0%, ${COLORS.accent[100]} 100%)`,
-          }}
-        />
-        
-        {/* Icon overlay */}
-        <div className="absolute inset-0 flex items-center justify-center">
-          <ChefHat 
-            size={64} 
-            style={{ color: COLORS.primary[300], opacity: 0.4 }} 
-          />
+      {/* Header with Image Placeholder */}
+      <div
+        className="relative h-32 overflow-hidden"
+        style={{
+          background: `linear-gradient(135deg, ${COLORS.primary[400]} 0%, ${COLORS.secondary[500]} 100%)`,
+        }}
+      >
+        {/* Decorative Pattern Overlay */}
+        <div className="absolute inset-0 opacity-10">
+          <div className="absolute top-4 left-4">
+            <ChefHat size={60} className="text-white" />
+          </div>
+          <div className="absolute bottom-4 right-4">
+            <ChefHat size={40} className="text-white" />
+          </div>
         </div>
 
-        {/* Gradient overlay on hover */}
+        {/* Meal Type Badge */}
         <div
-          className="absolute inset-0 transition-opacity duration-300"
+          className="absolute top-3 left-3 px-3 py-1 rounded-full text-xs font-bold flex items-center"
           style={{
-            background: 'linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.6) 100%)',
-            opacity: isHovered ? 1 : 0,
+            backgroundColor: badge.bg,
+            color: badge.text,
           }}
-        />
+        >
+          <span className="mr-1">{badge.icon}</span>
+          {mealType.toUpperCase()}
+        </div>
 
-        {/* Floating badges */}
-        <div className="absolute top-3 left-3 flex space-x-2">
-          {/* Meal type badge */}
-          <span
-            className="px-3 py-1 rounded-full text-xs font-semibold flex items-center space-x-1"
+        {/* High Protein Badge */}
+        {isHighProtein && (
+          <div
+            className="absolute top-3 right-3 px-3 py-1 rounded-full text-xs font-bold"
             style={{
-              backgroundColor: badge.bg,
-              color: badge.text,
+              backgroundColor: COLORS.success.main,
+              color: '#ffffff',
             }}
           >
-            <span>{badge.icon}</span>
-            <span>{mealType}</span>
-          </span>
-        </div>
-
-        {/* Eaten checkmark */}
-        {isEaten && (
-          <div className="absolute top-3 right-3">
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: COLORS.success.main }}
-            >
-              <CheckCircle size={20} className="text-white" />
-            </div>
+            💪 High Protein
           </div>
         )}
 
-        {/* View Recipe button on hover */}
-        {isHovered && (
-          <button
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 px-4 py-2 bg-white rounded-lg flex items-center space-x-2 animate-fadeInUp shadow-lg"
-            onClick={(e) => {
-              e.stopPropagation();
-              onViewRecipe && onViewRecipe();
-            }}
-            style={{ color: COLORS.primary[600] }}
+        {/* Eaten Checkmark */}
+        {isEaten && (
+          <div
+            className="absolute inset-0 flex items-center justify-center"
+            style={{ backgroundColor: 'rgba(16, 185, 129, 0.9)' }}
           >
-            <Eye size={16} />
-            <span className="font-semibold text-sm">View Recipe</span>
-          </button>
+            <CheckCircle size={48} className="text-white" />
+          </div>
         )}
       </div>
 
-      {/* Card Content */}
-      <div className="p-4">
-        {/* Meal Name */}
+      {/* Content */}
+      <div className="p-5">
+        {/* Title */}
         <h3
-          className="text-lg font-bold mb-2 line-clamp-2"
-          style={{
-            color: COLORS.gray[900],
-            fontFamily: 'var(--font-family-display)',
-          }}
+          className="text-xl font-bold mb-2 group-hover:text-indigo-600 transition-colors"
+          style={{ color: COLORS.gray[900] }}
         >
           {mealName}
         </h3>
@@ -153,76 +139,114 @@ const MealCard = ({
           {mealDesc}
         </p>
 
-        {/* Prep Time */}
-        <div className="flex items-center mb-4 text-sm" style={{ color: COLORS.gray[500] }}>
-          <Clock size={14} className="mr-1" />
-          <span>{prepTime}</span>
+        {/* Quick Stats */}
+        <div className="flex items-center space-x-4 mb-4 text-sm">
+          <div className="flex items-center" style={{ color: COLORS.error.main }}>
+            <Flame size={16} className="mr-1" />
+            <span className="font-bold">{formatCalories(macros.calories, false)}</span>
+          </div>
+          <div className="flex items-center" style={{ color: COLORS.gray[500] }}>
+            <Clock size={16} className="mr-1" />
+            <span>{prepTime}</span>
+          </div>
+          <div className="flex items-center" style={{ color: COLORS.gray[500] }}>
+            <ChefHat size={16} className="mr-1" />
+            <span>{meal.items?.length || 0} ingredients</span>
+          </div>
         </div>
 
-        {/* Macros Pills */}
+        {/* Macros Grid */}
         {showNutrition && (
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-3 gap-2 mb-4">
             <div
-              className="px-3 py-1 rounded-full flex items-center space-x-1 text-xs font-semibold"
-              style={{
-                backgroundColor: COLORS.macros.calories.light,
-                color: COLORS.macros.calories.dark,
-              }}
-            >
-              <Flame size={12} />
-              <span>{formatCalories(macros.calories)}</span>
-            </div>
-
-            <div
-              className="px-3 py-1 rounded-full flex items-center space-x-1 text-xs font-semibold"
+              className="p-3 rounded-lg text-center"
               style={{
                 backgroundColor: COLORS.macros.protein.light,
-                color: COLORS.macros.protein.dark,
+                border: `1px solid ${COLORS.macros.protein.main}`,
               }}
             >
-              <span>P:</span>
-              <span>{macros.protein}g</span>
+              <p className="text-xs font-semibold mb-1" style={{ color: COLORS.macros.protein.dark }}>
+                Protein
+              </p>
+              <p className="text-lg font-bold" style={{ color: COLORS.macros.protein.dark }}>
+                {macros.protein}g
+              </p>
+              {percentOfDaily.protein > 0 && (
+                <p className="text-xs" style={{ color: COLORS.macros.protein.dark }}>
+                  {percentOfDaily.protein}%
+                </p>
+              )}
             </div>
 
             <div
-              className="px-3 py-1 rounded-full flex items-center space-x-1 text-xs font-semibold"
+              className="p-3 rounded-lg text-center"
+              style={{
+                backgroundColor: COLORS.macros.fat.light,
+                border: `1px solid ${COLORS.macros.fat.main}`,
+              }}
+            >
+              <p className="text-xs font-semibold mb-1" style={{ color: COLORS.macros.fat.dark }}>
+                Fat
+              </p>
+              <p className="text-lg font-bold" style={{ color: COLORS.macros.fat.dark }}>
+                {macros.fat}g
+              </p>
+            </div>
+
+            <div
+              className="p-3 rounded-lg text-center"
               style={{
                 backgroundColor: COLORS.macros.carbs.light,
-                color: COLORS.macros.carbs.dark,
+                border: `1px solid ${COLORS.macros.carbs.main}`,
               }}
             >
-              <span>C:</span>
-              <span>{macros.carbs}g</span>
-            </div>
-
-            <div
-              className="px-3 py-1 rounded-full flex items-center space-x-1 text-xs font-semibold"
-              style={{
-                backgroundColor: COLORS.macros.fats.light,
-                color: COLORS.macros.fats.dark,
-              }}
-            >
-              <span>F:</span>
-              <span>{macros.fat}g</span>
+              <p className="text-xs font-semibold mb-1" style={{ color: COLORS.macros.carbs.dark }}>
+                Carbs
+              </p>
+              <p className="text-lg font-bold" style={{ color: COLORS.macros.carbs.dark }}>
+                {macros.carbs}g
+              </p>
             </div>
           </div>
         )}
 
-        {/* Mark as Eaten Button */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleEaten && onToggleEaten();
-          }}
-          className="mt-4 w-full py-2 rounded-lg font-semibold text-sm transition-all duration-200"
-          style={{
-            backgroundColor: isEaten ? COLORS.gray[100] : COLORS.success.light,
-            color: isEaten ? COLORS.gray[600] : COLORS.success.dark,
-            border: `2px solid ${isEaten ? COLORS.gray[300] : COLORS.success.main}`,
-          }}
-        >
-          {isEaten ? '✓ Eaten' : 'Mark as Eaten'}
-        </button>
+        {/* Actions */}
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleEaten && onToggleEaten();
+            }}
+            className={`flex-1 flex items-center justify-center py-2 px-4 rounded-lg font-semibold transition-all duration-200 ${
+              isEaten ? 'bg-green-600 text-white' : 'bg-gray-100 hover:bg-gray-200'
+            }`}
+            style={{
+              color: isEaten ? '#ffffff' : COLORS.gray[700],
+            }}
+          >
+            <CheckCircle size={16} className="mr-2" />
+            {isEaten ? 'Eaten' : 'Mark as Eaten'}
+          </button>
+
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onViewRecipe && onViewRecipe(meal);
+            }}
+            className="p-2 rounded-lg hover:bg-gray-100 transition-fast"
+            style={{ color: COLORS.primary[600] }}
+            aria-label="View recipe"
+          >
+            <Eye size={20} />
+          </button>
+        </div>
+
+        {/* Calorie Percentage */}
+        {percentOfDaily.cal > 0 && (
+          <p className="text-xs text-center mt-3" style={{ color: COLORS.gray[500] }}>
+            {percentOfDaily.cal}% of daily calories
+          </p>
+        )}
       </div>
     </div>
   );
