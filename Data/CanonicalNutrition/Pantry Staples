@@ -21,6 +21,23 @@
     "notes": ""
   },
   {
+    "name": "almonds",
+    "display_name": "Almonds, raw",
+    "category": "fat",
+    "state": "raw",
+    "unit": "per_100g",
+    "energy_kcal": 579,
+    "protein_g": 21.2,
+    "fat_g": 49.9,
+    "carbs_g": 21.6,
+    "fiber_g": 12.5,
+    "density_g_per_ml": null,
+    "yield_factor": null,
+    "source": "AUSNUT",
+    "confidence": "high",
+    "notes": "Generic almonds entry"
+  },
+  {
     "name": "almonds raw",
     "display_name": "Almonds, raw",
     "category": "fat",
@@ -310,6 +327,23 @@
     "notes": ""
   },
   {
+    "name": "peanut butter",
+    "display_name": "Peanut butter, smooth",
+    "category": "fat",
+    "state": "as sold",
+    "unit": "per_100g",
+    "energy_kcal": 588,
+    "protein_g": 25.8,
+    "fat_g": 50.0,
+    "carbs_g": 20.0,
+    "fiber_g": 6.0,
+    "density_g_per_ml": 1.08,
+    "yield_factor": null,
+    "source": "AUSNUT",
+    "confidence": "high",
+    "notes": "No added sugar variant"
+  },
+  {
     "name": "rolled oats",
     "display_name": "Rolled oats, dry",
     "category": "carb",
@@ -327,6 +361,23 @@
     "notes": ""
   },
   {
+    "name": "tomato paste",
+    "display_name": "Tomato paste, concentrated",
+    "category": "veg",
+    "state": "as sold",
+    "unit": "per_100g",
+    "energy_kcal": 82,
+    "protein_g": 4.3,
+    "fat_g": 0.5,
+    "carbs_g": 18.9,
+    "fiber_g": 4.1,
+    "density_g_per_ml": 1.10,
+    "yield_factor": null,
+    "source": "AUSNUT",
+    "confidence": "high",
+    "notes": "Concentrated paste, no added salt"
+  },
+  {
     "name": "white rice",
     "display_name": "Rice, white long-grain, raw",
     "category": "carb",
@@ -342,6 +393,40 @@
     "source": "AUSNUT",
     "confidence": "high",
     "notes": ""
+  },
+  {
+    "name": "wholemeal bread",
+    "display_name": "Bread, wholemeal",
+    "category": "carb",
+    "state": "as sold",
+    "unit": "per_100g",
+    "energy_kcal": 247,
+    "protein_g": 9.2,
+    "fat_g": 3.4,
+    "carbs_g": 41.3,
+    "fiber_g": 6.8,
+    "density_g_per_ml": null,
+    "yield_factor": null,
+    "source": "AUSNUT",
+    "confidence": "high",
+    "notes": "Average slice = 35g"
+  },
+  {
+    "name": "wholemeal pasta",
+    "display_name": "Pasta, wholemeal, dry",
+    "category": "carb",
+    "state": "dry",
+    "unit": "per_100g",
+    "energy_kcal": 348,
+    "protein_g": 14.6,
+    "fat_g": 2.5,
+    "carbs_g": 75.0,
+    "fiber_g": 10.7,
+    "density_g_per_ml": null,
+    "yield_factor": 2.3,
+    "source": "AUSNUT",
+    "confidence": "high",
+    "notes": "Dry-to-cooked yield 2.3×"
   }
 ]
 
