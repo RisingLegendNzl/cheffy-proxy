@@ -1,7 +1,8 @@
 // web/src/components/landing/CTASection.jsx
-import React from 'react';
+import React, { useRef } from 'react';
 import { ArrowRight, CheckCircle } from 'lucide-react';
 import { COLORS } from '../../constants';
+import { useInView } from '../../hooks/useResponsive'; // <-- Import useInView
 
 /**
  * Final CTA Section Component
@@ -15,14 +16,29 @@ const CTASection = ({ onGetStarted, onScheduleDemo }) => {
     'Personalized meal plans starting day one'
   ];
 
+  // --- Add Animation Hooks ---
+  const sectionRef = useRef(null);
+  const isInView = useInView(sectionRef, { threshold: 0.1, triggerOnce: true });
+  // --- End Animation Hooks ---
+
   return (
     <section 
+      ref={sectionRef} // <-- Assign ref to section
       className="py-20 md:py-32"
       style={{ 
         background: `linear-gradient(135deg, ${COLORS.primary[600]} 0%, ${COLORS.secondary[600]} 100%)`
       }}
     >
-      <div className="max-w-4xl mx-auto px-4 md:px-8 text-center">
+      <div
+        /*
+          ADD:
+          - transition-all, duration-700
+          - Ternary for opacity and transform based on isInView
+        */
+        className={`max-w-4xl mx-auto px-4 md:px-8 text-center transition-all duration-700 ease-out ${
+          isInView ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'
+        }`}
+      >
         {/* Headline */}
         <h2 className="text-4xl md:text-5xl font-bold text-white mb-6 font-poppins">
           Get Started Today
@@ -78,3 +94,4 @@ const CTASection = ({ onGetStarted, onScheduleDemo }) => {
 };
 
 export default CTASection;
+
