@@ -1,8 +1,9 @@
+// web/src/animations.css
 /* web/src/animations.css */
 
 /**
  * Reusable CSS Animations for Cheffy
- * Import this file in your main index.jsx or index.html
+ * Enhanced with premium wellness app aesthetics
  */
 
 /* ============================================
@@ -280,6 +281,370 @@
 }
 
 /* ============================================
+   NEW: BREATHING ANIMATION
+   ============================================ */
+
+@keyframes breathe {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+}
+
+/* ============================================
+   NEW: FORGE GLOW EFFECT
+   ============================================ */
+
+@keyframes forgeGlow {
+  0% {
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(249, 115, 22, 0.6), 0 0 60px rgba(249, 115, 22, 0.3);
+  }
+  100% {
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
+  }
+}
+
+@keyframes forgeHeatPulse {
+  0%, 100% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ============================================
+   NEW: INGREDIENT FLOAT IN
+   ============================================ */
+
+@keyframes ingredientFloatIn {
+  0% {
+    opacity: 0;
+    transform: translate(var(--start-x, 100px), var(--start-y, 100px)) scale(0.5) rotate(0deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1) rotate(360deg);
+  }
+}
+
+@keyframes ingredientSwirl {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate(10px, -10px) rotate(180deg);
+  }
+  100% {
+    transform: translate(0, 0) rotate(360deg);
+  }
+}
+
+/* ============================================
+   NEW: LATTICE FORMATION
+   ============================================ */
+
+@keyframes latticeFormation {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) rotate(-90deg);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.1) rotate(5deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes latticePulse {
+  0%, 100% {
+    stroke-opacity: 0.3;
+  }
+  50% {
+    stroke-opacity: 0.8;
+  }
+}
+
+/* ============================================
+   NEW: MEAL CARD MINT
+   ============================================ */
+
+@keyframes mealCardMint {
+  0% {
+    opacity: 0;
+    transform: scale(0.8) translateY(30px);
+    filter: brightness(2);
+  }
+  60% {
+    transform: scale(1.05) translateY(-5px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: brightness(1);
+  }
+}
+
+@keyframes mintGlow {
+  0% {
+    box-shadow: 0 0 0 rgba(16, 185, 129, 0);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(16, 185, 129, 0.6);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+/* ============================================
+   NEW: SHIMMER WASH (for eaten meals)
+   ============================================ */
+
+@keyframes shimmerWash {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+/* ============================================
+   NEW: FLIP ANIMATION
+   ============================================ */
+
+@keyframes flipIn {
+  0% {
+    transform: perspective(1000px) rotateY(90deg);
+    opacity: 0;
+  }
+  100% {
+    transform: perspective(1000px) rotateY(0deg);
+    opacity: 1;
+  }
+}
+
+@keyframes flipOut {
+  0% {
+    transform: perspective(1000px) rotateY(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(1000px) rotateY(-90deg);
+    opacity: 0;
+  }
+}
+
+/* ============================================
+   NEW: BLUEPRINT DRAWING
+   ============================================ */
+
+@keyframes blueprintDraw {
+  0% {
+    stroke-dashoffset: 1000;
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes blueprintFillIn {
+  0% {
+    fill-opacity: 0;
+  }
+  100% {
+    fill-opacity: 1;
+  }
+}
+
+/* ============================================
+   NEW: CONFETTI PARTICLES
+   ============================================ */
+
+@keyframes confettiFall {
+  0% {
+    transform: translateY(0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100vh) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+@keyframes confettiSway {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(30px);
+  }
+}
+
+/* ============================================
+   NEW: ORBITAL MOTION
+   ============================================ */
+
+@keyframes orbit {
+  from {
+    transform: rotate(0deg) translateX(var(--orbit-radius, 100px)) rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg) translateX(var(--orbit-radius, 100px)) rotate(-360deg);
+  }
+}
+
+/* ============================================
+   NEW: GARDEN GROWTH
+   ============================================ */
+
+@keyframes seedPlop {
+  0% {
+    transform: translateY(-50px) scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: translateY(5px) scale(1.2);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes stemGrow {
+  0% {
+    height: 0;
+    opacity: 0;
+  }
+  100% {
+    height: 100%;
+    opacity: 1;
+  }
+}
+
+@keyframes leafUnfurl {
+  0% {
+    transform: scale(0) rotate(-45deg);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+@keyframes flowerBloom {
+  0% {
+    transform: scale(0) rotate(-90deg);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.15) rotate(5deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+/* ============================================
+   NEW: RIPPLE EFFECT
+   ============================================ */
+
+@keyframes ripple {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+/* ============================================
+   NEW: SHELF PARALLAX
+   ============================================ */
+
+@keyframes shelfSlideForward {
+  0% {
+    transform: translateZ(0) scale(1);
+  }
+  100% {
+    transform: translateZ(50px) scale(1.05);
+  }
+}
+
+@keyframes itemOffShelf {
+  0% {
+    transform: translateY(0) rotate(0deg);
+    opacity: 1;
+  }
+  50% {
+    transform: translateY(10px) rotate(5deg);
+    opacity: 0.5;
+  }
+  100% {
+    transform: translateY(50px) rotate(0deg);
+    opacity: 0;
+  }
+}
+
+/* ============================================
+   NEW: CART SWAY
+   ============================================ */
+
+@keyframes cartSway {
+  0%, 100% {
+    transform: rotate(-2deg);
+  }
+  50% {
+    transform: rotate(2deg);
+  }
+}
+
+/* ============================================
+   NEW: FLOATING PARTICLES
+   ============================================ */
+
+@keyframes floatUp {
+  0% {
+    transform: translateY(0) translateX(0);
+    opacity: 0;
+  }
+  50% {
+    opacity: 0.6;
+  }
+  100% {
+    transform: translateY(-100px) translateX(20px);
+    opacity: 0;
+  }
+}
+
+@keyframes floatDrift {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(var(--drift-distance, 20px));
+  }
+}
+
+/* ============================================
    UTILITY CLASSES
    ============================================ */
 
@@ -386,6 +751,128 @@
   animation: wiggle 0.5s ease-in-out;
 }
 
+/* NEW: Breathing animation */
+.animate-breathe {
+  animation: breathe 4s ease-in-out infinite;
+}
+
+/* NEW: Forge effects */
+.animate-forgeGlow {
+  animation: forgeGlow 2s ease-in-out infinite;
+}
+
+.animate-forgeHeatPulse {
+  animation: forgeHeatPulse 1.5s ease-in-out infinite;
+}
+
+/* NEW: Ingredient animations */
+.animate-ingredientFloatIn {
+  animation: ingredientFloatIn 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+.animate-ingredientSwirl {
+  animation: ingredientSwirl 3s ease-in-out infinite;
+}
+
+/* NEW: Lattice */
+.animate-latticeFormation {
+  animation: latticeFormation 1s ease-out;
+}
+
+.animate-latticePulse {
+  animation: latticePulse 2s ease-in-out infinite;
+}
+
+/* NEW: Meal card */
+.animate-mealCardMint {
+  animation: mealCardMint 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+.animate-mintGlow {
+  animation: mintGlow 1s ease-out;
+}
+
+/* NEW: Shimmer wash */
+.animate-shimmerWash {
+  animation: shimmerWash 1.5s ease-out;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(16, 185, 129, 0.3) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+}
+
+/* NEW: Flip */
+.animate-flipIn {
+  animation: flipIn 0.4s ease-out;
+}
+
+.animate-flipOut {
+  animation: flipOut 0.4s ease-out;
+}
+
+/* NEW: Blueprint */
+.animate-blueprintDraw {
+  animation: blueprintDraw 2s ease-out forwards;
+}
+
+/* NEW: Confetti */
+.animate-confettiFall {
+  animation: confettiFall 3s ease-in forwards, confettiSway 1s ease-in-out infinite;
+}
+
+/* NEW: Orbit */
+.animate-orbit {
+  animation: orbit 20s linear infinite;
+}
+
+/* NEW: Garden */
+.animate-seedPlop {
+  animation: seedPlop 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+.animate-stemGrow {
+  animation: stemGrow 1.5s ease-out;
+}
+
+.animate-leafUnfurl {
+  animation: leafUnfurl 0.6s ease-out;
+}
+
+.animate-flowerBloom {
+  animation: flowerBloom 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+/* NEW: Ripple */
+.animate-ripple {
+  animation: ripple 0.6s ease-out;
+}
+
+/* NEW: Shelf */
+.animate-shelfSlideForward {
+  animation: shelfSlideForward 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+}
+
+.animate-itemOffShelf {
+  animation: itemOffShelf 0.5s ease-out forwards;
+}
+
+/* NEW: Cart */
+.animate-cartSway {
+  animation: cartSway 2s ease-in-out infinite;
+}
+
+/* NEW: Floating particles */
+.animate-floatUp {
+  animation: floatUp 8s ease-out infinite;
+}
+
+.animate-floatDrift {
+  animation: floatDrift 4s ease-in-out infinite;
+}
+
 /* ============================================
    TRANSITION UTILITIES
    ============================================ */
@@ -408,6 +895,10 @@
 
 .transition-spring {
   transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+.transition-elastic {
+  transition: all 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
 }
 
 /* ============================================
@@ -515,3 +1006,33 @@
 .stagger-item:nth-child(8) { animation-delay: 0.4s; }
 .stagger-item:nth-child(9) { animation-delay: 0.45s; }
 .stagger-item:nth-child(10) { animation-delay: 0.5s; }
+
+/* ============================================
+   REDUCED MOTION SUPPORT
+   ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  
+  .animate-breathe,
+  .animate-pulse,
+  .animate-heartbeat,
+  .animate-bounce,
+  .animate-spin,
+  .animate-spinSlow,
+  .animate-ingredientSwirl,
+  .animate-latticePulse,
+  .animate-forgeGlow,
+  .animate-forgeHeatPulse,
+  .animate-cartSway,
+  .animate-floatDrift,
+  .animate-orbit {
+    animation: none !important;
+  }
+}
