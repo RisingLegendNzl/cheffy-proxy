@@ -1,212 +1,143 @@
 // web/src/components/GenerationProgressDisplay.jsx
-import React from 'react';
-import {
-    ChefHat,
-    Target,
-    CheckCircle,
-    AlertTriangle,
-    ShoppingBag,
-    BookOpen,
-    Flame,
-    Download,
-    Terminal,
-    Loader,
-    Circle, // Used for pending steps
-    Grid,   // Fallback for finalizing
-} from 'lucide-react';
-
-// --- Thematic "Fun Name" Mapping ---
-// We map the *technical log tag* to a fun name for the live-ticker
-const agentMap = {
-    'LLM': { name: "Creative Chef", Icon: ChefHat, color: "text-purple-600" },
-    'LLM_PROMPT': { name: "Creative Chef", Icon: ChefHat, color: "text-purple-600" },
-    'LLM_CHEF': { name: "Creative Chef", Icon: ChefHat, color: "text-purple-600" },
-    'MARKET_RUN': { name: "Smart Shopper", Icon: ShoppingBag, color: "text-orange-600" },
-    'CHECKLIST': { name: "Smart Shopper", Icon: ShoppingBag, color: "text-orange-600" },
-    'CALC': { name: "Nutritionist", Icon: Flame, color: "text-red-600" },
-    'CANON': { name: "Librarian", Icon: BookOpen, color: "text-green-700" },
-    'DATA': { name: "Librarian", Icon: BookOpen, color: "text-green-700" },
-    'HTTP': { name: "Data Scout", Icon: Download, color: "text-blue-600" },
-    'SWR_REFRESH': { name: "Data Scout", Icon: Download, color: "text-blue-600" },
-    'SYSTEM': { name: "Orchestrator", Icon: Terminal, color: "text-gray-700" },
-    'PHASE': { name: "Orchestrator", Icon: Terminal, color: "text-gray-700" },
-    'TARGETS': { name: "Targeting", Icon: Target, color: "text-gray-700" },
-    'default': { name: "AI Agent", Icon: Loader, color: "text-indigo-600" }
-};
-
-// --- Stepper Definition ---
-// This defines the steps, their keys, and their default icons (for pending state)
-const STEPS = [
-    {
-        key: 'targets',
-        title: 'Calculating Targets',
-        description: 'Assessing your profile and goals.',
-        Icon: Target,
-    },
-    {
-        key: 'planning',
-        title: 'Designing Your Plan',
-        description: 'The AI Chef is creating your daily meals.',
-        Icon: ChefHat,
-    },
-    {
-        key: 'market',
-        title: 'Running the Market',
-        description: 'Intelligently fetching real-time prices.',
-        Icon: ShoppingBag,
-    },
-    {
-        key: 'finalizing',
-        title: 'Calculating Nutrition & Finalizing',
-        description: 'Assembling the dashboard and data.',
-        Icon: Grid, // Using Grid as the "finalizing" icon
-    },
-];
+import React, { useState, useEffect } from ‘react’;
+import { COLORS, STAGE_TIMING } from ‘../constants’;
+import ForgeStageOne from ‘./generation/ForgeStageOne’;
+import ForgeStageTwo from ‘./generation/ForgeStageTwo’;
+import ForgeStageThree from ‘./generation/ForgeStageThree’;
+import HeatGauge from ‘./generation/HeatGauge’;
+import { prefersReducedMotion } from ‘../utils/animationHelpers’;
 
 /**
- * Renders a single step in the "Live Stepper".
- * @param {object} step - The step definition object from STEPS.
- * @param {string} state - 'complete', 'active', or 'pending'.
- * @param {object} agent - The "fun name" and icon for the active agent.
- * @param {string} liveMessage - The raw log message for the ticker.
- */
-const Step = ({ step, state, agent, liveMessage }) => {
-    let IconComponent;
-    let iconColor;
-    let titleColor = 'text-gray-500';
-    let descriptionColor = 'text-gray-400';
-    let isSpinning = false;
 
-    switch (state) {
-        case 'complete':
-            IconComponent = CheckCircle;
-            iconColor = 'text-green-500 bg-green-100';
-            titleColor = 'text-gray-900';
-            descriptionColor = 'text-gray-500';
-            break;
-        case 'active':
-            IconComponent = Loader; // Always show Loader for the active step
-            iconColor = 'text-indigo-600 bg-indigo-100';
-            titleColor = 'text-indigo-700 font-bold';
-            descriptionColor = 'text-indigo-700'; // Will be replaced by live ticker
-            isSpinning = true;
-            break;
-        case 'pending':
-        default:
-            IconComponent = step.Icon || Circle;
-            iconColor = 'text-gray-400 bg-gray-100';
-            break;
-    }
+- Generation Progress Display - Nutrition Forge Concept
+- Transforms meal generation into a crafting experience
+- Three stages: Gathering → Calculating → Optimizing
+- Background shifts from cool blue → warm amber → vibrant green
+  */
+  const GenerationProgressDisplay = ({ activeStepKey, errorMsg, latestLog }) => {
+  const [currentStage, setCurrentStage] = useState(1);
+  const [stageProgress, setStageProgress] = useState(0);
 
-    return (
-        <div className="flex space-x-4">
-            {/* Icon */}
-            <div className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center ${iconColor} transition-all duration-300`}>
-                <IconComponent className={`w-6 h-6 ${isSpinning ? 'animate-spin' : ''}`} />
-            </div>
-            {/* Text Content */}
-            <div className="flex-1 pt-1 min-w-0"> {/* Added min-w-0 to allow truncation */}
-                <h4 className={`text-lg font-semibold ${titleColor} transition-colors duration-300`}>{step.title}</h4>
-                
-                {/* Show live-ticker if active, otherwise show default description */}
-                {state === 'active' && agent && liveMessage ? (
-                    <div className="mt-1">
-                        <p className={`text-sm font-bold ${agent.color}`}>
-                            Agent: {agent.name}
-                        </p>
-                        <p className="text-sm text-gray-600 font-mono truncate" title={liveMessage}>
-                            {liveMessage}
-                        </p>
-                    </div>
-                ) : (
-                    <p className={`text-sm ${descriptionColor} transition-colors duration-300`}>{step.description}</p>
-                )}
-            </div>
-        </div>
-    );
+// Map step keys to stages
+useEffect(() => {
+if (!activeStepKey) {
+setCurrentStage(1);
+setStageProgress(0);
+return;
+}
+
+```
+const stepToStage = {
+  'step_targets': { stage: 1, progress: 20 },
+  'step_planning': { stage: 2, progress: 50 },
+  'step_complete': { stage: 3, progress: 100 },
 };
 
-/**
- * A "live-stepper" dashboard for generation progress, inspired by the user's image.
- * This component is now "smart" and derives its state from the activeStepKey prop.
- */
-const GenerationProgressDisplay = ({
-    activeStepKey, // 'targets', 'planning', 'market', 'finalizing', 'complete', 'error'
-    errorMsg,
-    latestLog,
-}) => {
-    // 1. Determine overall state from the activeStepKey
-    const isError = activeStepKey === 'error';
-    const isComplete = activeStepKey === 'complete';
-    const isRunning = !isError && !isComplete;
+const mapping = stepToStage[activeStepKey];
+if (mapping) {
+  setCurrentStage(mapping.stage);
+  setStageProgress(mapping.progress);
+}
+```
 
-    // 2. Find the index of the active step
-    const activeStepIndex = STEPS.findIndex(s => s.key === activeStepKey);
+}, [activeStepKey]);
 
-    // 3. Determine live-ticker content
-    const agent = agentMap[latestLog?.tag || 'default'] || agentMap['default'];
-    const liveMessage = latestLog?.message || (activeStepKey ? `${activeStepKey}...` : 'Initializing...');
+// Get background gradient based on stage
+const getBackgroundGradient = () => {
+if (currentStage === 1) {
+return `linear-gradient(135deg, ${COLORS.forge.cool} 0%, #7c3aed 100%)`;
+}
+if (currentStage === 2) {
+return `linear-gradient(135deg, #7c3aed 0%, ${COLORS.forge.warm} 100%)`;
+}
+return `linear-gradient(135deg, ${COLORS.forge.warm} 0%, ${COLORS.forge.hot} 100%)`;
+};
 
-    return (
-        <div className="w-full p-6 bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl shadow-lg border border-indigo-100 overflow-hidden">
-            
-            {/* Title */}
-            <h3 className="text-2xl font-bold text-indigo-800 text-center mb-6 font-poppins">
-                {isError ? "An Error Occurred" : isComplete ? "Plan Generation Complete!" : "Your Personal Chef is Working..."}
-            </h3>
+// Get stage title
+const getStageTitle = () => {
+if (currentStage === 1) return ‘Gathering Ingredients’;
+if (currentStage === 2) return ‘Calculating Nutrition’;
+return ‘Optimizing Your Plan’;
+};
 
-            {/* State 1: ERROR */}
-            {isError && (
-                <div className="flex flex-col items-center text-center p-4">
-                    <div className="w-16 h-16 rounded-full flex items-center justify-center bg-red-100">
-                        <AlertTriangle className="w-8 h-8 text-red-500" />
-                    </div>
-                    <p className="text-gray-700 mt-4 font-mono text-sm break-words">
-                        {errorMsg || "An unknown error occurred. Please check the logs."}
-                    </p>
-                </div>
-            )}
+// Get stage description
+const getStageDescription = () => {
+if (currentStage === 1) return ‘Assembling the finest ingredients for your goals’;
+if (currentStage === 2) return ‘Balancing macros and optimizing combinations’;
+return ‘Crafting your personalized meal plan’;
+};
 
-            {/* State 2: COMPLETE */}
-            {isComplete && (
-                <div className="flex flex-col items-center text-center p-4">
-                    <div className="w-16 h-16 rounded-full flex items-center justify-center bg-green-100">
-                        <CheckCircle className="w-8 h-8 text-green-500" />
-                    </div>
-                    <p className="text-gray-600 mt-4">Your plan is ready. You can now view your meals and ingredients.</p>
-                </div>
-            )}
+if (errorMsg) {
+return (
+<div className="p-6 rounded-xl bg-red-50 border-2 border-red-200 animate-shake">
+<div className="flex items-start space-x-3">
+<div className="flex-shrink-0 w-8 h-8 rounded-full bg-red-500 flex items-center justify-center">
+<span className="text-white font-bold">!</span>
+</div>
+<div className="flex-1">
+<h3 className="text-lg font-bold text-red-900 mb-2">Generation Failed</h3>
+<p className="text-sm text-red-700">{errorMsg}</p>
+</div>
+</div>
+</div>
+);
+}
 
-            {/* State 3: RUNNING (The Live Stepper) */}
-            {isRunning && (
-                <div className="space-y-6">
-                    {STEPS.map((step, index) => {
-                        let state = 'pending';
-                        if (index < activeStepIndex) {
-                            state = 'complete';
-                        } else if (index === activeStepIndex) {
-                            state = 'active';
-                        }
-                        
-                        return (
-                            <Step
-                                key={step.key}
-                                step={step}
-                                state={state}
-                                agent={agent}
-                                liveMessage={liveMessage}
-                            />
-                        );
-                    })}
-                    <p className="text-center text-sm text-indigo-500 font-medium pt-4 border-t border-indigo-100">
-                        Please wait, this can take up to a minute...
-                    </p>
-                </div>
-            )}
-        </div>
-    );
+return (
+<div
+className=“relative rounded-2xl overflow-hidden transition-all duration-1000”
+style={{
+background: getBackgroundGradient(),
+minHeight: ‘400px’,
+}}
+>
+{/* Content Container */}
+<div className="relative z-10 p-8">
+{/* Header */}
+<div className="text-center mb-8 animate-fadeIn">
+<h2 className="text-3xl font-bold text-white mb-2">
+{getStageTitle()}
+</h2>
+<p className="text-white opacity-90 text-lg">
+{getStageDescription()}
+</p>
+</div>
+
+```
+    {/* Heat Gauge */}
+    <div className="mb-8">
+      <HeatGauge progress={stageProgress} currentStage={currentStage} />
+    </div>
+
+    {/* Stage Visualizations */}
+    <div className="relative" style={{ minHeight: '200px' }}>
+      {currentStage === 1 && <ForgeStageOne />}
+      {currentStage === 2 && <ForgeStageTwo />}
+      {currentStage === 3 && <ForgeStageThree />}
+    </div>
+
+    {/* Latest Log (Optional) */}
+    {latestLog && (
+      <div className="mt-6 text-center animate-fadeIn">
+        <p className="text-sm text-white opacity-75 font-mono">
+          {latestLog}
+        </p>
+      </div>
+    )}
+  </div>
+
+  {/* Decorative Overlay */}
+  <div
+    className="absolute inset-0 opacity-10 pointer-events-none"
+    style={{
+      backgroundImage: `radial-gradient(circle at 50% 50%, white 1px, transparent 1px)`,
+      backgroundSize: '30px 30px',
+    }}
+  />
+</div>
+```
+
+);
 };
 
 export default GenerationProgressDisplay;
-
-
