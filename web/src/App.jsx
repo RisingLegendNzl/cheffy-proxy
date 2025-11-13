@@ -165,9 +165,16 @@ const App = () => {
         setShowLandingPage(true);
     }, [auth]);
 
-    const handleEditProfile = useCallback(() => {
-        setContentView('profile');
-    }, []);
+    // --- Edit Profile Handler (FIXED) ---
+const handleEditProfile = useCallback(() => {
+    setIsSettingsOpen(false);     // ✅ Close settings panel
+    setContentView('profile');     // ✅ Show profile view
+    
+    // Optional: scroll to top
+    setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 100);
+}, []);
 
     return (
         <>
