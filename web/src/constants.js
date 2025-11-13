@@ -1,13 +1,12 @@
 // web/src/constants.js
-// web/src/constants.js
 
 /**
- * Centralized design system constants for Cheffy
- * Enhanced with premium wellness app aesthetics
+ * Design System Constants for Cheffy
+ * Centralized design tokens for consistency across the app
  */
 
 // ============================================
-// COLORS
+// COLOR PALETTE
 // ============================================
 export const COLORS = {
   // Primary Brand Colors
@@ -17,14 +16,14 @@ export const COLORS = {
     200: '#c7d2fe',
     300: '#a5b4fc',
     400: '#818cf8',
-    500: '#6366f1',
+    500: '#6366f1',  // Main brand color
     600: '#4f46e5',
     700: '#4338ca',
     800: '#3730a3',
     900: '#312e81',
   },
-
-  // Secondary Brand Colors
+  
+  // Secondary Colors (Purple accent)
   secondary: {
     50: '#faf5ff',
     100: '#f3e8ff',
@@ -37,44 +36,12 @@ export const COLORS = {
     800: '#6b21a8',
     900: '#581c87',
   },
-
-  // Macro-specific Colors (Enhanced with gradients)
-  macros: {
-    protein: {
-      light: '#dbeafe',
-      main: '#3b82f6',
-      dark: '#1e40af',
-      gradient: 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
-      gradientColors: ['#3b82f6', '#1d4ed8'],
-    },
-    fat: {
-      light: '#fce7f3',
-      main: '#ec4899',
-      dark: '#be185d',
-      gradient: 'linear-gradient(135deg, #ec4899 0%, #be185d 100%)',
-      gradientColors: ['#ec4899', '#be185d'],
-    },
-    carbs: {
-      light: '#fef3c7',
-      main: '#f59e0b',
-      dark: '#b45309',
-      gradient: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
-      gradientColors: ['#f59e0b', '#d97706'],
-    },
-    calories: {
-      light: '#fee2e2',
-      main: '#ef4444',
-      dark: '#b91c1c',
-      gradient: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-      gradientColors: ['#ef4444', '#dc2626'],
-    },
-  },
-
+  
   // Semantic Colors
   success: {
     light: '#d1fae5',
     main: '#10b981',
-    dark: '#047857',
+    dark: '#059669',
   },
   warning: {
     light: '#fef3c7',
@@ -89,10 +56,10 @@ export const COLORS = {
   info: {
     light: '#dbeafe',
     main: '#3b82f6',
-    dark: '#1e40af',
+    dark: '#2563eb',
   },
-
-  // Grayscale
+  
+  // Neutral Grays
   gray: {
     50: '#f9fafb',
     100: '#f3f4f6',
@@ -105,60 +72,40 @@ export const COLORS = {
     800: '#1f2937',
     900: '#111827',
   },
-
+  
+  // Macro Colors (for nutrition displays)
+  macros: {
+    protein: {
+      light: '#d1fae5',
+      main: '#10b981',
+      dark: '#059669',
+      icon: '💪',
+    },
+    fat: {
+      light: '#fef3c7',
+      main: '#f59e0b',
+      dark: '#d97706',
+      icon: '🥑',
+    },
+    carbs: {
+      light: '#fed7aa',
+      main: '#f97316',
+      dark: '#ea580c',
+      icon: '🌾',
+    },
+    calories: {
+      light: '#fee2e2',
+      main: '#ef4444',
+      dark: '#dc2626',
+      icon: '🔥',
+    },
+  },
+  
   // Background Colors
   background: {
     primary: '#ffffff',
     secondary: '#f9fafb',
     tertiary: '#f3f4f6',
-  },
-
-  // NEW: Forge Heat Spectrum
-  forge: {
-    cool: '#6366f1',      // Indigo (start)
-    warm: '#f97316',      // Orange (middle)
-    hot: '#10b981',       // Green (complete)
-    gradient: 'linear-gradient(90deg, #6366f1 0%, #f97316 50%, #10b981 100%)',
-  },
-
-  // NEW: Time of Day Ambient Colors
-  ambient: {
-    dawn: {
-      start: '#fef3c7',
-      end: '#fde68a',
-      gradient: 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)',
-    },
-    morning: {
-      start: '#dbeafe',
-      end: '#bfdbfe',
-      gradient: 'linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%)',
-    },
-    afternoon: {
-      start: '#e0e7ff',
-      end: '#c7d2fe',
-      gradient: 'linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%)',
-    },
-    evening: {
-      start: '#fce7f3',
-      end: '#fbcfe8',
-      gradient: 'linear-gradient(135deg, #fce7f3 0%, #fbcfe8 100%)',
-    },
-    night: {
-      start: '#312e81',
-      end: '#1e1b4b',
-      gradient: 'linear-gradient(135deg, #312e81 0%, #1e1b4b 100%)',
-    },
-  },
-
-  // NEW: Week Horizon Gradient (Sunday to Saturday)
-  weekGradient: 'linear-gradient(90deg, #fef3c7 0%, #dbeafe 20%, #e0e7ff 40%, #fce7f3 60%, #e9d5ff 80%, #312e81 100%)',
-
-  // NEW: Blueprint Colors
-  blueprint: {
-    paper: '#f0f4f8',
-    grid: '#d1d5db',
-    line: '#3b82f6',
-    text: '#1e293b',
   },
 };
 
@@ -189,7 +136,6 @@ export const TYPOGRAPHY = {
     sans: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     display: "'Poppins', 'Inter', sans-serif",
     mono: "'Fira Code', 'Courier New', monospace",
-    blueprint: "'Courier New', monospace",
   },
   
   fontSize: {
@@ -238,12 +184,6 @@ export const SHADOWS = {
   primary: '0 10px 25px -5px rgba(99, 102, 241, 0.3)',
   success: '0 10px 25px -5px rgba(16, 185, 129, 0.3)',
   error: '0 10px 25px -5px rgba(239, 68, 68, 0.3)',
-  
-  // NEW: Forge glow
-  forgeGlow: '0 0 30px rgba(249, 115, 22, 0.6), 0 0 60px rgba(249, 115, 22, 0.3)',
-  
-  // NEW: Glass effect
-  glass: '0 8px 32px 0 rgba(31, 38, 135, 0.15)',
 };
 
 // ============================================
@@ -269,8 +209,6 @@ export const TRANSITIONS = {
     base: '200ms',
     medium: '300ms',
     slow: '500ms',
-    slower: '800ms',
-    slowest: '1200ms',
   },
   timing: {
     ease: 'ease',
@@ -278,8 +216,6 @@ export const TRANSITIONS = {
     easeOut: 'ease-out',
     easeInOut: 'ease-in-out',
     spring: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
-    elastic: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
-    smooth: 'cubic-bezier(0.4, 0, 0.2, 1)',
   },
 };
 
@@ -306,7 +242,6 @@ export const Z_INDEX = {
   modal: 1050,
   popover: 1060,
   tooltip: 1070,
-  confetti: 1080,
 };
 
 // ============================================
@@ -356,12 +291,6 @@ export const SIZES = {
     lg: '2rem',     // 32px
     xl: '3rem',     // 48px
   },
-  
-  // NEW: Touch targets
-  touchTarget: {
-    min: '44px',
-    comfortable: '48px',
-  },
 };
 
 // ============================================
@@ -378,52 +307,6 @@ export const ANIMATIONS = {
   spin: 'spin',
   pulse: 'pulse',
   shimmer: 'shimmer',
-  breathe: 'breathe',
-  forgeGlow: 'forgeGlow',
-  ingredientFloatIn: 'ingredientFloatIn',
-  mealCardMint: 'mealCardMint',
-  blueprintDraw: 'blueprintDraw',
-  confettiFall: 'confettiFall',
-  orbit: 'orbit',
-  flowerBloom: 'flowerBloom',
-};
-
-// ============================================
-// NEW: STAGE CHOREOGRAPHY TIMING
-// ============================================
-export const STAGE_TIMING = {
-  forge: {
-    gathering: {
-      duration: 2000,
-      ingredientDelay: 100,
-      ingredientDuration: 800,
-    },
-    calculating: {
-      duration: 2500,
-      latticeDelay: 300,
-      pulseInterval: 2000,
-    },
-    optimizing: {
-      duration: 2000,
-      cardDelay: 150,
-      cardDuration: 600,
-    },
-  },
-  garden: {
-    planting: {
-      duration: 1500,
-      seedDelay: 100,
-    },
-    growing: {
-      duration: 3000,
-      stemDuration: 1500,
-      leafDelay: 200,
-    },
-    blooming: {
-      duration: 2000,
-      flowerDelay: 150,
-    },
-  },
 };
 
 // ============================================
@@ -439,9 +322,7 @@ export const APP_CONFIG = {
     firebase: true,
     analytics: false,
     darkMode: false,
-    mealImages: false,
-    confetti: true,
-    ambientParticles: true,
+    mealImages: false, // Enable when image generation is added
   },
   
   // Limits
@@ -540,7 +421,6 @@ export default {
   Z_INDEX,
   SIZES,
   ANIMATIONS,
-  STAGE_TIMING,
   APP_CONFIG,
   GOAL_LABELS,
   ACTIVITY_LABELS,
