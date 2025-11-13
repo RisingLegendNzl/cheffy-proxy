@@ -1,22 +1,27 @@
 // web/src/App.jsx
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 
+// --- Firebase Imports ---
 import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, setLogLevel } from 'firebase/firestore';
 
+// --- Component Imports ---
 import LandingPage from './pages/LandingPage';
 import MainApp from './components/MainApp';
 
+// --- Hook Imports ---
 import useAppLogic from './hooks/useAppLogic';
 import { useResponsive } from './hooks/useResponsive';
-import useReducedMotion from './hooks/useReducedMotion';
 
+// --- Firebase Config variables ---
 let firebaseConfig = null;
 let firebaseInitializationError = null;
 let globalAppId = 'default-app-id';
 
+// --- MAIN APP COMPONENT ---
 const App = () => {
+    // --- Top-level UI State ---
     const [contentView, setContentView] = useState('profile');
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -24,12 +29,14 @@ const App = () => {
     const [authLoading, setAuthLoading] = useState(false);
     const [authError, setAuthError] = useState(null);
 
+    // --- Firebase State ---
     const [auth, setAuth] = useState(null);
     const [db, setDb] = useState(null);
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
     const [appId, setAppId] = useState('default-app-id');
 
+    // --- Form Data State (needed by hook and MainApp) ---
     const [formData, setFormData] = useState({ 
         name: '', height: '180', weight: '75', age: '30', gender: 'male', 
         activityLevel: 'moderate', goal: 'cut_moderate', dietary: 'None', 
@@ -37,14 +44,15 @@ const App = () => {
         costPriority: 'Best Value', mealVariety: 'Balanced Variety', 
         cuisine: '', bodyFat: '' 
     });
-
+    
     const [nutritionalTargets, setNutritionalTargets] = useState({ 
         calories: 0, protein: 0, fat: 0, carbs: 0 
     });
 
+    // --- Responsive ---
     const { isMobile, isDesktop } = useResponsive();
-    const prefersReducedMotion = useReducedMotion();
 
+    // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
         const firebaseConfigStr = typeof __firebase_config !== 'undefined' 
             ? __firebase_config 
@@ -98,84 +106,107 @@ const App = () => {
                         console.log("[FIREBASE] Auth state ready.");
                     }
                 });
-
                 return () => unsubscribe();
-            } catch (e) {
-                console.error("[FIREBASE] Failed to initialize:", e);
-                firebaseInitializationError = `Firebase initialization error: ${e.message}`;
+            } catch (initError) {
+                console.error("[FIREBASE] Initialization failed:", initError);
                 setIsAuthReady(true);
             }
         }
     }, []);
 
+    // --- Landing page visibility ---
+    useEffect(() => {
+        if (!userId) {
+            setShowLandingPage(true);
+        } else {
+            setShowLandingPage(false);
+        }
+    }, [userId]);
+
+    // --- Business Logic Hook ---
     const logic = useAppLogic({
+        auth,
+        db,
         userId,
         isAuthReady,
-        db,
+        appId,
         formData,
         setFormData,
         nutritionalTargets,
-        setNutritionalTargets,
+        setNutritionalTargets
     });
 
-    const handleChange = useCallback((e) => {
+    // --- Form Handlers ---
+    const handleChange = (e) => {
         const { name, value } = e.target;
         setFormData(prev => ({ ...prev, [name]: value }));
-    }, []);
+        if (name === 'days') {
+            const newDays = parseInt(value, 10);
+            if (!isNaN(newDays) && newDays < logic.selectedDay) {
+                logic.setSelectedDay(newDays);
+            }
+        }
+    };
 
-    const handleSliderChange = useCallback((e) => {
-        const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
-    }, []);
+    const handleSliderChange = (e) => {
+        const value = parseInt(e.target.value, 10);
+        setFormData(prev => ({ ...prev, days: value }));
+        if (value < logic.selectedDay) {
+            logic.setSelectedDay(value);
+        }
+    };
 
-    const handleSignUp = async (credentials) => {
+    // --- Auth Handlers with Loading State ---
+    const handleSignUp = useCallback(async (credentials) => {
         setAuthLoading(true);
         setAuthError(null);
         try {
-            console.log('Attempting sign up...');
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await logic.handleSignUp(credentials);
             setShowLandingPage(false);
+            setContentView('profile');
         } catch (error) {
-            console.error('Sign up error:', error);
             setAuthError(error.message);
         } finally {
             setAuthLoading(false);
         }
-    };
+    }, [logic]);
 
-    const handleSignIn = async (credentials) => {
+    const handleSignIn = useCallback(async (credentials) => {
         setAuthLoading(true);
         setAuthError(null);
         try {
-            console.log('Attempting sign in...');
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await logic.handleSignIn(credentials);
             setShowLandingPage(false);
+            setContentView('profile');
         } catch (error) {
-            console.error('Sign in error:', error);
             setAuthError(error.message);
         } finally {
             setAuthLoading(false);
         }
-    };
+    }, [logic]);
 
-    const handleSignOut = useCallback(() => {
-        if (auth) {
-            auth.signOut();
-        }
+    const handleSignOut = useCallback(async () => {
+        await logic.handleSignOut();
         setShowLandingPage(true);
-    }, [auth]);
+        setContentView('profile');
+        setAuthError(null);
+    }, [logic]);
 
     // --- Edit Profile Handler (FIXED) ---
-const handleEditProfile = useCallback(() => {
-    setIsSettingsOpen(false);     // ✅ Close settings panel
-    setContentView('profile');     // ✅ Show profile view
-    
-    // Optional: scroll to top
-    setTimeout(() => {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-    }, 100);
-}, []);
+    const handleEditProfile = useCallback(() => {
+        setIsSettingsOpen(false); // Close settings panel
+        setContentView('profile'); // Navigate to profile view (right panel)
+        // On mobile, we may want to show the form, but the form is on the LEFT
+        // The user likely wants to see the profile summary on the RIGHT
+        // So we do NOT open isMenuOpen here
+        
+        // Optional: scroll to top
+        setTimeout(() => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }, 100);
+    }, []);
 
+    // --- Render ---
     return (
         <>
             {showLandingPage ? (
@@ -187,17 +218,21 @@ const handleEditProfile = useCallback(() => {
                 />
             ) : (
                 <MainApp
+                    // User & Auth
                     userId={userId}
                     isAuthReady={isAuthReady}
                     firebaseConfig={firebaseConfig}
                     firebaseInitializationError={firebaseInitializationError}
                     
+                    // Form Data
                     formData={formData}
                     handleChange={handleChange}
                     handleSliderChange={handleSliderChange}
                     
+                    // Nutritional Targets
                     nutritionalTargets={nutritionalTargets}
                     
+                    // Results & Plan
                     results={logic.results}
                     uniqueIngredients={logic.uniqueIngredients}
                     mealPlan={logic.mealPlan}
@@ -205,6 +240,7 @@ const handleEditProfile = useCallback(() => {
                     categorizedResults={logic.categorizedResults}
                     hasInvalidMeals={logic.hasInvalidMeals}
                     
+                    // UI State
                     loading={logic.loading}
                     error={logic.error}
                     eatenMeals={logic.eatenMeals}
@@ -215,6 +251,7 @@ const handleEditProfile = useCallback(() => {
                     isMenuOpen={isMenuOpen}
                     setIsMenuOpen={setIsMenuOpen}
                     
+                    // Logs
                     diagnosticLogs={logic.diagnosticLogs}
                     showOrchestratorLogs={logic.showOrchestratorLogs}
                     setShowOrchestratorLogs={logic.setShowOrchestratorLogs}
@@ -227,26 +264,32 @@ const handleEditProfile = useCallback(() => {
                     setIsLogOpen={logic.setIsLogOpen}
                     latestLog={logic.latestLog}
                     
+                    // Generation State
                     generationStepKey={logic.generationStepKey}
                     generationStatus={logic.generationStatus}
                     
+                    // Nutrition Cache
                     nutritionCache={logic.nutritionCache}
                     loadingNutritionFor={logic.loadingNutritionFor}
                     
+                    // Modal State
                     selectedMeal={logic.selectedMeal}
                     setSelectedMeal={logic.setSelectedMeal}
                     showSuccessModal={logic.showSuccessModal}
                     setShowSuccessModal={logic.setShowSuccessModal}
                     planStats={logic.planStats}
                     
+                    // Settings
                     isSettingsOpen={isSettingsOpen}
                     setIsSettingsOpen={setIsSettingsOpen}
                     useBatchedMode={logic.useBatchedMode}
                     setUseBatchedMode={logic.setUseBatchedMode}
                     
+                    // Toasts
                     toasts={logic.toasts}
                     removeToast={logic.removeToast}
                     
+                    // Handlers
                     handleGeneratePlan={logic.handleGeneratePlan}
                     handleLoadProfile={logic.handleLoadProfile}
                     handleSaveProfile={logic.handleSaveProfile}
@@ -261,6 +304,7 @@ const handleEditProfile = useCallback(() => {
                     handleSignOut={handleSignOut}
                     showToast={logic.showToast}
                     
+                    // Responsive
                     isMobile={isMobile}
                     isDesktop={isDesktop}
                 />
