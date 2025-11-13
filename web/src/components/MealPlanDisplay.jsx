@@ -46,9 +46,27 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
     
     return (
         <div className="space-y-6">
-            <h3 className="text-2xl font-bold border-b-2 pb-1 flex items-center">
-                <BookOpen className="w-6 h-6 mr-2" /> Meals for Day {selectedDay}
-            </h3>
+            {/* Premium Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-gray-200">
+                <div className="flex items-center gap-3">
+                    <div 
+                        className="p-2.5 rounded-xl shadow-md"
+                        style={{
+                            background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)'
+                        }}
+                    >
+                        <BookOpen className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                        <h3 className="text-2xl font-bold text-gray-900 tracking-tight">
+                            Meals for Day {selectedDay}
+                        </h3>
+                        <p className="text-sm text-gray-500 font-medium mt-0.5">
+                            Your personalized nutrition plan
+                        </p>
+                    </div>
+                </div>
+            </div>
             
             {/* Enhanced Tracker with Macro Bars */}
             <div className="sticky top-0 bg-white/95 backdrop-blur-sm p-6 rounded-xl shadow-lg border z-10">
