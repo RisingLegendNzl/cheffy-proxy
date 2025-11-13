@@ -1,71 +1,136 @@
 // web/src/components/DaySidebar.jsx
 import React from 'react';
+import { Calendar } from 'lucide-react';
+import { COLORS, SHADOWS } from '../constants';
 
-const DaySidebar = ({ days, selectedDay, onSelect }) => (
-    <div className="w-full md:w-auto">
-        {/* Header - Desktop only, minimal and refined */}
-        <div className="hidden md:block mb-5">
-            <p className="text-xs uppercase tracking-widest font-semibold text-gray-400 mb-1.5">
-                Your Plan
-            </p>
-            <div className="flex items-baseline gap-1.5">
-                <span className="text-3xl font-bold text-gray-900">{days}</span>
-                <span className="text-sm font-medium text-gray-500">
-                    {days === 1 ? 'Day' : 'Days'}
-                </span>
+const DaySidebar = ({ days, selectedDay, onSelect }) => {
+    return (
+        <div className="w-full md:w-64 bg-white md:rounded-2xl md:shadow-lg md:p-5 overflow-hidden">
+            {/* Header */}
+            <div className="hidden md:flex items-center mb-4 pb-3 border-b" style={{ borderColor: COLORS.gray[200] }}>
+                <Calendar size={18} className="mr-2" style={{ color: COLORS.primary[600] }} />
+                <h3 
+                    className="text-xs uppercase tracking-wider font-semibold"
+                    style={{ color: COLORS.gray[600] }}
+                >
+                    Plan Days ({days})
+                </h3>
             </div>
-        </div>
 
-        {/* Day Pills - Clean and Premium */}
-        <div className="flex md:flex-col gap-2 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scrollbar-hide">
-            {Array.from({ length: days }, (_, i) => i + 1).map(day => {
-                const isSelected = day === selectedDay;
-                return (
-                    <button
-                        key={day}
-                        onClick={() => onSelect(day)}
-                        className={`
-                            relative flex-shrink-0 min-w-[90px] md:min-w-0 md:w-full
-                            px-5 py-3 rounded-2xl font-semibold text-sm
-                            transition-all duration-300 ease-out
-                            ${isSelected 
-                                ? 'text-white' 
-                                : 'text-gray-600 bg-white/80 backdrop-blur-sm border border-gray-200/60 hover:border-indigo-200 hover:bg-white hover:text-gray-900 hover:shadow-md hover:scale-105 active:scale-95'
-                            }
-                        `}
-                        style={isSelected ? {
-                            background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-                            boxShadow: '0 8px 20px -4px rgba(99, 102, 241, 0.35), 0 4px 8px -2px rgba(99, 102, 241, 0.2)',
-                            transform: 'translateY(-2px)'
-                        } : {}}
-                        aria-label={`Day ${day}`}
-                        aria-current={isSelected ? 'true' : 'false'}
-                    >
-                        {/* Content */}
-                        <div className="flex items-center justify-center gap-2">
-                            <span className="font-semibold">Day</span>
-                            <span className={`text-base font-extrabold ${isSelected ? 'text-white' : 'text-indigo-600'}`}>
-                                {day}
+            {/* Day Pills Container */}
+            <div className="flex md:flex-col gap-3 overflow-x-auto md:overflow-visible pb-3 md:pb-0 px-2 md:px-0 scroll-smooth snap-x snap-mandatory md:snap-none">
+                {Array.from({ length: days }, (_, i) => i + 1).map(day => {
+                    const isSelected = day === selectedDay;
+                    
+                    return (
+                        <button
+                            key={day}
+                            onClick={() => onSelect(day)}
+                            className={`
+                                relative flex-shrink-0 snap-center
+                                flex items-center justify-center
+                                font-semibold rounded-xl
+                                transition-all duration-300 ease-out
+                                whitespace-nowrap
+                                ${isSelected 
+                                    ? 'px-6 py-4 text-white shadow-lg transform scale-105' 
+                                    : 'px-5 py-3 border transform hover:scale-103 hover:shadow-md active:scale-98'
+                                }
+                            `}
+                            style={{
+                                background: isSelected
+                                    ? `linear-gradient(135deg, ${COLORS.primary[600]} 0%, ${COLORS.secondary[600]} 100%)`
+                                    : 'white',
+                                borderColor: isSelected ? 'transparent' : COLORS.gray[200],
+                                color: isSelected ? 'white' : COLORS.gray[700],
+                                boxShadow: isSelected
+                                    ? `0 10px 25px -5px rgba(99, 102, 241, 0.4), 0 8px 10px -6px rgba(99, 102, 241, 0.3)`
+                                    : SHADOWS.sm,
+                                fontWeight: isSelected ? '700' : '600',
+                                minWidth: '120px',
+                            }}
+                            onMouseEnter={(e) => {
+                                if (!isSelected) {
+                                    e.currentTarget.style.backgroundColor = COLORS.primary[50];
+                                    e.currentTarget.style.borderColor = COLORS.primary[200];
+                                    e.currentTarget.style.color = COLORS.primary[700];
+                                }
+                            }}
+                            onMouseLeave={(e) => {
+                                if (!isSelected) {
+                                    e.currentTarget.style.backgroundColor = 'white';
+                                    e.currentTarget.style.borderColor = COLORS.gray[200];
+                                    e.currentTarget.style.color = COLORS.gray[700];
+                                }
+                            }}
+                        >
+                            {/* Day Label */}
+                            <span className="flex items-center gap-2">
+                                <span className={`text-xs uppercase tracking-wide ${isSelected ? 'opacity-90' : 'opacity-60'}`}>
+                                    Day
+                                </span>
+                                <span className={isSelected ? 'text-2xl' : 'text-xl'}>
+                                    {day}
+                                </span>
                             </span>
-                        </div>
 
-                        {/* Subtle shine effect on selected */}
-                        {isSelected && (
-                            <div 
-                                className="absolute inset-0 rounded-2xl opacity-20 pointer-events-none"
-                                style={{
-                                    background: 'linear-gradient(135deg, rgba(255,255,255,0.5) 0%, transparent 50%, rgba(255,255,255,0.3) 100%)'
-                                }}
-                            />
-                        )}
-                    </button>
-                );
-            })}
+                            {/* Selected Indicator Glow */}
+                            {isSelected && (
+                                <span
+                                    className="absolute inset-0 rounded-xl opacity-50"
+                                    style={{
+                                        background: `linear-gradient(135deg, ${COLORS.primary[400]} 0%, ${COLORS.secondary[400]} 100%)`,
+                                        filter: 'blur(8px)',
+                                        zIndex: -1,
+                                    }}
+                                />
+                            )}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {/* Scroll Hint for Mobile */}
+            <div className="md:hidden flex justify-center mt-2 gap-1">
+                {Array.from({ length: Math.min(days, 7) }, (_, i) => {
+                    const day = i + 1;
+                    return (
+                        <div
+                            key={day}
+                            className="w-1.5 h-1.5 rounded-full transition-all duration-200"
+                            style={{
+                                backgroundColor: day === selectedDay 
+                                    ? COLORS.primary[600]
+                                    : COLORS.gray[300],
+                                transform: day === selectedDay ? 'scale(1.3)' : 'scale(1)',
+                            }}
+                        />
+                    );
+                })}
+            </div>
+
+            {/* CSS for transitions and reduced motion */}
+            <style jsx>{`
+                @media (prefers-reduced-motion: reduce) {
+                    button {
+                        transition: none !important;
+                    }
+                }
+                
+                button:active {
+                    transform: scale(0.98) !important;
+                }
+                
+                .hover\\:scale-103:hover {
+                    transform: scale(1.03);
+                }
+                
+                .active\\:scale-98:active {
+                    transform: scale(0.98);
+                }
+            `}</style>
         </div>
-
-        {/* Subtle divider for desktop */}
-        <div className="hidden md:block mt-5 pt-5 border-t border-gray-100" />
-    </div>
-);
+    );
+};
 
 export default DaySidebar;
