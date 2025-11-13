@@ -347,7 +347,7 @@ const MainApp = ({
                 <BottomNav
                     activeTab={contentView}
                     onTabChange={setContentView}
-                    showPlanButton={false}
+                    showPlanButton={!results || Object.keys(results).length === 0}
                 />
             )}
 
