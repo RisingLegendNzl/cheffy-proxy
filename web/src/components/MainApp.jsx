@@ -230,9 +230,9 @@ const MainApp = ({
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
             {mealPlan.length > 0 && (
-                <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white rounded-lg shadow p-4">
-                    <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
-                </div>
+                <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
+  <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
+ </div>
             )}
             {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
                 <MealPlanDisplay
