@@ -7,10 +7,10 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
     const isSingleDay = days === 1;
     
     return (
-        <div className={`w-full ${isSingleDay ? 'md:w-auto' : 'md:w-64'} bg-white md:rounded-2xl md:border md:p-5 overflow-hidden`} style={{ borderColor: COLORS.gray[200] }}>
+        <div className={`w-full ${isSingleDay ? 'md:w-auto' : 'md:w-64'}`}>
             {/* Header - hide for single day */}
             {!isSingleDay && (
-                <div className="hidden md:flex items-center mb-4 pb-3 border-b" style={{ borderColor: COLORS.gray[200] }}>
+                <div className="hidden md:flex items-center mb-3 pb-2 border-b" style={{ borderColor: COLORS.gray[200] }}>
                     <Calendar size={18} className="mr-2" style={{ color: COLORS.primary[600] }} />
                     <h3 
                         className="text-xs uppercase tracking-wider font-semibold"
@@ -22,7 +22,7 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
             )}
 
             {/* Day Pills Container */}
-            <div className={`flex md:flex-col gap-3 overflow-x-auto md:overflow-visible pb-3 md:pb-0 px-2 md:px-0 scroll-smooth snap-x snap-mandatory md:snap-none ${isSingleDay ? 'justify-center' : ''}`}>
+            <div className={`flex md:flex-col gap-3 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scroll-smooth snap-x snap-mandatory md:snap-none ${isSingleDay ? 'justify-center' : ''}`}>
                 {Array.from({ length: days }, (_, i) => i + 1).map(day => {
                     const isSelected = day === selectedDay;
                     
@@ -31,14 +31,14 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                             key={day}
                             onClick={() => onSelect(day)}
                             className={`
-                                relative flex-shrink-0 snap-center
+                                flex-shrink-0 snap-center
                                 flex items-center justify-center
-                                font-semibold rounded-xl
+                                font-semibold
                                 transition-all duration-300 ease-out
                                 whitespace-nowrap
                                 ${isSelected 
-                                    ? 'px-6 py-4 text-white transform scale-105' 
-                                    : 'px-5 py-3 border transform hover:scale-103 active:scale-98'
+                                    ? 'px-6 py-3 text-white transform scale-105' 
+                                    : 'px-5 py-2.5 border transform hover:scale-103 active:scale-98'
                                 }
                             `}
                             style={{
@@ -49,6 +49,7 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                                 color: isSelected ? 'white' : COLORS.gray[700],
                                 fontWeight: isSelected ? '700' : '600',
                                 minWidth: isSingleDay ? 'auto' : '120px',
+                                borderRadius: '999px',
                             }}
                             onMouseEnter={(e) => {
                                 if (!isSelected) {
@@ -70,7 +71,7 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                                 <span className={`text-xs uppercase tracking-wide ${isSelected ? 'opacity-90' : 'opacity-60'}`}>
                                     Day
                                 </span>
-                                <span className={isSelected ? 'text-2xl' : 'text-xl'}>
+                                <span className={isSelected ? 'text-xl' : 'text-lg'}>
                                     {day}
                                 </span>
                             </span>
