@@ -36,55 +36,43 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                                 font-semibold
                                 transition-all duration-300 ease-out
                                 whitespace-nowrap
-                                backdrop-blur-sm
                                 ${isSelected 
-                                    ? 'px-6 py-3 text-white transform scale-105 shadow-lg' 
-                                    : 'px-5 py-2.5 border transform hover:scale-103 active:scale-98 hover:shadow-md'
+                                    ? 'px-6 py-3 text-white transform scale-105' 
+                                    : 'px-5 py-2.5 border transform hover:scale-103 active:scale-98'
                                 }
                             `}
                             style={{
                                 background: isSelected
                                     ? `linear-gradient(135deg, ${COLORS.primary[600]} 0%, ${COLORS.secondary[600]} 100%)`
-                                    : 'rgba(255, 255, 255, 0.8)',
+                                    : 'white',
                                 borderColor: isSelected ? 'transparent' : COLORS.gray[200],
                                 color: isSelected ? 'white' : COLORS.gray[700],
                                 fontWeight: isSelected ? '700' : '600',
                                 minWidth: isSingleDay ? 'auto' : '120px',
-                                borderRadius: '16px',
+                                borderRadius: '999px',
                                 boxShadow: isSelected 
-                                    ? `0 8px 16px -4px ${COLORS.primary[500]}40, 0 4px 8px -2px ${COLORS.primary[600]}30`
-                                    : '0 2px 4px -1px rgba(0, 0, 0, 0.06)',
+                                    ? '0 4px 12px rgba(99, 102, 241, 0.3), 0 2px 4px rgba(0, 0, 0, 0.1)' 
+                                    : '0 1px 3px rgba(0, 0, 0, 0.1)',
                             }}
                             onMouseEnter={(e) => {
                                 if (!isSelected) {
-                                    e.currentTarget.style.background = `linear-gradient(135deg, ${COLORS.primary[50]} 0%, ${COLORS.secondary[50]} 100%)`;
+                                    e.currentTarget.style.backgroundColor = COLORS.primary[50];
                                     e.currentTarget.style.borderColor = COLORS.primary[200];
                                     e.currentTarget.style.color = COLORS.primary[700];
-                                    e.currentTarget.style.backdropFilter = 'blur(8px)';
+                                    e.currentTarget.style.boxShadow = '0 2px 8px rgba(99, 102, 241, 0.15)';
                                 }
                             }}
                             onMouseLeave={(e) => {
                                 if (!isSelected) {
-                                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.8)';
+                                    e.currentTarget.style.backgroundColor = 'white';
                                     e.currentTarget.style.borderColor = COLORS.gray[200];
                                     e.currentTarget.style.color = COLORS.gray[700];
-                                    e.currentTarget.style.backdropFilter = 'blur(4px)';
+                                    e.currentTarget.style.boxShadow = '0 1px 3px rgba(0, 0, 0, 0.1)';
                                 }
                             }}
                         >
-                            {/* Subtle glow effect for selected state */}
-                            {isSelected && (
-                                <div 
-                                    className="absolute inset-0 rounded-[16px] opacity-50 blur-md"
-                                    style={{
-                                        background: `linear-gradient(135deg, ${COLORS.primary[400]} 0%, ${COLORS.secondary[400]} 100%)`,
-                                        zIndex: -1,
-                                    }}
-                                />
-                            )}
-                            
                             {/* Day Label */}
-                            <span className="flex items-center gap-2 relative">
+                            <span className="flex items-center gap-2">
                                 <span className={`text-xs uppercase tracking-wide ${isSelected ? 'opacity-90' : 'opacity-60'}`}>
                                     Day
                                 </span>
@@ -111,9 +99,6 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                                         ? COLORS.primary[600]
                                         : COLORS.gray[300],
                                     transform: day === selectedDay ? 'scale(1.3)' : 'scale(1)',
-                                    boxShadow: day === selectedDay 
-                                        ? `0 2px 6px ${COLORS.primary[500]}40`
-                                        : 'none',
                                 }}
                             />
                         );
@@ -127,10 +112,6 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                     button {
                         transition: none !important;
                     }
-                }
-                
-                button {
-                    position: relative;
                 }
                 
                 button:active {
