@@ -615,22 +615,25 @@ const useAppLogic = ({
                                 planComplete = true;
                                 setMealPlan(eventData.mealPlan || []);
                                 
-                                // FIX: Merge results carefully to preserve allProducts from ingredient:found events
+                                // FIX: Merge results to preserve allProducts from ingredient:found events
                                 setResults(prev => {
-                                    const merged = { ...prev };
-                                    Object.entries(eventData.results || {}).forEach(([key, value]) => {
-                                        merged[key] = {
-                                            ...merged[key],  // Keep existing data (including allProducts)
-                                            ...value         // Merge new data
-                                        };
+                                    const merged = { ...eventData.results };
+                                    Object.keys(merged).forEach(key => {
+                                        if (prev[key]?.allProducts) {
+                                            merged[key] = {
+                                                ...merged[key],
+                                                allProducts: prev[key].allProducts,
+                                                currentSelectionURL: prev[key].currentSelectionURL || merged[key].currentSelectionURL
+                                            };
+                                        }
                                     });
                                     return merged;
                                 });
-
+                                
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
 
-                                // KEEP DEBUG LOGS
+                                // KEEP DEBUG logs
                                 console.log('=== PLAN COMPLETE DEBUG ===');
                                 console.log('Results object:', eventData.results);
                                 console.log('Unique ingredients:', eventData.uniqueIngredients);
@@ -982,5 +985,4 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
-
 
