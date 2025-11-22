@@ -377,7 +377,7 @@ const MainApp = (logic) => {
                                          <button
                                             onClick={() => handleSaveProfile(false)}
                                             disabled={!isAuthReady || !userId || userId.startsWith('local_')} 
-                                            className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                             title="Save Current Profile"
                                         >
                                             <Save size={14} className="mr-1" /> Save
@@ -529,7 +529,12 @@ const MainApp = (logic) => {
                 onClearData={() => {
                     showToast('All data cleared', 'success');
                 }}
-                onEditProfile={handleEditProfile}
+                // MODIFIED: Ensure state switches to 'profile' view and settings close
+                onEditProfile={() => {
+                    handleEditProfile();
+                    setIsSettingsOpen(false);
+                    setContentView('profile');
+                }}
                 showOrchestratorLogs={showOrchestratorLogs}
                 onToggleOrchestratorLogs={setShowOrchestratorLogs}
                 showFailedIngredientsLogs={showFailedIngredientsLogs}
