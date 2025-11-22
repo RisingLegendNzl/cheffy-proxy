@@ -529,11 +529,12 @@ const MainApp = (logic) => {
                 onClearData={() => {
                     showToast('All data cleared', 'success');
                 }}
-                // MODIFIED: Ensure state switches to 'profile' view and settings close
                 onEditProfile={() => {
                     handleEditProfile();
                     setIsSettingsOpen(false);
                     setContentView('profile');
+                    // ADDED: Explicitly close the main side menu just in case, ensuring the results panel is visible.
+                    setIsMenuOpen(false); 
                 }}
                 showOrchestratorLogs={showOrchestratorLogs}
                 onToggleOrchestratorLogs={setShowOrchestratorLogs}
