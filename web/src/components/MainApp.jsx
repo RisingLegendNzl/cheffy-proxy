@@ -345,7 +345,7 @@ const MainApp = (logic) => {
                 onOpenSettings={() => setIsSettingsOpen(true)}
                 onNavigateToProfile={() => {
                     setContentView('profile');
-                    setIsMenuOpen(true);
+                    setIsMenuOpen(false);
                 }}
                 onOpenSavedPlans={handleOpenSavedPlans} // 6. ADDED: My Saved Plans entry point
                 onSignOut={handleSignOut}
