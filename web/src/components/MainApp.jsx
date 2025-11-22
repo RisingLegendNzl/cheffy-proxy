@@ -149,7 +149,7 @@ const MainApp = (props) => {
     const handleLoadPlan = async (planId) => {
         await plans.loadPlan(planId);
         setShowSavedPlansPanel(false);
-        setContentView('plan');
+        setContentView('meals');
     };
 
     const handleDeletePlan = async (planId) => {
@@ -184,7 +184,7 @@ const MainApp = (props) => {
 
             {/* Main Container */}
             <div className="min-h-screen bg-gray-50 pb-20 md:pb-0">
-                {/* Desktop Tab Navigation */}
+                {/* Desktop Tab Navigation - FIXED: Changed 'plan' to 'meals' */}
                 <div className="hidden md:block border-b bg-white sticky top-20 z-10">
                     <div className="max-w-7xl mx-auto px-4 md:px-8">
                         <div className="flex space-x-8">
@@ -200,9 +200,9 @@ const MainApp = (props) => {
                                 Profile
                             </button>
                             <button
-                                onClick={() => setContentView('plan')}
+                                onClick={() => setContentView('meals')}
                                 className={`py-4 px-2 border-b-2 font-semibold transition-colors ${
-                                    contentView === 'plan'
+                                    contentView === 'meals'
                                         ? 'border-indigo-600 text-indigo-600'
                                         : 'border-transparent text-gray-500 hover:text-gray-700'
                                 }`}
@@ -230,13 +230,14 @@ const MainApp = (props) => {
                     {/* Profile Tab */}
                     {contentView === 'profile' && (
                         <div className="space-y-6">
+                            {/* IMPROVEMENT: Added visual separation */}
                             <ProfileTab 
                                 formData={formData}
                                 nutritionalTargets={nutritionalTargets}
                             />
                             
-                            {/* Generate Plan Form */}
-                            <div className="bg-white rounded-xl shadow-lg p-6">
+                            {/* Generate Plan Form - IMPROVEMENT: Better visual separation */}
+                            <div className="bg-white rounded-xl shadow-lg p-6 border-t-4 border-indigo-500">
                                 <h2 className="text-2xl font-bold mb-6 text-gray-900">
                                     Generate Your Meal Plan
                                 </h2>
@@ -341,8 +342,8 @@ const MainApp = (props) => {
                         </div>
                     )}
 
-                    {/* Meals Tab */}
-                    {contentView === 'plan' && (
+                    {/* Meals Tab - FIXED: Changed contentView check from 'plan' to 'meals' */}
+                    {contentView === 'meals' && (
                         <div className="space-y-6">
                             {mealPlan.length > 0 ? (
                                 <>
@@ -353,6 +354,7 @@ const MainApp = (props) => {
                                         completedDays={[]}
                                     />
                                     
+                                    {/* FIXED Issue #3: Removed duplicate "Save This Plan" button - keeping only one */}
                                     <button
                                         onClick={() => setShowSavePlanModal(true)}
                                         className="w-full py-3 px-4 rounded-lg font-semibold text-white flex items-center justify-center space-x-2 hover-lift transition-spring"
@@ -407,11 +409,11 @@ const MainApp = (props) => {
                 </div>
             </div>
 
-            {/* Mobile Bottom Navigation */}
+            {/* Mobile Bottom Navigation - FIXED Issue #2: Disabled FAB button */}
             <BottomNav
                 activeTab={contentView}
                 onTabChange={setContentView}
-                showPlanButton={true}
+                showPlanButton={false}
                 onNewPlan={() => setContentView('profile')}
             />
 
@@ -470,7 +472,7 @@ const MainApp = (props) => {
             {/* Toast Container */}
             <ToastContainer toasts={toasts} onRemoveToast={removeToast} />
 
-            {/* Success Modal */}
+            {/* Success Modal - FIXED: Auto-navigate to 'meals' tab instead of 'plan' */}
             <SuccessModal
                 isVisible={showSuccessModal}
                 title="Plan Generated!"
@@ -479,7 +481,7 @@ const MainApp = (props) => {
                 onClose={() => setShowSuccessModal(false)}
                 onViewPlan={() => {
                     setShowSuccessModal(false);
-                    setContentView('plan');
+                    setContentView('meals');
                 }}
             />
 
