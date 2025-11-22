@@ -82,7 +82,9 @@ const useAppLogic = ({
     nutritionalTargets,
     setNutritionalTargets
 }) => {
-    // --- State ---
+    // ========================================
+    // SECTION 1: ALL STATE DECLARATIONS (MUST COME FIRST)
+    // ========================================
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
     const [mealPlan, setMealPlan] = useState([]);
@@ -116,7 +118,19 @@ const useAppLogic = ({
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
     
-    // Step 2: Initialize Persistence Hook
+    // --- Base Helpers (Defined after state, before dependent hooks) ---
+    const showToast = useCallback((message, type = 'info', duration = 3000) => {
+      const id = Date.now();
+      setToasts(prev => [...prev, { id, message, type, duration }]);
+    }, []);
+    
+    const removeToast = useCallback((id) => {
+      setToasts(prev => prev.filter(toast => toast.id !== id));
+    }, []);
+
+    // ========================================
+    // SECTION 2: CUSTOM HOOKS (Initialized after all required state/helpers are defined)
+    // ========================================
     const planPersistence = usePlanPersistence({
         userId,
         isAuthReady,
@@ -126,11 +140,12 @@ const useAppLogic = ({
         uniqueIngredients,
         formData,
         nutritionalTargets,
-        showToast,
-        setMealPlan,
-        setResults,
-        setUniqueIngredients
+        showToast, // Now defined above
+        setMealPlan, // Now defined above
+        setResults, // Now defined above
+        setUniqueIngredients // Now defined above
     });
+
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -142,15 +157,6 @@ const useAppLogic = ({
     }, [showFailedIngredientsLogs]);
 
     // --- Base Helpers ---
-    const showToast = useCallback((message, type = 'info', duration = 3000) => {
-      const id = Date.now();
-      setToasts(prev => [...prev, { id, message, type, duration }]);
-    }, []);
-    
-    const removeToast = useCallback((id) => {
-      setToasts(prev => prev.filter(toast => toast.id !== id));
-    }, []);
-
     const recalculateTotalCost = useCallback((currentResults) => {
         let newTotal = 0;
         Object.values(currentResults).forEach(item => {
@@ -946,7 +952,7 @@ const useAppLogic = ({
         handleSignOut,
         onToggleMealEaten,
 
-        // Step 3: Plan persistence additions
+        // Plan persistence additions
         savedPlans: planPersistence.savedPlans,
         activePlanId: planPersistence.activePlanId,
         handleSavePlan: planPersistence.savePlan,
