@@ -8,13 +8,13 @@ import { getFirestore, setLogLevel } from 'firebase/firestore';
 // --- Component Imports ---
 import LandingPage from './pages/LandingPage';
 import MainApp from './components/MainApp';
-import MyPlansModal from './components/MyPlansModal'; [span_0](start_span)// Added for plan persistence[span_0](end_span)
-import PlanControlBar from './components/PlanControlBar'; [span_1](start_span)// Added for plan persistence[span_1](end_span)
+import MyPlansModal from './components/MyPlansModal'; // Added for plan persistence
+import PlanControlBar from './components/PlanControlBar'; // Added for plan persistence
 
 // --- Hook Imports ---
 import useAppLogic from './hooks/useAppLogic';
 import { useResponsive } from './hooks/useResponsive';
-import usePlanPersistence from './hooks/usePlanPersistence'; [span_2](start_span)// Added for plan persistence[span_2](end_span)
+import usePlanPersistence from './hooks/usePlanPersistence'; // Added for plan persistence
 
 // --- Firebase Config variables ---
 let firebaseConfig = null;
@@ -30,8 +30,8 @@ const App = () => {
     const [showLandingPage, setShowLandingPage] = useState(true);
     const [authLoading, setAuthLoading] = useState(false);
     const [authError, setAuthError] = useState(null);
-    const [showMyPlansModal, setShowMyPlansModal] = useState(false); [span_3](start_span)// Added for plan persistence[span_3](end_span)
-    const [showSaveDialog, setShowSaveDialog] = useState(false); [span_4](start_span)// Added for plan persistence[span_4](end_span)
+    const [showMyPlansModal, setShowMyPlansModal] = useState(false); // Added for plan persistence
+    const [showSaveDialog, setShowSaveDialog] = useState(false); // Added for plan persistence
 
     // --- Firebase State ---
     const [auth, setAuth] = useState(null);
@@ -138,7 +138,7 @@ const App = () => {
         setNutritionalTargets
     });
 
-    [span_5](start_span)// --- Plan Persistence Hook (Added) ---[span_5](end_span)
+    // --- Plan Persistence Hook (Added) ---
     const {
       savedPlans,
       activePlanId,
@@ -184,7 +184,7 @@ const App = () => {
     });
     // --- END Plan Persistence Hook ---
 
-    [span_6](start_span)// --- Auto-load active plan on mount (Added) ---[span_6](end_span)
+    // --- Auto-load active plan on mount (Added) ---
     useEffect(() => {
         if (userId && !logic.mealPlan.length) {
             loadActivePlan().then(success => {
@@ -251,7 +251,7 @@ const App = () => {
         setAuthError(null);
     }, [logic]);
 
-    [span_7](start_span)// --- Handle save plan with name (Added) ---[span_7](end_span)
+    // --- Handle save plan with name (Added) ---
     const handleSavePlan = async () => {
       const name = prompt('Enter a name for this meal plan:');
       if (name) {
@@ -286,7 +286,7 @@ const App = () => {
                 />
             ) : (
                 <>
-                    [span_8](start_span){/* PlanControlBar (Added) */} {/*[span_8](end_span) */}
+                    {/* PlanControlBar (Added) */}
                     {userId && !showLandingPage && (
                       <PlanControlBar
                         hasCurrentPlan={logic.mealPlan.length > 0}
@@ -407,7 +407,7 @@ const App = () => {
                         handleSignOut={handleSignOut}
                         showToast={logic.showToast}
          
-                        [span_9](start_span)// Plan Persistence Props (Added)[span_9](end_span)
+                        // Plan Persistence Props (Added)
                         savedPlansCount={savedPlans.length} 
                         onOpenMyPlans={() => setShowMyPlansModal(true)} 
                         
@@ -416,7 +416,7 @@ const App = () => {
                         isDesktop={isDesktop}
                     />
 
-                    [span_10](start_span){/* My Plans Modal (Added) */} {/*[span_10](end_span) */}
+                    {/* My Plans Modal (Added) */}
                     <MyPlansModal
                       isOpen={showMyPlansModal}
                       onClose={() => setShowMyPlansModal(false)}
@@ -444,3 +444,4 @@ const App = () => {
     );
 };
 export default App;
+
