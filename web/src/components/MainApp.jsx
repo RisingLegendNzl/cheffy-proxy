@@ -31,7 +31,7 @@ import LoadingOverlay from './LoadingOverlay';
 import SuccessModal from './SuccessModal';
 import MealCard from './MealCard';
 import DayNavigator from './DayNavigator';
-import ShoppingListEnhanced from './ShoppingListEnhanced';
+import ShoppingListEnhanced from './ShoppingListEnhanced'; // <-- STEP 4: Verified Import
 import FormSection from './FormSection';
 import SettingsPanel from './SettingsPanel';
 import BottomNav from './BottomNav';
@@ -204,65 +204,16 @@ const MainApp = ({
         setSavePlanName('');
     };
 
-    const priceComparisonContent = (
-        <div className="space-y-0 p-4">
-            {error && !loading && (
-                 <div className="p-4 bg-red-50 text-red-800 rounded-lg">
-                    <AlertTriangle className="inline w-6 h-6 mr-2" />
-                    <strong>Error(s) occurred during plan generation:</strong>
-                    <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
-                 </div>
-            )}
-
-            {!loading && Object.keys(results).length > 0 && (
-                <>
-                    {/* Cost Summary (Assuming COLORS/styles are available or defined internally) */}
-                    {/* <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600 mb-6">
-                        <div className="flex items-center justify-between mb-3">
-                            <h3 className="text-xl font-bold flex items-center"><DollarSign className="w-5 h-5 mr-2"/> Total Estimated Cost</h3>
-                            <p className="text-3xl font-extrabold text-green-700">${totalCost.toFixed(2)}</p>
-                        </div>
-                        <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
-                    </div> */}
-
-                    {/* Ingredient Blocks */}
-                    <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
-                        {Object.keys(categorizedResults).map((category, index) => (
-                            <CollapsibleSection
-                                key={category}
-                                title={`${category} (${categorizedResults[category].length})`}
-                                icon={categoryIconMap[category.toLowerCase()] || categoryIconMap['default']}
-                                defaultOpen={false}
-                            >
-                                <div className="grid grid-cols-1 gap-6 pt-4">
-                                    {categorizedResults[category].map(({ normalizedKey, ingredient, ...result }) => {
-                                        if (!result) return null;
-                                        const selection = result.allProducts?.find(p => p && p.url === result.currentSelectionURL);
-                                        const nutriData = selection ? nutritionCache[selection.url] : null;
-                                        const isLoading = selection ? loadingNutritionFor === selection.url : false;
-                                        return (
-                                            <IngredientResultBlock
-                                                key={normalizedKey}
-                                                ingredientKey={ingredient}
-                                                normalizedKey={normalizedKey}
-                                                result={result}
-                                                onSelectSubstitute={handleSubstituteSelection}
-                                                onQuantityChange={handleQuantityChange}
-                                                onFetchNutrition={handleFetchNutrition}
-                                                nutritionData={nutriData}
-                                                isLoadingNutrition={isLoading}
-                                            />
-                                        );
-                                    })}
-                                </div>
-                            </CollapsibleSection>
-                        ))}
-                    </div>
-                </>
-            )}
-            {!loading && Object.keys(results).length === 0 && !error && (
-                <div className="p-6 text-center text-gray-500">Generate a plan to see results.</div>
-            )}
+    // --- STEP 2: Replace priceComparisonContent with shoppingListContent ---
+    const shoppingListContent = (
+        <div className="p-4">
+            <ShoppingListEnhanced
+                ingredients={uniqueIngredients || []}
+                totalCost={totalCost || 0}
+                storeName={formData?.store || 'Woolworths'}
+                onShowToast={showToast}
+                results={results || {}}
+            />
         </div>
     );
     
@@ -494,7 +445,9 @@ const MainApp = ({
                                         )}
                                         
                                         {contentView === 'meals' && mealPlan?.length > 0 && mealPlanContent}
-                                        {contentView === 'ingredients' && Object.keys(results)?.length > 0 && priceComparisonContent}
+                                        
+                                        {/* STEP 3: Update Render Call */}
+                                        {contentView === 'ingredients' && Object.keys(results)?.length > 0 && shoppingListContent}
                                         
                                         {(contentView === 'meals' || contentView === 'ingredients') && (!results || Object.keys(results).length === 0) && !loading && (
                                             <div className="p-6 text-center text-gray-500">
