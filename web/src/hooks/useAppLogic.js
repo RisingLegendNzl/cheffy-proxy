@@ -1,6 +1,7 @@
 // web/src/hooks/useAppLogic.js
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
+import usePlanPersistence from './usePlanPersistence'; // Step 1: Add Import
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -114,6 +115,22 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
+    
+    // Step 2: Initialize Persistence Hook
+    const planPersistence = usePlanPersistence({
+        userId,
+        isAuthReady,
+        db,
+        mealPlan,
+        results,
+        uniqueIngredients,
+        formData,
+        nutritionalTargets,
+        showToast,
+        setMealPlan,
+        setResults,
+        setUniqueIngredients
+    });
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -928,7 +945,19 @@ const useAppLogic = ({
         handleSignIn,
         handleSignOut,
         onToggleMealEaten,
+
+        // Step 3: Plan persistence additions
+        savedPlans: planPersistence.savedPlans,
+        activePlanId: planPersistence.activePlanId,
+        handleSavePlan: planPersistence.savePlan,
+        handleLoadPlan: planPersistence.loadPlan,
+        handleListPlans: planPersistence.listPlans,
+        handleDeletePlan: planPersistence.deletePlan,
+        handleSetActivePlan: planPersistence.setActivePlan,
+        savingPlan: planPersistence.savingPlan,
+        loadingPlan: planPersistence.loadingPlan,
     };
 };
 
 export default useAppLogic;
+
