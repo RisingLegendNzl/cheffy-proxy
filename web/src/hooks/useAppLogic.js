@@ -1,7 +1,7 @@
 // web/src/hooks/useAppLogic.js
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
-import usePlanPersistence from './usePlanPersistence'; // <--- ADDED
+import usePlanPersistence from './usePlanPersistence';
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -82,7 +82,6 @@ const useAppLogic = ({
     nutritionalTargets,
     setNutritionalTargets
 }) => {
-    console.log('[DEBUG-L1] useAppLogic: Hook started.');
     // --- State ---
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
@@ -150,8 +149,7 @@ const useAppLogic = ({
         setTotalCost(newTotal);
     }, []);
 
-    // --- Plan Persistence Hook Call (ADDED) ---
-    console.log('[DEBUG-L2] useAppLogic: Calling usePlanPersistence...');
+    // --- Plan Persistence Hook Call ---
     const planPersistence = usePlanPersistence({
         userId: userId || null,
         isAuthReady: isAuthReady || false,
@@ -166,7 +164,6 @@ const useAppLogic = ({
         setResults: setResults || (() => {}),
         setUniqueIngredients: setUniqueIngredients || (() => {})
     });
-    console.log('[DEBUG-L3] useAppLogic: usePlanPersistence call completed.');
     // --- End Plan Persistence Hook Call ---
 
     // --- Profile & Settings Handlers ---
@@ -891,7 +888,6 @@ const useAppLogic = ({
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
 
     // --- Return all handlers and computed values ---
-    console.log('[DEBUG-L4] useAppLogic: Returning final logic object...');
     return {
         // State
         results,
@@ -951,7 +947,7 @@ const useAppLogic = ({
         handleSignOut,
         onToggleMealEaten,
         
-        // Plan persistence additions (ADDED)
+        // Plan persistence additions
         savedPlans: planPersistence.savedPlans,
         activePlanId: planPersistence.activePlanId,
         handleSavePlan: planPersistence.savePlan,
