@@ -123,7 +123,7 @@ const App = () => {
         }
     }, [userId]);
 
-    // --- Business Logic Hook - FIXED: Added setContentView prop ---
+    // --- Business Logic Hook ---
     const logic = useAppLogic({
         auth,
         db,
@@ -133,8 +133,7 @@ const App = () => {
         formData,
         setFormData,
         nutritionalTargets,
-        setNutritionalTargets,
-        setContentView  // ADDED: Pass setContentView for auto-navigation after plan generation
+        setNutritionalTargets
     });
 
     // --- Form Handlers ---
@@ -193,11 +192,14 @@ const App = () => {
         setAuthError(null);
     }, [logic]);
 
-    // --- Edit Profile Handler ---
+    // --- Edit Profile Handler (FIXED) ---
     const handleEditProfile = useCallback(() => {
-        setIsSettingsOpen(false);
-        setContentView('profile');
-        setIsMenuOpen(false);
+        setIsSettingsOpen(false); // Close settings panel
+        setContentView('profile'); // Navigate to profile view (right panel)
+        // On mobile, we may want to show the form, but the form is on the LEFT
+        // The user likely wants to see the profile summary on the RIGHT
+        // So we do NOT open isMenuOpen here
+        
         // Optional: scroll to top
         setTimeout(() => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -305,9 +307,6 @@ const App = () => {
                     // Responsive
                     isMobile={isMobile}
                     isDesktop={isDesktop}
-                    
-                    // Plans hook
-                    plans={logic.plans}
                 />
             )}
         </>
