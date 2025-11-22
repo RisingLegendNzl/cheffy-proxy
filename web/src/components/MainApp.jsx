@@ -1,12 +1,8 @@
 // web/src/components/MainApp.jsx
-import React, { useState, useCallback } from 'react';
+import React from 'react';
 import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered, Utensils } from 'lucide-react';
 
-// --- New Component Imports ---
-import SavePlanModal from './SavePlanModal';
-import SavedPlansList from './SavedPlansList';
-
-// --- Component Imports (Existing) ---
+// --- Component Imports ---
 import MacroRing from './MacroRing';
 import MacroBar from './MacroBar';
 import InputField from './InputField';
@@ -71,141 +67,97 @@ const categoryIconMap = {
  * Receives all data and handlers via props
  * Renders the main application UI
  */
-const MainApp = (logic) => {
+const MainApp = ({
+    // User & Auth
+    userId,
+    isAuthReady,
+    firebaseConfig,
+    firebaseInitializationError,
     
-    // --- Local State ---
-    const [isSavePlanOpen, setIsSavePlanOpen] = useState(false);
-    const [isSavedPlansOpen, setIsSavedPlansOpen] = useState(false);
+    // Form Data
+    formData,
+    handleChange,
+    handleSliderChange,
     
-    // --- Destructuring Logic ---
-    const { 
-        // User & Auth
-        userId,
-        isAuthReady,
-        firebaseConfig,
-        firebaseInitializationError,
-        
-        // Form Data
-        formData,
-        handleChange,
-        handleSliderChange,
-        
-        // Nutritional Targets
-        nutritionalTargets,
-        
-        // Results & Plan
-        results,
-        uniqueIngredients,
-        mealPlan,
-        totalCost,
-        categorizedResults,
-        hasInvalidMeals,
-        
-        // UI State
-        loading,
-        error,
-        eatenMeals,
-        selectedDay,
-        setSelectedDay,
-        contentView,
-        setContentView,
-        isMenuOpen,
-        setIsMenuOpen,
-        diagnosticLogs,
-        nutritionCache,
-        loadingNutritionFor,
-        logHeight,
-        setLogHeight,
-        isLogOpen,
-        setIsLogOpen,
-        failedIngredientsHistory,
-        statusMessage,
-        showOrchestratorLogs,
-        setShowOrchestratorLogs,
-        showFailedIngredientsLogs,
-        setShowFailedIngredientsLogs,
-        generationStepKey,
-        generationStatus,
-        latestLog,
-        selectedMeal,
-        setSelectedMeal,
-        useBatchedMode,
-        setUseBatchedMode,
-        toasts,
-        showSuccessModal,
-        setShowSuccessModal,
-        planStats,
-        
-        // Settings
-        isSettingsOpen,
-        setIsSettingsOpen,
-        
-        // Handlers
-        handleGeneratePlan,
-        handleLoadProfile,
-        handleSaveProfile,
-        handleFetchNutrition,
-        handleSubstituteSelection,
-        handleQuantityChange,
-        handleDownloadFailedLogs,
-        handleDownloadLogs,
-        onToggleMealEaten,
-        handleRefresh,
-        handleSignOut,
-        showToast,
-        removeToast,
-        
-        // Responsive
-        isMobile,
-        isDesktop,
-        
-        // Plans
-        plans,
-    } = logic;
-
-    // --- Plan Handlers ---
-    const handleOpenSavePlan = useCallback(() => {
-        setIsSavePlanOpen(true);
-    }, []);
-
-    const handleSavePlan = useCallback(async (planName) => {
-        if (!plans || !plans.savePlan) return;
-        const result = await plans.savePlan(planName);
-        if (!result?.error) {
-            setIsSavePlanOpen(false);
-            showToast && showToast('Plan saved successfully', 'success');
-        }
-    }, [plans, showToast]);
-
-    const handleOpenSavedPlans = useCallback(() => {
-        setIsSavedPlansOpen(true);
-        setIsSettingsOpen(false);
-    }, []);
-
-    const handleLoadPlan = useCallback(async (planId) => {
-        if (!plans || !plans.loadPlan) return;
-        const result = await plans.loadPlan(planId);
-        if (!result?.error) {
-            setIsSavedPlansOpen(false);
-            showToast && showToast('Plan loaded', 'success');
-        }
-    }, [plans, showToast]);
-
-    const handleDeletePlan = useCallback(async (planId) => {
-        if (!plans || !plans.deletePlan) return;
-        const result = await plans.deletePlan(planId);
-        if (!result?.error) {
-            showToast && showToast('Plan deleted', 'info');
-        }
-    }, [plans, showToast]);
-
-    const handleSetActivePlan = useCallback(async (planId) => {
-        if (!plans || !plans.setActive) return;
-        const result = await plans.setActive(planId);
-        if (!result?.error) {
-            showToast && showToast('Active plan updated', 'success');
-        }
-    }, [plans, showToast]);
+    // Nutritional Targets
+    nutritionalTargets,
+    
+    // Results & Plan
+    results,
+    uniqueIngredients,
+    mealPlan,
+    totalCost,
+    categorizedResults,
+    hasInvalidMeals,
+    
+    // UI State
+    loading,
+    error,
+    eatenMeals,
+    selectedDay,
+    setSelectedDay,
+    contentView,
+    setContentView,
+    isMenuOpen,
+    setIsMenuOpen,
+    
+    // Logs
+    diagnosticLogs,
+    showOrchestratorLogs,
+    setShowOrchestratorLogs,
+    showFailedIngredientsLogs,
+    setShowFailedIngredientsLogs,
+    failedIngredientsHistory,
+    logHeight,
+    setLogHeight,
+    isLogOpen,
+    setIsLogOpen,
+    latestLog,
+    
+    // Generation State
+    generationStepKey,
+    generationStatus,
+    
+    // Nutrition Cache
+    nutritionCache,
+    loadingNutritionFor,
+    
+    // Modal State
+    selectedMeal,
+    setSelectedMeal,
+    showSuccessModal,
+    setShowSuccessModal,
+    planStats,
+    
+    // Settings
+    isSettingsOpen,
+    setIsSettingsOpen,
+    useBatchedMode,
+    setUseBatchedMode,
+    
+    // Toasts
+    toasts,
+    removeToast,
+    
+    // Handlers
+    handleGeneratePlan,
+    handleLoadProfile,
+    handleSaveProfile,
+    handleFetchNutrition,
+    handleSubstituteSelection,
+    handleQuantityChange,
+    handleDownloadFailedLogs,
+    handleDownloadLogs,
+    onToggleMealEaten,
+    handleRefresh,
+    handleEditProfile,
+    handleSignOut,
+    showToast,
+    
+    // Responsive
+    isMobile,
+    isDesktop,
+}) => {
     
     const PlanCalculationErrorPanel = () => (
         <div className="p-6 text-center bg-red-100 text-red-800 rounded-lg shadow-lg m-4">
@@ -277,50 +229,36 @@ const MainApp = (logic) => {
     
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
-            {/* FIXED: Removed sticky positioning from day sidebar */}
             {mealPlan.length > 0 && (
-                <div className="w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
-                    <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
+                <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
+  <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
+ </div>
+            )}
+            {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
+                <MealPlanDisplay
+                    key={selectedDay}
+                    mealPlan={mealPlan}
+                    selectedDay={selectedDay}
+                    nutritionalTargets={nutritionalTargets}
+                    eatenMeals={eatenMeals}
+                    onToggleMealEaten={onToggleMealEaten}
+                    onViewRecipe={setSelectedMeal} 
+                />
+            ) : (
+                <div className="flex-1 text-center p-8 text-gray-500">
+                    {error && !loading ? (
+                         <div className="p-4 bg-red-50 text-red-800 rounded-lg">
+                             <AlertTriangle className="inline w-6 h-6 mr-2" />
+                             <strong>Error generating plan. Check logs for details.</strong>
+                             <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
+                         </div>
+                    ) : mealPlan.length === 0 && !loading ? (
+                         'Generate a plan to see your meals.'
+                    ) : (
+                         !loading && 'Select a valid day to view meals.'
+                    )}
                 </div>
             )}
-            <div className="flex-1">
-                {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
-                    <MealPlanDisplay
-                        key={selectedDay}
-                        mealPlan={mealPlan}
-                        selectedDay={selectedDay}
-                        nutritionalTargets={nutritionalTargets}
-                        eatenMeals={eatenMeals}
-                        onToggleMealEaten={onToggleMealEaten}
-                        onViewRecipe={setSelectedMeal} 
-                    />
-                ) : (
-                    <div className="flex-1 text-center p-8 text-gray-500">
-                        {error && !loading ? (
-                            <div className="p-4 bg-red-50 text-red-800 rounded-lg">
-                                <AlertTriangle className="inline w-6 h-6 mr-2" />
-                                <strong>Error generating plan. Check logs for details.</strong>
-                                <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
-                            </div>
-                        ) : mealPlan.length === 0 && !loading ? (
-                            'Generate a plan to see your meals.'
-                        ) : (
-                            !loading && 'Select a valid day to view meals.'
-                        )}
-                    </div>
-                )}
-
-                {/* Save plan button */}
-                {mealPlan && mealPlan.length > 0 && plans && (
-                    <button
-                        type="button"
-                        onClick={handleOpenSavePlan}
-                        className="mt-4 w-full py-3 rounded-xl font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-md transition duration-150 ease-in-out"
-                    >
-                        <Save className="inline-block w-5 h-5 mr-2" /> Save this plan
-                    </button>
-                )}
-            </div>
         </div>
     );
 
@@ -333,9 +271,8 @@ const MainApp = (logic) => {
                 onOpenSettings={() => setIsSettingsOpen(true)}
                 onNavigateToProfile={() => {
                     setContentView('profile');
-                    setIsMenuOpen(false);
+                    setIsMenuOpen(true);
                 }}
-                onOpenSavedPlans={handleOpenSavedPlans}
                 onSignOut={handleSignOut}
             />
     
@@ -349,7 +286,7 @@ const MainApp = (logic) => {
                 >
                     <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
                         <div className="flex flex-col md:flex-row">
-                            {/* --- SETUP FORM (LEFT PANEL) --- */}
+                            {/* --- SETUP FORM --- */}
                             <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
                                 <div className="flex justify-between items-center mb-6">
                                     <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
@@ -365,7 +302,7 @@ const MainApp = (logic) => {
                                          <button
                                             onClick={() => handleSaveProfile(false)}
                                             disabled={!isAuthReady || !userId || userId.startsWith('local_')} 
-                                            className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
                                             title="Save Current Profile"
                                         >
                                             <Save size={14} className="mr-1" /> Save
@@ -374,7 +311,6 @@ const MainApp = (logic) => {
                                     </div>
                                 </div>
                                 
-                                {/* FORM WITH ALL INPUTS RESTORED */}
                                 <form onSubmit={handleGeneratePlan}>
                                     <FormSection 
                                         title="Personal Information" 
@@ -441,7 +377,7 @@ const MainApp = (logic) => {
                                 </form>
                             </div>
     
-                            {/* --- RESULTS VIEW (RIGHT PANEL) --- */}
+                            {/* --- RESULTS VIEW --- */}
                             <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
                                 <div className="border-b">
                                     <div className="p-6 md:p-8">
@@ -462,7 +398,6 @@ const MainApp = (logic) => {
                                             </div>
                                         )}
                                 
-                                        {/* FIXED: ProfileTab shows when contentView='profile' - NOT sticky */}
                                         {contentView === 'profile' && (
                                             <ProfileTab 
                                                 formData={formData} 
@@ -519,11 +454,7 @@ const MainApp = (logic) => {
                 onClearData={() => {
                     showToast('All data cleared', 'success');
                 }}
-                onEditProfile={() => {
-                    setIsSettingsOpen(false);
-                    setIsMenuOpen(false); 
-                    setContentView('profile');
-                }}
+                onEditProfile={handleEditProfile}
                 showOrchestratorLogs={showOrchestratorLogs}
                 onToggleOrchestratorLogs={setShowOrchestratorLogs}
                 showFailedIngredientsLogs={showFailedIngredientsLogs}
@@ -559,31 +490,6 @@ const MainApp = (logic) => {
                 <RecipeModal 
                     meal={selectedMeal} 
                     onClose={() => setSelectedMeal(null)} 
-                />
-            )}
-
-            {plans && (
-                <SavePlanModal
-                    isOpen={isSavePlanOpen}
-                    onClose={() => setIsSavePlanOpen(false)}
-                    onSave={handleSavePlan}
-                    loading={plans.loading}
-                    error={plans.error}
-                />
-            )}
-
-            {plans && (
-                <SavedPlansList
-                    isOpen={isSavedPlansOpen}
-                    onClose={() => setIsSavedPlansOpen(false)}
-                    plans={plans.savedPlans}
-                    activePlanId={plans.activePlanId}
-                    loading={plans.loading}
-                    error={plans.error}
-                    onLoadPlan={handleLoadPlan}
-                    onDeletePlan={handleDeletePlan}
-                    onSetActivePlan={handleSetActivePlan}
-                    onRefresh={plans.refreshPlans}
                 />
             )}
         </>
