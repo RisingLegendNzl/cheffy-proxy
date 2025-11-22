@@ -617,6 +617,16 @@ const useAppLogic = ({
                                 setResults(eventData.results || {});
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
+
+                                // ADD THESE DEBUG LOGS
+                                console.log('=== PLAN COMPLETE DEBUG ===');
+                                console.log('Results object:', eventData.results);
+                                console.log('Unique ingredients:', eventData.uniqueIngredients);
+                                console.log('Sample ingredient:', eventData.uniqueIngredients?.[0]);
+                                if (eventData.uniqueIngredients?.[0]) {
+                                    console.log('Sample allProducts:', eventData.results?.[eventData.uniqueIngredients[0].originalIngredient]?.allProducts);
+                                }
+                                console.log('==========================');
                                 
                                 setGenerationStepKey('complete');
                                 setGenerationStatus('Plan generation complete!');
@@ -960,4 +970,5 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
+
 
