@@ -192,15 +192,11 @@ const App = () => {
         setAuthError(null);
     }, [logic]);
 
-    // --- Edit Profile Handler (FIXED) ---
+    // --- Edit Profile Handler ---
     const handleEditProfile = useCallback(() => {
-        setIsSettingsOpen(false); // Close settings panel
-        setContentView('profile'); // Navigate to profile view (right panel)
-        // On mobile, we may want to show the form, but the form is on the LEFT
-        // The user likely wants to see the profile summary on the RIGHT
-        // So we do NOT open isMenuOpen here
+        setIsSettingsOpen(false);
+        setContentView('profile');
         
-        // Optional: scroll to top
         setTimeout(() => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }, 100);
@@ -248,31 +244,21 @@ const App = () => {
                     setSelectedDay={logic.setSelectedDay}
                     contentView={contentView}
                     setContentView={setContentView}
-                    isMenuOpen={isMenuOpen}
-                    setIsMenuOpen={setIsMenuOpen}
-                    
-                    // Logs
                     diagnosticLogs={logic.diagnosticLogs}
-                    showOrchestratorLogs={logic.showOrchestratorLogs}
-                    setShowOrchestratorLogs={logic.setShowOrchestratorLogs}
-                    showFailedIngredientsLogs={logic.showFailedIngredientsLogs}
-                    setShowFailedIngredientsLogs={logic.setShowFailedIngredientsLogs}
-                    failedIngredientsHistory={logic.failedIngredientsHistory}
+                    nutritionCache={logic.nutritionCache}
+                    loadingNutritionFor={logic.loadingNutritionFor}
                     logHeight={logic.logHeight}
                     setLogHeight={logic.setLogHeight}
                     isLogOpen={logic.isLogOpen}
                     setIsLogOpen={logic.setIsLogOpen}
-                    latestLog={logic.latestLog}
-                    
-                    // Generation State
+                    failedIngredientsHistory={logic.failedIngredientsHistory}
+                    statusMessage={logic.statusMessage}
+                    showOrchestratorLogs={logic.showOrchestratorLogs}
+                    setShowOrchestratorLogs={logic.setShowOrchestratorLogs}
+                    showFailedIngredientsLogs={logic.showFailedIngredientsLogs}
+                    setShowFailedIngredientsLogs={logic.setShowFailedIngredientsLogs}
                     generationStepKey={logic.generationStepKey}
                     generationStatus={logic.generationStatus}
-                    
-                    // Nutrition Cache
-                    nutritionCache={logic.nutritionCache}
-                    loadingNutritionFor={logic.loadingNutritionFor}
-                    
-                    // Modal State
                     selectedMeal={logic.selectedMeal}
                     setSelectedMeal={logic.setSelectedMeal}
                     showSuccessModal={logic.showSuccessModal}
@@ -307,6 +293,9 @@ const App = () => {
                     // Responsive
                     isMobile={isMobile}
                     isDesktop={isDesktop}
+                    
+                    // Plans (NEW - from usePlans hook)
+                    plans={logic.plans}
                 />
             )}
         </>
