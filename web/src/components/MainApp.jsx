@@ -49,7 +49,7 @@ const categoryIconMap = {
     'grains': <EmojiIcon code="1f33e" alt="grains" />,
     'carb': <EmojiIcon code="1f33e" alt="grains" />,
     'meat': <EmojiIcon code="1f969" alt="meat" />,
-    'protein': <EmojiIcon code="1f969" alt="meat" />,
+    'protein': <EmojiIcon code="1f969" alt="protein" />,
     'seafood': <EmojiIcon code="1f41f" alt="seafood" />,
     'dairy': <EmojiIcon code="1f95b" alt="dairy" />,
     'fat': <EmojiIcon code="1f951" alt="fat" />,
@@ -345,7 +345,7 @@ const MainApp = (logic) => {
                 onOpenSettings={() => setIsSettingsOpen(true)}
                 onNavigateToProfile={() => {
                     setContentView('profile');
-                    setIsMenuOpen(false);
+                    setIsMenuOpen(false); // <--- CORRECTED: Ensures the profile view (right panel) is visible on mobile
                 }}
                 onOpenSavedPlans={handleOpenSavedPlans} // 6. ADDED: My Saved Plans entry point
                 onSignOut={handleSignOut}
