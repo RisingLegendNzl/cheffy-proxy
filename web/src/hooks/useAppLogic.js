@@ -80,7 +80,8 @@ const useAppLogic = ({
     formData,
     setFormData,
     nutritionalTargets,
-    setNutritionalTargets
+    setNutritionalTargets,
+    setContentView
 }) => {
     // --- State ---
     const [results, setResults] = useState({});
@@ -628,6 +629,7 @@ const useAppLogic = ({
                                 
                                 setTimeout(() => {
                                   setShowSuccessModal(true);
+                                  if (setContentView) setContentView('meals');
                                   setTimeout(() => {
                                     setShowSuccessModal(false);
                                   }, 2500);
