@@ -14,8 +14,7 @@ import MainApp from './components/MainApp';
 import useAppLogic from './hooks/useAppLogic';
 import { useResponsive } from './hooks/useResponsive';
 
-// --- Firebase Config variables ---\
-console.log('--- DEBUG: App.jsx Start ---');
+// --- Firebase Config variables ---
 let firebaseConfig = null;
 let firebaseInitializationError = null;
 let globalAppId = 'default-app-id';
@@ -55,7 +54,6 @@ const App = () => {
 
     // --- Firebase Initialization and Auth Effect ---
     useEffect(() => {
-        console.log('[DEBUG-A1] Firebase Effect: Starting init check...');
         const firebaseConfigStr = typeof __firebase_config !== 'undefined' 
             ? __firebase_config 
             : import.meta.env.VITE_FIREBASE_CONFIG;
@@ -93,14 +91,14 @@ const App = () => {
                 setDb(dbInstance);
                 setAuth(authInstance);
                 setLogLevel('debug');
-                console.log("[FIREBASE] Initialized successfully. DB and Auth set.");
+                console.log("[FIREBASE] Initialized.");
 
                 const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
                     if (user) {
-                        console.log("[FIREBASE] User state change: Signed in (UID:", user.uid, ")");
+                        console.log("[FIREBASE] User is signed in:", user.uid);
                         setUserId(user.uid);
                     } else {
-                        console.log("[FIREBASE] User state change: Signed out.");
+                        console.log("[FIREBASE] User is signed out.");
                         setUserId(null);
                     }
                     if (!isAuthReady) {
@@ -118,7 +116,6 @@ const App = () => {
 
     // --- Landing page visibility ---
     useEffect(() => {
-        console.log('[DEBUG-A2] Auth state:', { userId, showLandingPage });
         if (!userId) {
             setShowLandingPage(true);
         } else {
@@ -127,7 +124,6 @@ const App = () => {
     }, [userId]);
 
     // --- Business Logic Hook ---
-    console.log('[DEBUG-A3] Calling useAppLogic...');
     const logic = useAppLogic({
         auth,
         db,
@@ -139,7 +135,6 @@ const App = () => {
         nutritionalTargets,
         setNutritionalTargets
     });
-    console.log('[DEBUG-A4] useAppLogic called. Logic object received:', logic ? Object.keys(logic).length + ' keys' : 'null');
 
     // --- Form Handlers ---
     const handleChange = (e) => {
@@ -207,7 +202,6 @@ const App = () => {
     }, []);
 
     // --- Render ---
-    console.log('[DEBUG-A5] Rendering App component. showLandingPage:', showLandingPage);
     return (
         <>
             {showLandingPage ? (
@@ -262,7 +256,7 @@ const App = () => {
                     logHeight={logic.logHeight}
                     setLogHeight={logic.setLogHeight}
                     isLogOpen={logic.isLogOpen}
-                    setIsLogOpen={logic.isLogOpen} // Corrected typo
+                    setIsLogOpen={logic.isLogOpen} 
                     latestLog={logic.latestLog}
                     
                     // Generation State
