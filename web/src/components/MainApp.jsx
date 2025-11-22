@@ -31,7 +31,8 @@ import LoadingOverlay from './LoadingOverlay';
 import SuccessModal from './SuccessModal';
 import MealCard from './MealCard';
 import DayNavigator from './DayNavigator';
-import ShoppingListEnhanced from './ShoppingListEnhanced'; // <-- STEP 4: Verified Import
+// import ShoppingListEnhanced from './ShoppingListEnhanced'; // <-- REMOVED
+import ShoppingListWithDetails from './ShoppingListWithDetails'; // <-- ADDED
 import FormSection from './FormSection';
 import SettingsPanel from './SettingsPanel';
 import BottomNav from './BottomNav';
@@ -204,15 +205,21 @@ const MainApp = ({
         setSavePlanName('');
     };
 
-    // --- STEP 2: Replace priceComparisonContent with shoppingListContent ---
+    // --- STEP 2: Replace with ShoppingListWithDetails ---
     const shoppingListContent = (
         <div className="p-4">
-            <ShoppingListEnhanced
+            <ShoppingListWithDetails
                 ingredients={uniqueIngredients || []}
+                results={results || {}}
                 totalCost={totalCost || 0}
                 storeName={formData?.store || 'Woolworths'}
                 onShowToast={showToast}
-                results={results || {}}
+                onSelectSubstitute={handleSubstituteSelection}
+                onQuantityChange={handleQuantityChange}
+                onFetchNutrition={handleFetchNutrition}
+                nutritionCache={nutritionCache || {}}
+                loadingNutritionFor={loadingNutritionFor}
+                categorizedResults={categorizedResults || {}}
             />
         </div>
     );
