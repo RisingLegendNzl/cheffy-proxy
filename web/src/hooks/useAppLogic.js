@@ -131,19 +131,20 @@ const useAppLogic = ({
     // ========================================
     // SECTION 2: CUSTOM HOOKS (Initialized after all required state/helpers are defined)
     // ========================================
+    // ADDED SAFETY GUARDS to prevent runtime crashes if inputs are momentarily null/undefined
     const planPersistence = usePlanPersistence({
-        userId,
-        isAuthReady,
-        db,
-        mealPlan,
-        results,
-        uniqueIngredients,
-        formData,
-        nutritionalTargets,
-        showToast, // Now defined above
-        setMealPlan, // Now defined above
-        setResults, // Now defined above
-        setUniqueIngredients // Now defined above
+        userId: userId || null,
+        isAuthReady: isAuthReady || false,
+        db: db || null,
+        mealPlan: mealPlan || [],
+        results: results || {},
+        uniqueIngredients: uniqueIngredients || [],
+        formData: formData || {},
+        nutritionalTargets: nutritionalTargets || {},
+        showToast: showToast || (() => {}), // Now defined above
+        setMealPlan: setMealPlan || (() => {}), // Now defined above
+        setResults: setResults || (() => {}), // Now defined above
+        setUniqueIngredients: setUniqueIngredients || (() => {}) // Now defined above
     });
 
 
