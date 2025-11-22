@@ -10,7 +10,6 @@ const { createClient } = require('@vercel/kv');
 // Import cache-wrapped microservices
 const { fetchPriceData } = require('../price-search.js'); // Relative path (api/price-search.js) - This is CORRECT
 const { fetchNutritionData } = require('../nutrition-search.js'); // Relative path (api/nutrition-search.js) - This is CORRECT
-const { saveCurrentPlan } = require('../lib/kv-storage'); // [Change 1: Add Import]
 
 // --- [FIX] Corrected relative paths for Vercel bundling ---
 // These files are at the root of the /var/task/ bundle, so we go up two levels.
@@ -877,7 +876,6 @@ module.exports = async (request, response) => {
         if (!formData || typeof formData !== 'object' || Object.keys(formData).length < 5) {
             throw new Error("Missing or invalid 'formData' in request body.");
         }
-        const uid = request.body.uid; // [Change 2: Extract UID]
         if (!nutritionalTargets || typeof nutritionalTargets !== 'object' || !nutritionalTargets.calories) {
             throw new Error("Missing or invalid 'nutritionalTargets' in request body.");
         }
@@ -1364,28 +1362,6 @@ module.exports = async (request, response) => {
 
         log(`Successfully completed generation for Day ${day}.`, 'SUCCESS', 'SYSTEM');
         
-        // --- Auto-save current plan if UID is provided --- [Change 3: Add Auto-Save Hook]
-        if (uid) {
-            try {
-                const planDataToSave = {
-                    mealPlan: [responseData.mealPlanForDay],
-                    dayResults: responseData.dayResults,
-                    dayUniqueIngredients: responseData.dayUniqueIngredients,
-                    generatedAt: new Date().toISOString(),
-                    day: day,
-                };
-                const saved = await saveCurrentPlan(uid, planDataToSave);
-                if (saved) {
-                    log(`Auto-saved plan for Day ${day} to user ${uid}`, 'INFO', 'PERSISTENCE');
-                } else {
-                    log(`Failed to auto-save plan for Day ${day}`, 'WARN', 'PERSISTENCE');
-                }
-            } catch (saveError) {
-                log(`Error auto-saving plan: ${saveError.message}`, 'WARN', 'PERSISTENCE');
-                // Don't fail the request if save fails
-            }
-        }
-
         sendFinalDataAndClose(responseData);
         return; 
 
