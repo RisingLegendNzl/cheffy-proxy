@@ -1,5 +1,7 @@
 // web/src/components/ShoppingListEnhanced.jsx
-import React, { useState, useMemo } from 'react';
+// Enhanced with Shopping List Summary Card
+
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   ShoppingBag, 
   Download, 
@@ -14,16 +16,28 @@ import { COLORS, SHADOWS } from '../constants';
 import { formatGrams, copyToClipboard, groupBy } from '../helpers';
 
 /**
- * Enhanced shopping list with checkboxes, export, and better organization
+ * Enhanced shopping list with checkboxes, summary card, and export features
  */
 const ShoppingListEnhanced = ({ 
   ingredients = [], 
   totalCost = 0,
   storeName = 'Woolworths',
-  onShowToast 
+  onShowToast = () => {},
+  results = {} 
 }) => {
   const [checkedItems, setCheckedItems] = useState({});
   const [expandedCategories, setExpandedCategories] = useState({});
+
+  // Initialize all items as checked when ingredients change
+  useEffect(() => {
+    const initialCheckedState = {};
+    ingredients.forEach(item => {
+      if (item.originalIngredient) {
+        initialCheckedState[item.originalIngredient] = true;
+      }
+    });
+    setCheckedItems(initialCheckedState);
+  }, [ingredients]);
 
   // Group ingredients by category
   const categorizedIngredients = useMemo(() => {
@@ -32,6 +46,35 @@ const ShoppingListEnhanced = ({
 
   const totalItems = ingredients.length;
   const checkedCount = Object.values(checkedItems).filter(Boolean).length;
+
+  // Calculate total cost of selected items
+  const selectedTotal = useMemo(() => {
+    let total = 0;
+    ingredients.forEach(item => {
+      const isChecked = checkedItems[item.originalIngredient];
+      if (isChecked) {
+        // Get the product result for this ingredient
+        const normalizedKey = item.originalIngredient?.toLowerCase().trim();
+        const result = results[normalizedKey];
+        
+        if (result && result.products && result.products.length > 0) {
+          // Get the selected product
+          const selectedProduct = result.selectedIndex !== undefined 
+            ? result.products[result.selectedIndex]
+            : result.products[0];
+          
+          if (selectedProduct && selectedProduct.product_price) {
+            const price = parseFloat(selectedProduct.product_price);
+            const quantity = result.userQuantity || 1;
+            if (!isNaN(price)) {
+              total += price * quantity;
+            }
+          }
+        }
+      }
+    });
+    return total;
+  }, [checkedItems, ingredients, results]);
 
   // Toggle item checked state
   const handleToggleItem = (ingredientKey) => {
@@ -66,8 +109,8 @@ const ShoppingListEnhanced = ({
   // Export to text
   const handleCopyList = async () => {
     let text = `Shopping List - ${storeName}\n`;
-    text += `Total: $${totalCost.toFixed(2)}\n`;
-    text += `Items: ${totalItems}\n`;
+    text += `Total: $${selectedTotal.toFixed(2)}\n`;
+    text += `Items: ${totalItems} (${checkedCount} selected)\n`;
     text += '='.repeat(40) + '\n\n';
 
     Object.entries(categorizedIngredients).forEach(([category, items]) => {
@@ -97,17 +140,17 @@ const ShoppingListEnhanced = ({
       try {
         await navigator.share({
           title: 'Cheffy Shopping List',
-          text: `My shopping list from Cheffy - ${totalItems} items`,
+          text: `My shopping list from Cheffy - ${checkedCount} of ${totalItems} items selected`,
         });
       } catch (err) {
         console.error('Share failed:', err);
       }
     } else {
-      handleCopyList(); // Fallback to copy
+      handleCopyList();
     }
   };
 
-  // Category icon map (reuse from constants if needed)
+  // Category icon map
   const getCategoryIcon = (category) => {
     const iconMap = {
       produce: '🥕',
@@ -127,34 +170,44 @@ const ShoppingListEnhanced = ({
 
   return (
     <div className="space-y-4">
-      {/* Header Card */}
+      {/* Shopping List Summary Card - NEW */}
       <div
-        className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl p-6 shadow-lg"
+        className="rounded-2xl p-6 shadow-xl"
+        style={{
+          background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+        }}
       >
-        <div className="flex items-center justify-between mb-4">
+        {/* Header Row */}
+        <div className="flex items-start justify-between mb-6">
           <div className="flex items-center">
-            <ShoppingBag size={32} className="mr-3" />
+            <div className="bg-white bg-opacity-20 rounded-xl p-3 mr-4">
+              <ShoppingBag size={32} className="text-white" />
+            </div>
             <div>
-              <h2 className="text-2xl font-bold">Shopping List</h2>
+              <h2 className="text-2xl font-bold text-white mb-1">Shopping List</h2>
               <p className="text-indigo-100 text-sm">
                 {totalItems} items from {storeName}
               </p>
             </div>
           </div>
           <div className="text-right">
-            <p className="text-3xl font-bold">${totalCost.toFixed(2)}</p>
+            <p className="text-4xl font-bold text-white mb-1">
+              ${selectedTotal.toFixed(2)}
+            </p>
             <p className="text-indigo-100 text-sm">Total Cost</p>
           </div>
         </div>
 
         {/* Progress Bar */}
-        <div className="bg-white bg-opacity-20 rounded-full h-2 overflow-hidden mb-2">
+        <div className="bg-white bg-opacity-20 rounded-full h-3 overflow-hidden mb-2">
           <div
-            className="bg-white h-2 transition-all duration-500"
-            style={{ width: `${totalItems > 0 ? (checkedCount / totalItems) * 100 : 0}%` }}
+            className="bg-white h-3 transition-all duration-500 ease-out"
+            style={{ 
+              width: `${totalItems > 0 ? (checkedCount / totalItems) * 100 : 0}%` 
+            }}
           />
         </div>
-        <p className="text-indigo-100 text-sm">
+        <p className="text-indigo-100 text-sm font-medium">
           {checkedCount} of {totalItems} items checked
         </p>
       </div>
