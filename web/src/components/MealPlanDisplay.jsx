@@ -4,7 +4,7 @@ import { BookOpen, Target, CheckCircle, AlertTriangle, Soup, Droplet, Wheat } fr
 import MacroBar from './MacroBar';
 
 // --- [MODIFIED] MealPlanDisplay Component ---
-const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe }) => {
+const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe, onSavePlanClick }) => {
     const dayData = mealPlan[selectedDay - 1];
 
     // Calculate eaten macros for the day
@@ -46,6 +46,19 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
     
     return (
         <div className="space-y-6">
+            
+            {/* Save Plan Button - Visible only if mealPlan exists */}
+            {mealPlan.length > 0 && (
+                <button
+                    onClick={() => onSavePlanClick && onSavePlanClick()}
+                    className="w-full py-3 px-4 rounded-lg font-semibold text-white transition-fast shadow-lg hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-indigo-300"
+                    // Using indigo-500 as a placeholder for COLORS.primary[500]
+                    style={{ backgroundColor: '#6366f1' }} 
+                >
+                    Save Plan
+                </button>
+            )}
+
             {/* Premium Header */}
             <div className="flex items-center justify-between pb-4 border-b border-gray-200">
                 <div className="flex items-center gap-3">
@@ -233,3 +246,4 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
 };
 
 export default MealPlanDisplay;
+
