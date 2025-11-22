@@ -161,7 +161,7 @@ const MainApp = (logic) => {
         handleDownloadLogs,
         onToggleMealEaten,
         handleRefresh,
-        handleEditProfile,
+        handleEditProfile, // Used in App.jsx and passed here
         handleSignOut,
         showToast,
         
@@ -529,13 +529,7 @@ const MainApp = (logic) => {
                 onClearData={() => {
                     showToast('All data cleared', 'success');
                 }}
-                onEditProfile={() => {
-                    // MODIFIED: Removing the handleEditProfile call and prioritizing state updates
-                    // to ensure the view change is not immediately overridden.
-                    setIsSettingsOpen(false);
-                    setIsMenuOpen(false); 
-                    setContentView('profile');
-                }}
+                onEditProfile={handleEditProfile}
                 showOrchestratorLogs={showOrchestratorLogs}
                 onToggleOrchestratorLogs={setShowOrchestratorLogs}
                 showFailedIngredientsLogs={showFailedIngredientsLogs}
