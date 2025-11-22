@@ -614,11 +614,23 @@ const useAppLogic = ({
                             case 'plan:complete':
                                 planComplete = true;
                                 setMealPlan(eventData.mealPlan || []);
-                                setResults(eventData.results || {});
+                                
+                                // FIX: Merge results carefully to preserve allProducts from ingredient:found events
+                                setResults(prev => {
+                                    const merged = { ...prev };
+                                    Object.entries(eventData.results || {}).forEach(([key, value]) => {
+                                        merged[key] = {
+                                            ...merged[key],  // Keep existing data (including allProducts)
+                                            ...value         // Merge new data
+                                        };
+                                    });
+                                    return merged;
+                                });
+
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
 
-                                // ADD THESE DEBUG LOGS
+                                // KEEP DEBUG LOGS
                                 console.log('=== PLAN COMPLETE DEBUG ===');
                                 console.log('Results object:', eventData.results);
                                 console.log('Unique ingredients:', eventData.uniqueIngredients);
