@@ -123,7 +123,7 @@ const App = () => {
         }
     }, [userId]);
 
-    // --- Business Logic Hook ---
+    // --- Business Logic Hook - FIXED: Added setContentView prop ---
     const logic = useAppLogic({
         auth,
         db,
@@ -133,7 +133,8 @@ const App = () => {
         formData,
         setFormData,
         nutritionalTargets,
-        setNutritionalTargets
+        setNutritionalTargets,
+        setContentView  // ADDED: Pass setContentView for auto-navigation after plan generation
     });
 
     // --- Form Handlers ---
@@ -192,12 +193,11 @@ const App = () => {
         setAuthError(null);
     }, [logic]);
 
-    // --- Edit Profile Handler (FIXED) ---
+    // --- Edit Profile Handler ---
     const handleEditProfile = useCallback(() => {
-        setIsSettingsOpen(false); // Close settings panel
-        setContentView('profile'); // Navigate to profile view (right panel)
-        setIsMenuOpen(false); // <--- ADDED: Ensure the profile view (right panel) is visible on mobile.
-        
+        setIsSettingsOpen(false);
+        setContentView('profile');
+        setIsMenuOpen(false);
         // Optional: scroll to top
         setTimeout(() => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -305,6 +305,9 @@ const App = () => {
                     // Responsive
                     isMobile={isMobile}
                     isDesktop={isDesktop}
+                    
+                    // Plans hook
+                    plans={logic.plans}
                 />
             )}
         </>
@@ -312,4 +315,3 @@ const App = () => {
 };
 
 export default App;
-
