@@ -1,7 +1,6 @@
 // web/src/hooks/useAppLogic.js
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
-import usePlans from './usePlans'; // 1. ADDED: Import usePlans hook
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -115,29 +114,6 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
-
-    // --- PLANS HOOK INTEGRATION ---
-    // 2. ADDED: Initialize usePlans hook
-    const plans = usePlans({
-        userId,
-        currentPlanData: {
-            mealPlan,
-            results,
-            totalCost,
-            uniqueIngredients,
-            formData,
-            nutritionalTargets
-        },
-        onPlanLoaded: useCallback((loadedData) => {
-            if (loadedData.mealPlan) setMealPlan(loadedData.mealPlan);
-            if (loadedData.results) setResults(loadedData.results);
-            if (loadedData.totalCost) setTotalCost(loadedData.totalCost);
-            if (loadedData.uniqueIngredients) setUniqueIngredients(loadedData.uniqueIngredients);
-            if (loadedData.formData) setFormData(loadedData.formData);
-            if (loadedData.nutritionalTargets) setNutritionalTargets(loadedData.nutritionalTargets);
-            showToast('Plan loaded successfully!', 'success');
-        }, [setFormData, setNutritionalTargets, showToast])
-    });
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -952,11 +928,7 @@ const useAppLogic = ({
         handleSignIn,
         handleSignOut,
         onToggleMealEaten,
-
-        // Plans hook (NEW - add this line)
-        plans, // 3. ADDED: Expose the plans object
     };
 };
 
 export default useAppLogic;
-
