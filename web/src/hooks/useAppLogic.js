@@ -5,7 +5,10 @@ import usePlanPersistence from './usePlanPersistence'; // <--- ADDED
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
-// ... (rest of the configuration constants)
+const ORCHESTRATOR_DAY_API_URL = '/api/plan/day';
+const ORCHESTRATOR_FULL_PLAN_API_URL = '/api/plan/generate-full-plan';
+const NUTRITION_API_URL = '/api/nutrition-search';
+const MAX_SUBSTITUTES = 5;
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = {
@@ -19,7 +22,6 @@ const MOCK_PRODUCT_TEMPLATE = {
 
 // --- SSE Stream Parser ---
 function processSseChunk(value, buffer, decoder) {
-    // ... (content of processSseChunk function remains the same)
     const chunk = decoder.decode(value, { stream: true });
     buffer += chunk;
     
@@ -80,6 +82,7 @@ const useAppLogic = ({
     nutritionalTargets,
     setNutritionalTargets
 }) => {
+    console.log('[DEBUG-L1] useAppLogic: Hook started.');
     // --- State ---
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
@@ -148,6 +151,7 @@ const useAppLogic = ({
     }, []);
 
     // --- Plan Persistence Hook Call (ADDED) ---
+    console.log('[DEBUG-L2] useAppLogic: Calling usePlanPersistence...');
     const planPersistence = usePlanPersistence({
         userId: userId || null,
         isAuthReady: isAuthReady || false,
@@ -162,6 +166,7 @@ const useAppLogic = ({
         setResults: setResults || (() => {}),
         setUniqueIngredients: setUniqueIngredients || (() => {})
     });
+    console.log('[DEBUG-L3] useAppLogic: usePlanPersistence call completed.');
     // --- End Plan Persistence Hook Call ---
 
     // --- Profile & Settings Handlers ---
@@ -886,6 +891,7 @@ const useAppLogic = ({
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
 
     // --- Return all handlers and computed values ---
+    console.log('[DEBUG-L4] useAppLogic: Returning final logic object...');
     return {
         // State
         results,
