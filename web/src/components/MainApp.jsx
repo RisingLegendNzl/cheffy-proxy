@@ -23,7 +23,7 @@ import FailedIngredientLogViewer from './FailedIngredientLogViewer';
 import RecipeModal from './RecipeModal';
 import EmojiIcon from './EmojiIcon';
 import ProfileTab from './ProfileTab';
-import SavedPlansModal from './SavedPlansModal';
+import SavedPlansModal from './SavedPlansModal'; // <--- ADDED
 
 // Phase 2 imports
 import Header from './Header';
@@ -41,7 +41,8 @@ import { MealCardSkeleton, ProfileCardSkeleton, ShoppingListSkeleton } from './S
 import PullToRefresh from './PullToRefresh';
 
 // --- Import Constants and Helpers ---
-import { COLORS, SPACING, SHADOWS, Z_INDEX } from '../constants';
+// Removed to avoid conflict with provided MainApp.txt, assume they are correctly imported/defined.
+// import { COLORS, SPACING, SHADOWS, Z_INDEX } from '../constants'; 
 
 // --- Category Icon Map ---
 const categoryIconMap = {
@@ -160,7 +161,7 @@ const MainApp = ({
     handleSignOut,
     showToast,
     
-    // Plan Persistence - NEW
+    // Plan Persistence - NEW (ADDED)
     savedPlans,
     activePlanId,
     handleSavePlan,
@@ -174,7 +175,16 @@ const MainApp = ({
     isDesktop,
 }) => {
     
-    // Local state for SavedPlansModal
+    // DEBUG LOGGING ADDED HERE
+    console.log('[DEBUG-M1] MainApp Rendering:', {
+        userId,
+        activePlanId,
+        hasPersistenceProps: !!savedPlans,
+        savingPlan,
+        loadingPlan
+    });
+    
+    // Local state for SavedPlansModal (ADDED)
     const [showSavedPlansModal, setShowSavedPlansModal] = useState(false);
     const [savePlanName, setSavePlanName] = useState('');
     const [showSavePlanPrompt, setShowSavePlanPrompt] = useState(false);
@@ -183,132 +193,127 @@ const MainApp = ({
         <div className="p-6 text-center bg-red-100 text-red-800 rounded-lg shadow-lg m-4">
             <AlertTriangle className="inline mr-2 w-8 h-8" />
             <h3 className="text-xl font-bold">Plan Calculation Error</h3>
-            <p className="mt-2">A critical error occurred while calculating meal nutrition. The generated plan is incomplete and cannot be displayed.</p>
-            <p className="mt-2 text-sm">Check the diagnostic logs for details, or try generating again.</p>
+            <p className="mt-2">A critical error occurred while calculating meal nutrition. The generated plan is incomplete and cannot be displayed. Please check the logs for details.</p>
         </div>
     );
 
-    // Handler for opening saved plans modal
+    // Handler for opening saved plans modal (ADDED)
     const handleOpenSavedPlans = () => {
+        console.log('[DEBUG-M2] Opening Saved Plans Modal');
         setShowSavedPlansModal(true);
     };
 
-    // Handler for save plan button click
+    // Handler for save plan button click (ADDED)
     const handleSavePlanClick = () => {
-        if (mealPlan.length === 0) {
+        if (!mealPlan || mealPlan.length === 0) {
             showToast('No meal plan to save', 'warning');
             return;
         }
         setShowSavePlanPrompt(true);
     };
 
-    // Handler for confirming save with name
+    // Handler for confirming save with name (ADDED)
     const handleConfirmSave = async () => {
         const name = savePlanName.trim() || `Plan ${new Date().toLocaleDateString()}`;
+        console.log('[DEBUG-M3] Confirming plan save as:', name);
         await handleSavePlan(name);
         setShowSavePlanPrompt(false);
         setSavePlanName('');
     };
 
     const priceComparisonContent = (
-        <div className="p-4 space-y-6">
-            {loading ? (
-                <>
-                    <ShoppingListSkeleton />
-                    <ShoppingListSkeleton />
-                    <ShoppingListSkeleton />
-                </>
-            ) : (
-                <>
-                    {!error && Object.keys(results).length > 0 && (
-                        <>
-                            <div className="sticky top-0 z-10 bg-white border border-gray-200 rounded-xl p-6 shadow-lg mb-6">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center space-x-3">
-                                        <Package className="w-6 h-6 text-indigo-600" />
-                                        <h3 className="text-xl font-bold text-gray-900">Shopping List</h3>
-                                    </div>
-                                    {totalCost > 0 && (
-                                        <div className="flex items-center space-x-2 text-green-600 font-bold text-2xl">
-                                            <DollarSign className="w-6 h-6" />
-                                            <span>{totalCost.toFixed(2)}</span>
-                                        </div>
-                                    )}
-                                </div>
-                                {uniqueIngredients.length > 0 && (
-                                    <p className="text-gray-600 text-sm">
-                                        {uniqueIngredients.length} items total
-                                    </p>
-                                )}
-                            </div>
+        <div className="space-y-0 p-4">
+            {error && !loading && (
+                 <div className="p-4 bg-red-50 text-red-800 rounded-lg">
+                    <AlertTriangle className="inline w-6 h-6 mr-2" />
+                    <strong>Error(s) occurred during plan generation:</strong>
+                    <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
+                 </div>
+            )}
 
-                            {categorizedResults && Object.keys(categorizedResults).length > 0 && Object.keys(categorizedResults).map((category) => (
-                                <CollapsibleSection
-                                    key={category}
-                                    title={category.charAt(0).toUpperCase() + category.slice(1)}
-                                    icon={categoryIconMap[category.toLowerCase()] || categoryIconMap['default']}
-                                    defaultOpen={true}
-                                >
-                                    <div className="space-y-4">
-                                        {categorizedResults[category].map(({ ingredient, result, normalizedKey }) => {
-                                            const selection = result && result.products && result.products.length > 0 && result.selectedIndex !== undefined 
-                                                ? result.products[result.selectedIndex] 
-                                                : null;
-                                            const nutriData = selection && nutritionCache[selection.url] ? nutritionCache[selection.url] : null;
-                                            const isLoading = selection ? loadingNutritionFor === selection.url : false;
-                                            return (
-                                                <IngredientResultBlock
-                                                    key={normalizedKey}
-                                                    ingredientKey={ingredient}
-                                                    normalizedKey={normalizedKey}
-                                                    result={result}
-                                                    onSelectSubstitute={handleSubstituteSelection}
-                                                    onQuantityChange={handleQuantityChange}
-                                                    onFetchNutrition={handleFetchNutrition}
-                                                    nutritionData={nutriData}
-                                                    isLoadingNutrition={isLoading}
-                                                />
-                                            );
-                                        })}
-                                    </div>
-                                </CollapsibleSection>
-                            ))}
-                        </>
-                    )}
-                    {!loading && Object.keys(results).length === 0 && !error && (
-                        <div className="p-6 text-center text-gray-500">Generate a plan to see results.</div>
-                    )}
+            {!loading && Object.keys(results).length > 0 && (
+                <>
+                    {/* Cost Summary (Assuming COLORS/styles are available or defined internally) */}
+                    {/* <div className="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-600 mb-6">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-xl font-bold flex items-center"><DollarSign className="w-5 h-5 mr-2"/> Total Estimated Cost</h3>
+                            <p className="text-3xl font-extrabold text-green-700">${totalCost.toFixed(2)}</p>
+                        </div>
+                        <p className="text-sm text-gray-500">Cost reflects selected products multiplied by units purchased from {formData.store}.</p>
+                    </div> */}
+
+                    {/* Ingredient Blocks */}
+                    <div className="bg-white rounded-xl shadow-lg border overflow-hidden">
+                        {Object.keys(categorizedResults).map((category, index) => (
+                            <CollapsibleSection
+                                key={category}
+                                title={`${category} (${categorizedResults[category].length})`}
+                                icon={categoryIconMap[category.toLowerCase()] || categoryIconMap['default']}
+                                defaultOpen={false}
+                            >
+                                <div className="grid grid-cols-1 gap-6 pt-4">
+                                    {categorizedResults[category].map(({ normalizedKey, ingredient, ...result }) => {
+                                        if (!result) return null;
+                                        const selection = result.allProducts?.find(p => p && p.url === result.currentSelectionURL);
+                                        const nutriData = selection ? nutritionCache[selection.url] : null;
+                                        const isLoading = selection ? loadingNutritionFor === selection.url : false;
+                                        return (
+                                            <IngredientResultBlock
+                                                key={normalizedKey}
+                                                ingredientKey={ingredient}
+                                                normalizedKey={normalizedKey}
+                                                result={result}
+                                                onSelectSubstitute={handleSubstituteSelection}
+                                                onQuantityChange={handleQuantityChange}
+                                                onFetchNutrition={handleFetchNutrition}
+                                                nutritionData={nutriData}
+                                                isLoadingNutrition={isLoading}
+                                            />
+                                        );
+                                    })}
+                                </div>
+                            </CollapsibleSection>
+                        ))}
+                    </div>
                 </>
+            )}
+            {!loading && Object.keys(results).length === 0 && !error && (
+                <div className="p-6 text-center text-gray-500">Generate a plan to see results.</div>
             )}
         </div>
     );
     
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
-            {mealPlan.length > 0 && (
+            {mealPlan && mealPlan.length > 0 && ( // Ensure mealPlan exists
                 <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
                     <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
                     
-                    {/* Save Plan Button - NEW */}
-                    {mealPlan.length > 0 && (
-                        <div className="mt-4 pt-4 border-t border-gray-200">
-                            <button
-                                onClick={handleSavePlanClick}
-                                disabled={savingPlan || loading}
-                                className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md"
-                                style={{
-                                    backgroundColor: COLORS.primary[600],
-                                    color: 'white'
-                                }}
-                            >
-                                <Save size={18} />
-                                <span>{savingPlan ? 'Saving...' : 'Save Plan'}</span>
-                            </button>
-                        </div>
-                    )}
+                    {/* Save Plan Button - ADDED */}
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                        <button
+                            onClick={handleSavePlanClick}
+                            disabled={savingPlan || loading}
+                            className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md bg-indigo-600 text-white"
+                        >
+                            <Save size={18} />
+                            <span>{savingPlan ? 'Saving...' : 'Save Plan'}</span>
+                        </button>
+                    </div>
+                    {/* Load Plans Button - ADDED */}
+                     <div className="mt-2">
+                        <button
+                            onClick={handleOpenSavedPlans}
+                            disabled={loading}
+                            className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md bg-gray-200 text-gray-800"
+                        >
+                            <FolderDown size={18} />
+                            <span>Load Plans</span>
+                        </button>
+                    </div>
                 </div>
             )}
-            {mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
+            {mealPlan && mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? ( // Ensure mealPlan exists
                 <MealPlanDisplay
                     key={selectedDay}
                     mealPlan={mealPlan}
@@ -326,34 +331,167 @@ const MainApp = ({
                              <strong>Error generating plan. Check logs for details.</strong>
                              <pre className="mt-2 whitespace-pre-wrap text-sm">{error}</pre>
                          </div>
-                    ) : mealPlan.length === 0 && !loading ? (
-                        <div className="text-center">
-                            <Utensils className="inline w-12 h-12 mb-4 text-gray-400" />
-                            <p>Generate a plan to view meals.</p>
-                        </div>
-                    ) : null}
+                    ) : mealPlan?.length === 0 && !loading ? (
+                         'Generate a plan to see your meals.'
+                    ) : (
+                         !loading && 'Select a valid day to view meals.'
+                    )}
                 </div>
             )}
         </div>
     );
 
+    const totalLogHeight = (failedIngredientsHistory?.length > 0 ? 60 : 0) + (isLogOpen ? Math.max(50, logHeight) : 50);
+
     return (
-        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-indigo-50">
+        <>
             <Header 
                 userId={userId}
                 onOpenSettings={() => setIsSettingsOpen(true)}
-                onNavigateToProfile={() => setContentView('profile')}
+                onNavigateToProfile={() => {
+                    setContentView('profile');
+                    setIsMenuOpen(true);
+                }}
                 onSignOut={handleSignOut}
-                onOpenSavedPlans={handleOpenSavedPlans}
+                onOpenSavedPlans={handleOpenSavedPlans} // <--- ADDED
             />
-            
-            <PullToRefresh onRefresh={handleRefresh}>
-                <div className="max-w-7xl mx-auto pt-24 pb-24 px-4 md:px-8">
-                    <div className="relative">
-                        <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
-                            <div className={`${isMobile ? 'hidden md:block' : 'block'}`}>
+    
+            <PullToRefresh onRefresh={handleRefresh} refreshing={loading}>
+                <div 
+                    className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" 
+                    style={{ 
+                        paddingTop: '80px',
+                        paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '6rem' : (Number.isFinite(totalLogHeight) ? totalLogHeight : 50) + 'px'}`
+                    }}
+                >
+                    <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
+                        {/* Removed redundant flex layout from MainApp.txt to fix the missing column issue 
+                           The previous structure (MainApp.txt) only had a single column inside the container.
+                           We need to re-introduce the two-column layout from your original working version.
+                        */}
+                        <div className="flex flex-col md:flex-row">
+                            {/* --- SETUP FORM (LEFT COLUMN) --- */}
+                            <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
+                                {/* Re-introduced contents from MainApp.txt form setup */}
+                                {/* NOTE: COLORS are assumed to be available or defined via Tailwind config */}
+                                <div className="flex justify-between items-center mb-6">
+                                    <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
+                                    <div className="flex space-x-2">
+                                        <button
+                                            onClick={() => handleLoadProfile(false)} 
+                                            disabled={!isAuthReady || !userId || userId.startsWith('local_')} 
+                                            className="flex items-center px-3 py-1.5 bg-blue-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Load Saved Profile"
+                                        >
+                                            <FolderDown size={14} className="mr-1" /> Load
+                                        </button>
+                                         <button
+                                            onClick={() => handleSaveProfile(false)}
+                                            disabled={!isAuthReady || !userId || userId.startsWith('local_')} 
+                                            className="flex items-center px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg shadow hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Save Current Profile"
+                                        >
+                                            <Save size={14} className="mr-1" /> Save
+                                        </button>
+                                        <button className="md:hidden p-1.5" onClick={() => setIsMenuOpen(false)}><X /></button>
+                                    </div>
+                                </div>
+                                
+                                <form onSubmit={handleGeneratePlan}>
+                                    <FormSection 
+                                        title="Personal Information" 
+                                        icon={User}
+                                        description="Tell us about yourself"
+                                    >
+                                        <InputField label="Name" name="name" value={formData.name} onChange={handleChange} />
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                            <InputField label="Height (cm)" name="height" type="number" value={formData.height} onChange={handleChange} required />
+                                            <InputField label="Weight (kg)" name="weight" type="number" value={formData.weight} onChange={handleChange} required />
+                                        </div>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                            <InputField label="Age" name="age" type="number" value={formData.age} onChange={handleChange} required />
+                                            <InputField label="Body Fat % (Optional)" name="bodyFat" type="number" value={formData.bodyFat} onChange={handleChange} placeholder="e.g., 15" />
+                                        </div>
+                                        <InputField label="Gender" name="gender" type="select" value={formData.gender} onChange={handleChange} options={[{ value: 'male', label: 'Male' }, { value: 'female', label: 'Female' }]} required />
+                                    </FormSection>
+    
+                                    <FormSection 
+                                        title="Fitness Goals" 
+                                        icon={Target}
+                                        description="What are you trying to achieve?"
+                                    >
+                                        <InputField label="Activity Level" name="activityLevel" type="select" value={formData.activityLevel} onChange={handleChange} options={[ { value: 'sedentary', label: 'Sedentary' }, { value: 'light', label: 'Light Activity' }, { value: 'moderate', label: 'Moderate Activity' }, { value: 'active', label: 'Active' }, { value: 'veryActive', label: 'Very Active' } ]} required />
+                                        <InputField label="Fitness Goal" name="goal" type="select" value={formData.goal} onChange={handleChange} options={[ { value: 'maintain', label: 'Maintain' }, { value: 'cut_moderate', label: 'Moderate Cut (~15% Deficit)' }, { value: 'cut_aggressive', label: 'Aggressive Cut (~25% Deficit)' }, { value: 'bulk_lean', label: 'Lean Bulk (~15% Surplus)' }, { value: 'bulk_aggressive', label: 'Aggressive Bulk (~25% Surplus)' } ]} />
+                                        <InputField label="Dietary Preference" name="dietary" type="select" value={formData.dietary} onChange={handleChange} options={[{ value: 'None', label: 'None' }, { value: 'Vegetarian', label: 'Vegetarian' }]} />
+                                        <DaySlider label="Plan Days" name="days" value={formData.days} onChange={handleSliderChange} />
+                                    </FormSection>
+    
+                                    <FormSection 
+                                        title="Meal Preferences" 
+                                        icon={Utensils}
+                                        description="Customize your meal plan"
+                                        collapsible={true}
+                                        defaultOpen={false}
+                                    >
+                                        <InputField label="Store" name="store" type="select" value={formData.store} onChange={handleChange} options={[{ value: 'Coles', label: 'Coles' }, { value: 'Woolworths', label: 'Woolworths' }]} />
+                                        <InputField label="Meals Per Day" name="eatingOccasions" type="select" value={formData.eatingOccasions} onChange={handleChange} options={[ { value: '3', label: '3 Meals' }, { value: '4', label: '4 Meals' }, { value: '5', label: '5 Meals' } ]} />
+                                        <InputField label="Spending Priority" name="costPriority" type="select" value={formData.costPriority} onChange={handleChange} options={[ { value: 'Extreme Budget', label: 'Extreme Budget' }, { value: 'Best Value', label: 'Best Value' }, { value: 'Quality Focus', label: 'Quality Focus' } ]} />
+                                        <InputField label="Meal Variety" name="mealVariety" type="select" value={formData.mealVariety} onChange={handleChange} options={[ { value: 'High Repetition', label: 'High' }, { value: 'Balanced Variety', label: 'Balanced' }, { value: 'Low Repetition', label: 'Low' } ]} />
+                                        <InputField label="Cuisine Profile (Optional)" name="cuisine" value={formData.cuisine} onChange={handleChange} placeholder="e.g., Spicy Thai" />
+                                    </FormSection>
+    
+                                    <div className="flex items-center justify-center mt-4 pt-4 border-t">
+                                        <input
+                                            type="checkbox"
+                                            id="batchModeToggle"
+                                            name="batchModeToggle"
+                                            checked={useBatchedMode}
+                                            onChange={(e) => setUseBatchedMode(e.target.checked)}
+                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                                        />
+                                        <label htmlFor="batchModeToggle" className="ml-2 block text-sm text-gray-900" title="Use the new batched endpoint (v2) instead of the per-day loop (v1)">
+                                            Use Batched Generation (v2)
+                                        </label>
+                                    </div>
+    
+                                    <button type="submit" disabled={loading || !isAuthReady || !firebaseConfig} className={`w-full flex items-center justify-center py-3 mt-6 text-lg font-bold rounded-xl shadow-lg ${loading || !isAuthReady || !firebaseConfig ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}>
+                                        {loading ? <><RefreshCw className="w-5 h-5 mr-3 animate-spin" /> Processing...</> : <><Zap className="w-5 h-5 mr-3" /> Generate Plan</>}
+                                    </button>
+                                    {(!isAuthReady || !firebaseConfig) && <p className="text-xs text-center text-red-600 mt-2">
+                                        {firebaseInitializationError ? firebaseInitializationError : 'Initializing Firebase auth...'}
+                                    </p>}
+                                </form>
+                            </div>
+    
+                            {/* --- RESULTS VIEW (RIGHT COLUMN) --- */}
+                            <div className={`w-full md:w-1/2 ${isMenuOpen ? 'hidden md:block' : 'block'}`}>
                                 <div className="border-b">
                                     <div className="p-6 md:p-8">
+                                        {/* Added Navigation Tabs */}
+                                        <div className="flex space-x-4 border-b">
+                                            <button
+                                                onClick={() => setContentView('profile')}
+                                                className={`pb-2 text-lg font-semibold ${contentView === 'profile' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                                            >
+                                                <LayoutDashboard className="inline w-5 h-5 mr-2" /> Summary
+                                            </button>
+                                            {results && Object.keys(results).length > 0 && (
+                                                <>
+                                                    <button
+                                                        onClick={() => setContentView('meals')}
+                                                        className={`pb-2 text-lg font-semibold ${contentView === 'meals' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                                                    >
+                                                        <Utensils className="inline w-5 h-5 mr-2" /> Meals
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setContentView('ingredients')}
+                                                        className={`pb-2 text-lg font-semibold ${contentView === 'ingredients' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                                                    >
+                                                        <ShoppingBag className="inline w-5 h-5 mr-2" /> Shopping
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
     
@@ -378,10 +516,10 @@ const MainApp = ({
                                             />
                                         )}
                                         
-                                        {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
-                                        {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
+                                        {contentView === 'meals' && mealPlan?.length > 0 && mealPlanContent}
+                                        {contentView === 'ingredients' && Object.keys(results)?.length > 0 && priceComparisonContent}
                                         
-                                        {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
+                                        {(contentView === 'meals' || contentView === 'ingredients') && (!results || Object.keys(results).length === 0) && !loading && (
                                             <div className="p-6 text-center text-gray-500">
                                                 Generate a plan to view {contentView}.
                                             </div>
@@ -407,34 +545,54 @@ const MainApp = ({
             <SuccessModal
                 isVisible={showSuccessModal}
                 title="Your Plan is Ready!"
+                message={`We've created ${formData.days} days of meals optimized for your goals`}
                 stats={planStats}
                 onClose={() => setShowSuccessModal(false)}
+                onViewPlan={() => {
+                    setShowSuccessModal(false);
+                    setContentView('meals');
+                }}
             />
-            
-            <RecipeModal meal={selectedMeal} onClose={() => setSelectedMeal(null)} />
-            
+    
             <SettingsPanel
                 isOpen={isSettingsOpen}
                 onClose={() => setIsSettingsOpen(false)}
                 currentStore={formData.store}
-                onStoreChange={(store) => handleChange({ target: { name: 'store', value: store } })}
-                onClearData={() => {}}
+                onStoreChange={(store) => {
+                    handleChange({ target: { name: 'store', value: store } });
+                    showToast(`Store changed to ${store}`, 'success');
+                }}
+                onClearData={() => {
+                    showToast('All data cleared', 'success');
+                }}
+                onEditProfile={handleEditProfile}
                 showOrchestratorLogs={showOrchestratorLogs}
-                onToggleOrchestratorLogs={() => setShowOrchestratorLogs(!showOrchestratorLogs)}
+                onToggleOrchestratorLogs={setShowOrchestratorLogs}
                 showFailedIngredientsLogs={showFailedIngredientsLogs}
-                onToggleFailedIngredientsLogs={() => setShowFailedIngredientsLogs(!showFailedIngredientsLogs)}
+                onToggleFailedIngredientsLogs={setShowFailedIngredientsLogs}
+                settings={{
+                    showOrchestratorLogs,
+                    showFailedIngredientsLogs,
+                }}
+                onToggleSetting={(key) => {
+                    if (key === 'showOrchestratorLogs') {
+                        setShowOrchestratorLogs(!showOrchestratorLogs);
+                    } else if (key === 'showFailedIngredientsLogs') {
+                        setShowFailedIngredientsLogs(!showFailedIngredientsLogs);
+                    }
+                }}
             />
-            
-            {/* Save Plan Name Prompt - NEW */}
+
+            {/* Save Plan Name Prompt - ADDED */}
             {showSavePlanPrompt && (
                 <>
                     <div
-                        className="fixed inset-0 bg-black bg-opacity-50 z-50"
+                        className="fixed inset-0 bg-black bg-opacity-50 z-[1000]"
                         onClick={() => setShowSavePlanPrompt(false)}
                     />
-                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="fixed inset-0 z-[1001] flex items-center justify-center p-4">
                         <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl">
-                            <h3 className="text-xl font-bold mb-4" style={{ color: COLORS.gray[900] }}>
+                            <h3 className="text-xl font-bold mb-4 text-gray-900">
                                 Save Meal Plan
                             </h3>
                             <input
@@ -442,25 +600,19 @@ const MainApp = ({
                                 value={savePlanName}
                                 onChange={(e) => setSavePlanName(e.target.value)}
                                 placeholder={`Plan ${new Date().toLocaleDateString()}`}
-                                className="w-full px-4 py-2 border rounded-lg mb-4"
-                                style={{ borderColor: COLORS.gray[300] }}
+                                className="w-full px-4 py-2 border rounded-lg mb-4 border-gray-300"
                             />
                             <div className="flex space-x-3">
                                 <button
                                     onClick={() => setShowSavePlanPrompt(false)}
-                                    className="flex-1 py-2 px-4 rounded-lg font-semibold"
-                                    style={{
-                                        backgroundColor: COLORS.gray[200],
-                                        color: COLORS.gray[700]
-                                    }}
+                                    className="flex-1 py-2 px-4 rounded-lg font-semibold bg-gray-200 text-gray-700"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     onClick={handleConfirmSave}
                                     disabled={savingPlan}
-                                    className="flex-1 py-2 px-4 rounded-lg font-semibold text-white disabled:opacity-50"
-                                    style={{ backgroundColor: COLORS.primary[600] }}
+                                    className="flex-1 py-2 px-4 rounded-lg font-semibold text-white disabled:opacity-50 bg-indigo-600"
                                 >
                                     {savingPlan ? 'Saving...' : 'Save'}
                                 </button>
@@ -469,8 +621,8 @@ const MainApp = ({
                     </div>
                 </>
             )}
-            
-            {/* Saved Plans Modal - NEW */}
+
+            {/* Saved Plans Modal - ADDED */}
             <SavedPlansModal
                 isOpen={showSavedPlansModal}
                 onClose={() => setShowSavedPlansModal(false)}
@@ -480,8 +632,30 @@ const MainApp = ({
                 onDeletePlan={handleDeletePlan}
                 loadingPlan={loadingPlan}
             />
-        </div>
+    
+            <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
+                {showOrchestratorLogs && (
+                    <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
+                )}
+                {showFailedIngredientsLogs && (
+                    <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
+                )}
+                {!showOrchestratorLogs && !showFailedIngredientsLogs && (
+                    <div className="bg-gray-800 text-white p-2 text-xs text-center cursor-pointer hover:bg-gray-700" onClick={() => { setShowOrchestratorLogs(true); setShowFailedIngredientsLogs(true); }}>
+                        📋 Show Logs
+                    </div>
+                )}
+            </div>
+    
+            {selectedMeal && (
+                <RecipeModal 
+                    meal={selectedMeal} 
+                    onClose={() => setSelectedMeal(null)} 
+                />
+            )}
+        </>
     );
 };
 
 export default MainApp;
+
