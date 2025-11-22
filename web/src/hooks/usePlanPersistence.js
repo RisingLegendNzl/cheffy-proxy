@@ -190,7 +190,8 @@ const usePlanPersistence = ({
         };
 
         loadActivePlan();
-    }, [userId, isAuthReady, db]); // Intentionally limited deps
+    // FIX: Added mealPlan and loadPlan to the dependency array.
+    }, [userId, isAuthReady, db, mealPlan, loadPlan]); 
 
     // Load plans list on mount - with error handling
     useEffect(() => {
@@ -217,3 +218,4 @@ const usePlanPersistence = ({
 };
 
 export default usePlanPersistence;
+
