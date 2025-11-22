@@ -18,6 +18,7 @@ const { createClient } = require('@vercel/kv');
 // Import cache-wrapped microservices
 const { fetchPriceData } = require('../price-search.js');
 const { fetchNutritionData } = require('../nutrition-search.js');
+const { saveCurrentPlan } = require('../lib/kv-storage'); // [Change 1: Add Import]
 
 // Import utils
 // Note: Vercel bundles these relative to the project root, hence the `../`
@@ -1006,6 +1007,7 @@ module.exports = async (request, response) => {
         if (!formData || typeof formData !== 'object' || Object.keys(formData).length < 5) {
             throw new Error("Missing or invalid 'formData' in request body.");
         }
+        const uid = request.body.uid; // [Change 2: Extract UID]
         if (!nutritionalTargets || typeof nutritionalTargets !== 'object' || !nutritionalTargets.calories) {
             throw new Error("Missing or invalid 'nutritionalTargets' in request body.");
         }
@@ -1549,6 +1551,28 @@ module.exports = async (request, response) => {
             solver_path_live: USE_SOLVER_V1 ? 'SOLVER_V1' : 'RECONCILER_V0'
         });
 
+        // --- Auto-save current plan if UID is provided --- [Change 3: Add Auto-Save Hook]
+        if (uid) {
+            try {
+                const planDataToSave = {
+                    mealPlan: responseData.mealPlan,
+                    results: responseData.results,
+                    uniqueIngredients: responseData.uniqueIngredients,
+                    generatedAt: new Date().toISOString(),
+                    numDays: numDays,
+                };
+                const saved = await saveCurrentPlan(uid, planDataToSave);
+                if (saved) {
+                    log(`Auto-saved full ${numDays}-day plan to user ${uid}`, 'INFO', 'PERSISTENCE');
+                } else {
+                    log(`Failed to auto-save full plan`, 'WARN', 'PERSISTENCE');
+                }
+            } catch (saveError) {
+                log(`Error auto-saving plan: ${saveError.message}`, 'WARN', 'PERSISTENCE');
+                // Don't fail the request if save fails
+            }
+        }
+
         sendFinalDataAndClose(responseData);
 
     } catch (error) {
@@ -1571,5 +1595,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
