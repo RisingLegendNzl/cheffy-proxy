@@ -1,6 +1,4 @@
 // web/src/components/MainApp.jsx
-// Modified to include plan persistence features
-
 import React, { useState } from 'react';
 import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered, Utensils } from 'lucide-react';
 
@@ -23,7 +21,7 @@ import FailedIngredientLogViewer from './FailedIngredientLogViewer';
 import RecipeModal from './RecipeModal';
 import EmojiIcon from './EmojiIcon';
 import ProfileTab from './ProfileTab';
-import SavedPlansModal from './SavedPlansModal'; // <--- ADDED
+import SavedPlansModal from './SavedPlansModal';
 
 // Phase 2 imports
 import Header from './Header';
@@ -39,10 +37,6 @@ import SettingsPanel from './SettingsPanel';
 import BottomNav from './BottomNav';
 import { MealCardSkeleton, ProfileCardSkeleton, ShoppingListSkeleton } from './SkeletonLoader';
 import PullToRefresh from './PullToRefresh';
-
-// --- Import Constants and Helpers ---
-// Removed to avoid conflict with provided MainApp.txt, assume they are correctly imported/defined.
-// import { COLORS, SPACING, SHADOWS, Z_INDEX } from '../constants'; 
 
 // --- Category Icon Map ---
 const categoryIconMap = {
@@ -161,7 +155,7 @@ const MainApp = ({
     handleSignOut,
     showToast,
     
-    // Plan Persistence - NEW (ADDED)
+    // Plan Persistence - NEW
     savedPlans,
     activePlanId,
     handleSavePlan,
@@ -175,16 +169,7 @@ const MainApp = ({
     isDesktop,
 }) => {
     
-    // DEBUG LOGGING ADDED HERE
-    console.log('[DEBUG-M1] MainApp Rendering:', {
-        userId,
-        activePlanId,
-        hasPersistenceProps: !!savedPlans,
-        savingPlan,
-        loadingPlan
-    });
-    
-    // Local state for SavedPlansModal (ADDED)
+    // Local state for SavedPlansModal
     const [showSavedPlansModal, setShowSavedPlansModal] = useState(false);
     const [savePlanName, setSavePlanName] = useState('');
     const [showSavePlanPrompt, setShowSavePlanPrompt] = useState(false);
@@ -197,13 +182,12 @@ const MainApp = ({
         </div>
     );
 
-    // Handler for opening saved plans modal (ADDED)
+    // Handler for opening saved plans modal
     const handleOpenSavedPlans = () => {
-        console.log('[DEBUG-M2] Opening Saved Plans Modal');
         setShowSavedPlansModal(true);
     };
 
-    // Handler for save plan button click (ADDED)
+    // Handler for save plan button click
     const handleSavePlanClick = () => {
         if (!mealPlan || mealPlan.length === 0) {
             showToast('No meal plan to save', 'warning');
@@ -212,10 +196,9 @@ const MainApp = ({
         setShowSavePlanPrompt(true);
     };
 
-    // Handler for confirming save with name (ADDED)
+    // Handler for confirming save with name
     const handleConfirmSave = async () => {
         const name = savePlanName.trim() || `Plan ${new Date().toLocaleDateString()}`;
-        console.log('[DEBUG-M3] Confirming plan save as:', name);
         await handleSavePlan(name);
         setShowSavePlanPrompt(false);
         setSavePlanName('');
@@ -285,11 +268,11 @@ const MainApp = ({
     
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
-            {mealPlan && mealPlan.length > 0 && ( // Ensure mealPlan exists
+            {mealPlan && mealPlan.length > 0 && (
                 <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
                     <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
                     
-                    {/* Save Plan Button - ADDED */}
+                    {/* Save Plan Button */}
                     <div className="mt-4 pt-4 border-t border-gray-200">
                         <button
                             onClick={handleSavePlanClick}
@@ -300,7 +283,7 @@ const MainApp = ({
                             <span>{savingPlan ? 'Saving...' : 'Save Plan'}</span>
                         </button>
                     </div>
-                    {/* Load Plans Button - ADDED */}
+                    {/* Load Plans Button */}
                      <div className="mt-2">
                         <button
                             onClick={handleOpenSavedPlans}
@@ -313,7 +296,7 @@ const MainApp = ({
                     </div>
                 </div>
             )}
-            {mealPlan && mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? ( // Ensure mealPlan exists
+            {mealPlan && mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
                 <MealPlanDisplay
                     key={selectedDay}
                     mealPlan={mealPlan}
@@ -353,7 +336,7 @@ const MainApp = ({
                     setIsMenuOpen(true);
                 }}
                 onSignOut={handleSignOut}
-                onOpenSavedPlans={handleOpenSavedPlans} // <--- ADDED
+                onOpenSavedPlans={handleOpenSavedPlans}
             />
     
             <PullToRefresh onRefresh={handleRefresh} refreshing={loading}>
@@ -365,15 +348,9 @@ const MainApp = ({
                     }}
                 >
                     <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
-                        {/* Removed redundant flex layout from MainApp.txt to fix the missing column issue 
-                           The previous structure (MainApp.txt) only had a single column inside the container.
-                           We need to re-introduce the two-column layout from your original working version.
-                        */}
                         <div className="flex flex-col md:flex-row">
                             {/* --- SETUP FORM (LEFT COLUMN) --- */}
                             <div className={`p-6 md:p-8 w-full md:w-1/2 border-b md:border-r ${isMenuOpen ? 'block' : 'hidden md:block'}`}>
-                                {/* Re-introduced contents from MainApp.txt form setup */}
-                                {/* NOTE: COLORS are assumed to be available or defined via Tailwind config */}
                                 <div className="flex justify-between items-center mb-6">
                                     <h2 className="text-2xl font-bold text-indigo-700">Plan Setup</h2>
                                     <div className="flex space-x-2">
@@ -583,7 +560,7 @@ const MainApp = ({
                 }}
             />
 
-            {/* Save Plan Name Prompt - ADDED */}
+            {/* Save Plan Name Prompt */}
             {showSavePlanPrompt && (
                 <>
                     <div
@@ -622,7 +599,7 @@ const MainApp = ({
                 </>
             )}
 
-            {/* Saved Plans Modal - ADDED */}
+            {/* Saved Plans Modal */}
             <SavedPlansModal
                 isOpen={showSavedPlansModal}
                 onClose={() => setShowSavedPlansModal(false)}
