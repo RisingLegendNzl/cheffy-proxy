@@ -1,6 +1,4 @@
 // web/src/hooks/usePlanPersistence.js
-// Fixed version with better error handling to prevent UI crashes and dependency issues
-
 import { useState, useEffect, useCallback } from 'react';
 import * as planService from '../services/planPersistence';
 
@@ -18,7 +16,6 @@ const usePlanPersistence = ({
     setResults,
     setUniqueIngredients
 }) => {
-    console.log('[DEBUG-P1] usePlanPersistence: Hook started.', { userId: userId?.substring(0, 8), db: !!db, isAuthReady });
     const [savedPlans, setSavedPlans] = useState([]);
     const [activePlanId, setActivePlanId] = useState(null);
     const [savingPlan, setSavingPlan] = useState(false);
@@ -27,12 +24,9 @@ const usePlanPersistence = ({
 
     // Hardened listPlans implementation
     const listPlans = useCallback(async () => {
-        // HARDENED CHECK: Ensure both db and user context are available immediately
         if (!userId || !db) {
-            console.warn('[PLAN_HOOK] listPlans: Pre-check failed. Skipping list load.', { userId: !!userId, db: !!db });
             return [];
         }
-        console.log('[PLAN_HOOK] listPlans: Starting plan list fetch...');
 
         setLoadingPlansList(true);
         try {
@@ -41,7 +35,6 @@ const usePlanPersistence = ({
 
             const active = plans.find(p => p.isActive);
             setActivePlanId(active ? active.planId : null);
-            console.log(`[PLAN_HOOK] listPlans: Fetched ${plans.length} plans. Active ID: ${activePlanId}`);
 
             return plans;
         } catch (error) {
@@ -50,7 +43,7 @@ const usePlanPersistence = ({
         } finally {
             setLoadingPlansList(false);
         }
-    }, [userId, db, activePlanId]);
+    }, [userId, db]);
 
     const savePlan = useCallback(async (planName) => {
         if (!userId || !db) {
@@ -62,7 +55,6 @@ const usePlanPersistence = ({
             showToast && showToast('No meal plan to save', 'warning');
             return null;
         }
-        console.log('[PLAN_HOOK] savePlan: Attempting to save:', planName);
 
         setSavingPlan(true);
         try {
@@ -99,7 +91,6 @@ const usePlanPersistence = ({
             showToast && showToast('Invalid plan ID', 'error');
             return false;
         }
-        console.log('[PLAN_HOOK] loadPlan: Attempting to load plan ID:', planId);
 
         setLoadingPlan(true);
         try {
@@ -140,7 +131,6 @@ const usePlanPersistence = ({
             showToast && showToast('Invalid plan ID', 'error');
             return false;
         }
-        console.log('[PLAN_HOOK] deletePlan: Deleting plan ID:', planId);
 
         try {
             await planService.deletePlan({ userId, db, planId });
@@ -158,7 +148,6 @@ const usePlanPersistence = ({
         if (!userId || !db) {
             return false;
         }
-        console.log('[PLAN_HOOK] setActivePlan: Setting active plan ID:', planId);
 
         try {
             if (planId) {
@@ -179,7 +168,6 @@ const usePlanPersistence = ({
     // Load active plan on mount
     useEffect(() => {
         const loadActivePlan = async () => {
-            console.log('[DEBUG-P2] Effect (loadActivePlan): Check running.', { userId: !!userId, db: !!db, mealPlanLength: mealPlan?.length });
             if (!userId || !db) {
                 return;
             }
@@ -188,14 +176,10 @@ const usePlanPersistence = ({
                 const active = await planService.getActivePlan({ userId, db });
                 if (active && active.planId) {
                     setActivePlanId(active.planId);
-                    console.log('[PLAN_HOOK] Active plan found:', active.planId);
                     // Only auto-load if there's no current meal plan
                     if (!mealPlan || mealPlan.length === 0) {
-                        console.log('[PLAN_HOOK] Auto-loading active plan...');
                         await loadPlan(active.planId);
                     }
-                } else {
-                    console.log('[PLAN_HOOK] No active plan found.');
                 }
             } catch (error) {
                 console.error('[PLAN_HOOK] Error loading active plan on mount:', error);
@@ -207,16 +191,13 @@ const usePlanPersistence = ({
 
     // Load plans list on mount
     useEffect(() => {
-        console.log('[DEBUG-P3] Effect (listPlans): Check running.', { userId: !!userId, db: !!db });
         if (userId && db) { 
-            console.log('[PLAN_HOOK] Auth/DB ready. Fetching plan list.');
             listPlans().catch(err => {
                 console.error('[PLAN_HOOK] Silent error loading plans list:', err);
             });
         }
     }, [userId, db, listPlans]);
 
-    console.log('[DEBUG-P4] usePlanPersistence: Returning final object.');
     return {
         savedPlans,
         activePlanId,
