@@ -192,11 +192,13 @@ const App = () => {
         setAuthError(null);
     }, [logic]);
 
-    // --- Edit Profile Handler ---
+    // --- Edit Profile Handler (FIXED) ---
     const handleEditProfile = useCallback(() => {
-        setIsSettingsOpen(false);
-        setContentView('profile');
+        setIsSettingsOpen(false); // Close settings panel
+        setContentView('profile'); // Navigate to profile view (right panel)
+        setIsMenuOpen(false); // <--- ADDED: Ensure the profile view (right panel) is visible on mobile.
         
+        // Optional: scroll to top
         setTimeout(() => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
         }, 100);
@@ -244,21 +246,31 @@ const App = () => {
                     setSelectedDay={logic.setSelectedDay}
                     contentView={contentView}
                     setContentView={setContentView}
+                    isMenuOpen={isMenuOpen}
+                    setIsMenuOpen={setIsMenuOpen}
+                    
+                    // Logs
                     diagnosticLogs={logic.diagnosticLogs}
-                    nutritionCache={logic.nutritionCache}
-                    loadingNutritionFor={logic.loadingNutritionFor}
-                    logHeight={logic.logHeight}
-                    setLogHeight={logic.setLogHeight}
-                    isLogOpen={logic.isLogOpen}
-                    setIsLogOpen={logic.setIsLogOpen}
-                    failedIngredientsHistory={logic.failedIngredientsHistory}
-                    statusMessage={logic.statusMessage}
                     showOrchestratorLogs={logic.showOrchestratorLogs}
                     setShowOrchestratorLogs={logic.setShowOrchestratorLogs}
                     showFailedIngredientsLogs={logic.showFailedIngredientsLogs}
                     setShowFailedIngredientsLogs={logic.setShowFailedIngredientsLogs}
+                    failedIngredientsHistory={logic.failedIngredientsHistory}
+                    logHeight={logic.logHeight}
+                    setLogHeight={logic.setLogHeight}
+                    isLogOpen={logic.isLogOpen}
+                    setIsLogOpen={logic.setIsLogOpen}
+                    latestLog={logic.latestLog}
+                    
+                    // Generation State
                     generationStepKey={logic.generationStepKey}
                     generationStatus={logic.generationStatus}
+                    
+                    // Nutrition Cache
+                    nutritionCache={logic.nutritionCache}
+                    loadingNutritionFor={logic.loadingNutritionFor}
+                    
+                    // Modal State
                     selectedMeal={logic.selectedMeal}
                     setSelectedMeal={logic.setSelectedMeal}
                     showSuccessModal={logic.showSuccessModal}
@@ -293,9 +305,6 @@ const App = () => {
                     // Responsive
                     isMobile={isMobile}
                     isDesktop={isDesktop}
-                    
-                    // Plans (NEW - from usePlans hook)
-                    plans={logic.plans}
                 />
             )}
         </>
@@ -303,3 +312,4 @@ const App = () => {
 };
 
 export default App;
+
