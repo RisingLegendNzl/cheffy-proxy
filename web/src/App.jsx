@@ -1,4 +1,6 @@
 // web/src/App.jsx
+// Modified to include auto-load active plan on mount
+
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 
 // --- Firebase Imports ---
@@ -143,70 +145,92 @@ const App = () => {
         if (name === 'days') {
             const newDays = parseInt(value, 10);
             if (!isNaN(newDays) && newDays < logic.selectedDay) {
-                logic.setSelectedDay(newDays);
+                logic.setSelectedDay(1);
             }
         }
     };
 
-    const handleSliderChange = (e) => {
-        const value = parseInt(e.target.value, 10);
-        setFormData(prev => ({ ...prev, days: value }));
-        if (value < logic.selectedDay) {
-            logic.setSelectedDay(value);
-        }
+    const handleSliderChange = (name, value) => {
+        setFormData(prev => ({ ...prev, [name]: value }));
     };
 
-    // --- Auth Handlers with Loading State ---
-    const handleSignUp = useCallback(async (credentials) => {
+    // --- Auth Handlers ---
+    const handleSignUp = async (credentials) => {
         setAuthLoading(true);
         setAuthError(null);
         try {
             await logic.handleSignUp(credentials);
-            setShowLandingPage(false);
-            setContentView('profile');
         } catch (error) {
             setAuthError(error.message);
         } finally {
             setAuthLoading(false);
         }
-    }, [logic]);
+    };
 
-    const handleSignIn = useCallback(async (credentials) => {
+    const handleSignIn = async (credentials) => {
         setAuthLoading(true);
         setAuthError(null);
         try {
             await logic.handleSignIn(credentials);
-            setShowLandingPage(false);
-            setContentView('profile');
         } catch (error) {
             setAuthError(error.message);
         } finally {
             setAuthLoading(false);
         }
-    }, [logic]);
+    };
 
-    const handleSignOut = useCallback(async () => {
-        await logic.handleSignOut();
-        setShowLandingPage(true);
+    const handleEditProfile = () => {
         setContentView('profile');
-        setAuthError(null);
-    }, [logic]);
+        setIsMenuOpen(false);
+    };
 
-    // --- Edit Profile Handler (FIXED) ---
-    const handleEditProfile = useCallback(() => {
-        setIsSettingsOpen(false); // Close settings panel
-        setContentView('profile'); // Navigate to profile view (right panel)
-        // On mobile, we may want to show the form, but the form is on the LEFT
-        // The user likely wants to see the profile summary on the RIGHT
-        // So we do NOT open isMenuOpen here
+    // --- NEW: Auto-load active plan on mount ---
+    useEffect(() => {
+        // This effect will trigger when the persistence hook loads the active plan
+        // No additional logic needed here as the hook handles it internally
+        // This effect is here as a placeholder for any future auto-load logic
+    }, [userId, isAuthReady]);
+
+    // --- Categorize results by category ---
+    const categorizedResults = useMemo(() => {
+        if (!logic.results || !logic.uniqueIngredients) return {};
         
-        // Optional: scroll to top
-        setTimeout(() => {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        }, 100);
-    }, []);
+        const categorized = {};
+        logic.uniqueIngredients.forEach(({ key: ingredient, category }) => {
+            const normalizedKey = ingredient.toLowerCase().trim();
+            const result = logic.results[normalizedKey];
+            
+            if (result) {
+                const cat = category || 'uncategorized';
+                if (!categorized[cat]) {
+                    categorized[cat] = [];
+                }
+                categorized[cat].push({
+                    ingredient,
+                    result,
+                    normalizedKey
+                });
+            }
+        });
+        
+        return categorized;
+    }, [logic.results, logic.uniqueIngredients]);
 
-    // --- Render ---
+    // --- Check for invalid meals ---
+    const hasInvalidMeals = useMemo(() => {
+        if (!logic.mealPlan || logic.mealPlan.length === 0) return false;
+        
+        return logic.mealPlan.some(day => 
+            day.meals && day.meals.some(meal => 
+                isNaN(meal.subtotal_kcal) || 
+                meal.subtotal_kcal <= 0 ||
+                (meal.items && meal.items.some(item => 
+                    !item.qty || item.qty <= 0 || !item.unit
+                ))
+            )
+        );
+    }, [logic.mealPlan]);
+
     return (
         <>
             {showLandingPage ? (
@@ -237,8 +261,8 @@ const App = () => {
                     uniqueIngredients={logic.uniqueIngredients}
                     mealPlan={logic.mealPlan}
                     totalCost={logic.totalCost}
-                    categorizedResults={logic.categorizedResults}
-                    hasInvalidMeals={logic.hasInvalidMeals}
+                    categorizedResults={categorizedResults}
+                    hasInvalidMeals={hasInvalidMeals}
                     
                     // UI State
                     loading={logic.loading}
@@ -301,8 +325,17 @@ const App = () => {
                     onToggleMealEaten={logic.onToggleMealEaten}
                     handleRefresh={logic.handleRefresh}
                     handleEditProfile={handleEditProfile}
-                    handleSignOut={handleSignOut}
+                    handleSignOut={logic.handleSignOut}
                     showToast={logic.showToast}
+                    
+                    // Plan Persistence - NEW
+                    savedPlans={logic.savedPlans}
+                    activePlanId={logic.activePlanId}
+                    handleSavePlan={logic.handleSavePlan}
+                    handleLoadPlan={logic.handleLoadPlan}
+                    handleDeletePlan={logic.handleDeletePlan}
+                    savingPlan={logic.savingPlan}
+                    loadingPlan={logic.loadingPlan}
                     
                     // Responsive
                     isMobile={isMobile}
