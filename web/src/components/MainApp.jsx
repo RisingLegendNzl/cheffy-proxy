@@ -530,11 +530,11 @@ const MainApp = (logic) => {
                     showToast('All data cleared', 'success');
                 }}
                 onEditProfile={() => {
-                    handleEditProfile();
+                    // MODIFIED: Removing the handleEditProfile call and prioritizing state updates
+                    // to ensure the view change is not immediately overridden.
                     setIsSettingsOpen(false);
-                    setContentView('profile');
-                    // ADDED: Explicitly close the main side menu just in case, ensuring the results panel is visible.
                     setIsMenuOpen(false); 
+                    setContentView('profile');
                 }}
                 showOrchestratorLogs={showOrchestratorLogs}
                 onToggleOrchestratorLogs={setShowOrchestratorLogs}
