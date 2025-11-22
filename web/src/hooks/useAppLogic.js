@@ -1,14 +1,11 @@
 // web/src/hooks/useAppLogic.js
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
-import usePlanPersistence from './usePlanPersistence'; // Step 1: Add Import
+import usePlanPersistence from './usePlanPersistence'; // <--- ADDED
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
-const ORCHESTRATOR_DAY_API_URL = '/api/plan/day';
-const ORCHESTRATOR_FULL_PLAN_API_URL = '/api/plan/generate-full-plan';
-const NUTRITION_API_URL = '/api/nutrition-search';
-const MAX_SUBSTITUTES = 5;
+// ... (rest of the configuration constants)
 
 // --- MOCK DATA ---
 const MOCK_PRODUCT_TEMPLATE = {
@@ -22,6 +19,7 @@ const MOCK_PRODUCT_TEMPLATE = {
 
 // --- SSE Stream Parser ---
 function processSseChunk(value, buffer, decoder) {
+    // ... (content of processSseChunk function remains the same)
     const chunk = decoder.decode(value, { stream: true });
     buffer += chunk;
     
@@ -82,9 +80,7 @@ const useAppLogic = ({
     nutritionalTargets,
     setNutritionalTargets
 }) => {
-    // ========================================
-    // SECTION 1: ALL STATE DECLARATIONS (MUST COME FIRST)
-    // ========================================
+    // --- State ---
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
     const [mealPlan, setMealPlan] = useState([]);
@@ -117,36 +113,6 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
-    
-    // --- Base Helpers (Defined after state, before dependent hooks) ---
-    const showToast = useCallback((message, type = 'info', duration = 3000) => {
-      const id = Date.now();
-      setToasts(prev => [...prev, { id, message, type, duration }]);
-    }, []);
-    
-    const removeToast = useCallback((id) => {
-      setToasts(prev => prev.filter(toast => toast.id !== id));
-    }, []);
-
-    // ========================================
-    // SECTION 2: CUSTOM HOOKS (Initialized after all required state/helpers are defined)
-    // ========================================
-    // ADDED SAFETY GUARDS to prevent runtime crashes if inputs are momentarily null/undefined
-    const planPersistence = usePlanPersistence({
-        userId: userId || null,
-        isAuthReady: isAuthReady || false,
-        db: db || null,
-        mealPlan: mealPlan || [],
-        results: results || {},
-        uniqueIngredients: uniqueIngredients || [],
-        formData: formData || {},
-        nutritionalTargets: nutritionalTargets || {},
-        showToast: showToast || (() => {}), // Now defined above
-        setMealPlan: setMealPlan || (() => {}), // Now defined above
-        setResults: setResults || (() => {}), // Now defined above
-        setUniqueIngredients: setUniqueIngredients || (() => {}) // Now defined above
-    });
-
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -158,6 +124,15 @@ const useAppLogic = ({
     }, [showFailedIngredientsLogs]);
 
     // --- Base Helpers ---
+    const showToast = useCallback((message, type = 'info', duration = 3000) => {
+      const id = Date.now();
+      setToasts(prev => [...prev, { id, message, type, duration }]);
+    }, []);
+    
+    const removeToast = useCallback((id) => {
+      setToasts(prev => prev.filter(toast => toast.id !== id));
+    }, []);
+    
     const recalculateTotalCost = useCallback((currentResults) => {
         let newTotal = 0;
         Object.values(currentResults).forEach(item => {
@@ -171,6 +146,23 @@ const useAppLogic = ({
         });
         setTotalCost(newTotal);
     }, []);
+
+    // --- Plan Persistence Hook Call (ADDED) ---
+    const planPersistence = usePlanPersistence({
+        userId: userId || null,
+        isAuthReady: isAuthReady || false,
+        db: db || null,
+        mealPlan: mealPlan || [],
+        results: results || {},
+        uniqueIngredients: uniqueIngredients || [],
+        formData: formData || {},
+        nutritionalTargets: nutritionalTargets || {},
+        showToast: showToast || (() => {}),
+        setMealPlan: setMealPlan || (() => {}),
+        setResults: setResults || (() => {}),
+        setUniqueIngredients: setUniqueIngredients || (() => {})
+    });
+    // --- End Plan Persistence Hook Call ---
 
     // --- Profile & Settings Handlers ---
     const handleLoadProfile = useCallback(async (silent = false) => {
@@ -952,17 +944,17 @@ const useAppLogic = ({
         handleSignIn,
         handleSignOut,
         onToggleMealEaten,
-
-        // Plan persistence additions
+        
+        // Plan persistence additions (ADDED)
         savedPlans: planPersistence.savedPlans,
         activePlanId: planPersistence.activePlanId,
         handleSavePlan: planPersistence.savePlan,
         handleLoadPlan: planPersistence.loadPlan,
-        handleListPlans: planPersistence.listPlans,
         handleDeletePlan: planPersistence.deletePlan,
-        handleSetActivePlan: planPersistence.setActivePlan,
         savingPlan: planPersistence.savingPlan,
         loadingPlan: planPersistence.loadingPlan,
+        handleListPlans: planPersistence.listPlans,
+        handleSetActivePlan: planPersistence.setActivePlan,
     };
 };
 
