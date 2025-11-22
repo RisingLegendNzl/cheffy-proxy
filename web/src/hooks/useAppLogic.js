@@ -1,6 +1,7 @@
 // web/src/hooks/useAppLogic.js
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
+import usePlans from "../hooks/usePlans"; // 1. Import the hook
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -114,6 +115,28 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
+
+    // 2. Add the plans hook here
+    const plans = usePlans({
+      userId,
+      currentPlanData: {
+        mealPlan,
+        results,
+        totalCost,
+        uniqueIngredients,
+        formData,
+        nutritionalTargets,
+      },
+      onPlanLoaded: (loadedData) => {
+        if (loadedData.mealPlan) setMealPlan(loadedData.mealPlan);
+        if (loadedData.results) setResults(loadedData.results);
+        if (loadedData.totalCost) setTotalCost(loadedData.totalCost);
+        if (loadedData.uniqueIngredients) setUniqueIngredients(loadedData.uniqueIngredients);
+        if (loadedData.formData) setFormData(loadedData.formData);
+        if (loadedData.nutritionalTargets) setNutritionalTargets(loadedData.nutritionalTargets);
+        showToast("Plan loaded successfully!", "success");
+      }
+    });
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -900,6 +923,9 @@ const useAppLogic = ({
         hasInvalidMeals,
         latestLog,
         
+        // 3. Expose plans in the returned object
+        plans,
+        
         // Setters
         setSelectedDay,
         setLogHeight,
@@ -932,3 +958,4 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
+
