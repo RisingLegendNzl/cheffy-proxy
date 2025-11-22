@@ -1,7 +1,6 @@
 // web/src/hooks/useAppLogic.js
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
-import usePlans from "../hooks/usePlans"; // 1. Import the hook
 
 // --- CONFIGURATION ---
 const ORCHESTRATOR_TARGETS_API_URL = '/api/plan/targets';
@@ -80,8 +79,7 @@ const useAppLogic = ({
     formData,
     setFormData,
     nutritionalTargets,
-    setNutritionalTargets,
-    setContentView
+    setNutritionalTargets
 }) => {
     // --- State ---
     const [results, setResults] = useState({});
@@ -116,28 +114,6 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
-
-    // 2. Add the plans hook here
-    const plans = usePlans({
-      userId,
-      currentPlanData: {
-        mealPlan,
-        results,
-        totalCost,
-        uniqueIngredients,
-        formData,
-        nutritionalTargets,
-      },
-      onPlanLoaded: (loadedData) => {
-        if (loadedData.mealPlan) setMealPlan(loadedData.mealPlan);
-        if (loadedData.results) setResults(loadedData.results);
-        if (loadedData.totalCost) setTotalCost(loadedData.totalCost);
-        if (loadedData.uniqueIngredients) setUniqueIngredients(loadedData.uniqueIngredients);
-        if (loadedData.formData) setFormData(loadedData.formData);
-        if (loadedData.nutritionalTargets) setNutritionalTargets(loadedData.nutritionalTargets);
-        showToast("Plan loaded successfully!", "success");
-      }
-    });
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -614,34 +590,9 @@ const useAppLogic = ({
                             case 'plan:complete':
                                 planComplete = true;
                                 setMealPlan(eventData.mealPlan || []);
-                                
-                                // FIX: Merge results to preserve allProducts from ingredient:found events
-                                setResults(prev => {
-                                    const merged = { ...eventData.results };
-                                    Object.keys(merged).forEach(key => {
-                                        if (prev[key]?.allProducts) {
-                                            merged[key] = {
-                                                ...merged[key],
-                                                allProducts: prev[key].allProducts,
-                                                currentSelectionURL: prev[key].currentSelectionURL || merged[key].currentSelectionURL
-                                            };
-                                        }
-                                    });
-                                    return merged;
-                                });
-                                
+                                setResults(eventData.results || {});
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
-
-                                // KEEP DEBUG logs
-                                console.log('=== PLAN COMPLETE DEBUG ===');
-                                console.log('Results object:', eventData.results);
-                                console.log('Unique ingredients:', eventData.uniqueIngredients);
-                                console.log('Sample ingredient:', eventData.uniqueIngredients?.[0]);
-                                if (eventData.uniqueIngredients?.[0]) {
-                                    console.log('Sample allProducts:', eventData.results?.[eventData.uniqueIngredients[0].originalIngredient]?.allProducts);
-                                }
-                                console.log('==========================');
                                 
                                 setGenerationStepKey('complete');
                                 setGenerationStatus('Plan generation complete!');
@@ -654,7 +605,6 @@ const useAppLogic = ({
                                 
                                 setTimeout(() => {
                                   setShowSuccessModal(true);
-                                  if (setContentView) setContentView('meals');
                                   setTimeout(() => {
                                     setShowSuccessModal(false);
                                   }, 2500);
@@ -950,9 +900,6 @@ const useAppLogic = ({
         hasInvalidMeals,
         latestLog,
         
-        // 3. Expose plans in the returned object
-        plans,
-        
         // Setters
         setSelectedDay,
         setLogHeight,
@@ -985,4 +932,3 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
-
