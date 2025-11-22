@@ -910,12 +910,6 @@ const useAppLogic = ({
         setUseBatchedMode,
         setShowSuccessModal,
         
-        // ADDED FOR PLAN PERSISTENCE (allows usePlanPersistence to update app state)
-        setMealPlan,
-        setResults,
-        setUniqueIngredients,
-        setTotalCost,
-        
         // Handlers
         showToast,
         removeToast,
@@ -938,4 +932,3 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
-
