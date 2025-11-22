@@ -3,8 +3,8 @@ import React, { useState, useCallback } from 'react'; // ADDED: useState, useCal
 import { RefreshCw, Zap, AlertTriangle, CheckCircle, Package, DollarSign, ExternalLink, Calendar, Users, Menu, X, ChevronsDown, ChevronsUp, ShoppingBag, BookOpen, ChefHat, Tag, Soup, Replace, Target, FileText, LayoutDashboard, Terminal, Loader, ChevronRight, GripVertical, Flame, Droplet, Wheat, ChevronDown, ChevronUp, Download, ListX, Save, FolderDown, User, Check, ListChecks, ListOrdered, Utensils } from 'lucide-react';
 
 // --- New Component Imports ---
-import SavePlanModal from './SavePlanModal'; // 2. ADDED: SavePlanModal
-import SavedPlansList from './SavedPlansList'; // 2. ADDED: SavedPlansList
+import SavePlanModal from './SavePlanModal';
+import SavedPlansList from './SavedPlansList';
 
 // --- Component Imports (Existing) ---
 import MacroRing from './MacroRing';
@@ -73,11 +73,11 @@ const categoryIconMap = {
  */
 const MainApp = (logic) => {
     
-    // --- Local State (4. ADDED) ---
+    // --- Local State ---
     const [isSavePlanOpen, setIsSavePlanOpen] = useState(false);
     const [isSavedPlansOpen, setIsSavedPlansOpen] = useState(false);
     
-    // --- Destructuring Logic (3. ADDED: plans) ---
+    // --- Destructuring Logic (MODIFIED for robustness) ---
     const { 
         // User & Auth
         userId,
@@ -94,9 +94,9 @@ const MainApp = (logic) => {
         nutritionalTargets,
         
         // Results & Plan
-        results,
+        results = {}, // Default empty object
         uniqueIngredients,
-        mealPlan,
+        mealPlan = [], // Default empty array
         totalCost,
         categorizedResults,
         hasInvalidMeals,
@@ -161,7 +161,7 @@ const MainApp = (logic) => {
         handleDownloadLogs,
         onToggleMealEaten,
         handleRefresh,
-        handleEditProfile, // Used in App.jsx and passed here
+        handleEditProfile,
         handleSignOut,
         showToast,
         
@@ -169,25 +169,26 @@ const MainApp = (logic) => {
         isMobile,
         isDesktop,
 
-        // 3. ADDED: Plans hook
-        plans,
+        // Plans hook (MODIFIED: Use default object to avoid breaking if logic.plans is null)
+        plans = {}, 
     } = logic || {};
 
-    // --- Plans Handlers (5. ADDED) ---
+    // --- Plans Handlers ---
+    // Note: The original check was "if (!plans) return;" which will fire if plans is {} or null.
+    // If plans is {} (due to default), we need to check if the function exists.
     const handleOpenSavePlan = useCallback(() => {
-        if (!plans) return;
+        if (!plans.savePlan) return; 
         setIsSavePlanOpen(true);
     }, [plans]);
 
     const handleOpenSavedPlans = useCallback(() => {
-        if (!plans) return;
-        // Refresh list when opening
-        plans.refreshPlans && plans.refreshPlans();
+        if (!plans.refreshPlans) return; // Check for required function
+        plans.refreshPlans();
         setIsSavedPlansOpen(true);
     }, [plans]);
 
     const handleSavePlan = useCallback(async (name) => {
-        if (!plans || !plans.savePlan) return;
+        if (!plans.savePlan) return;
         const result = await plans.savePlan(name);
         if (!result?.error) {
             setIsSavePlanOpen(false);
@@ -196,7 +197,7 @@ const MainApp = (logic) => {
     }, [plans, showToast]);
 
     const handleLoadPlan = useCallback(async (planId) => {
-        if (!plans || !plans.loadPlan) return;
+        if (!plans.loadPlan) return;
         const result = await plans.loadPlan(planId);
         if (!result?.error) {
             setIsSavedPlansOpen(false);
@@ -205,15 +206,17 @@ const MainApp = (logic) => {
     }, [plans, showToast]);
 
     const handleDeletePlan = useCallback(async (planId) => {
-        if (!plans || !plans.deletePlan) return;
+        if (!plans.deletePlan) return;
         const result = await plans.deletePlan(planId);
         if (!result?.error) {
+            // Note: plans.refreshPlans is optional but good practice to check
+            plans.refreshPlans && plans.refreshPlans();
             showToast && showToast('Plan deleted', 'info');
         }
     }, [plans, showToast]);
 
     const handleSetActivePlan = useCallback(async (planId) => {
-        if (!plans || !plans.setActive) return;
+        if (!plans.setActive) return;
         const result = await plans.setActive(planId);
         if (!result?.error) {
             showToast && showToast('Active plan updated', 'success');
@@ -322,8 +325,8 @@ const MainApp = (logic) => {
                     </div>
                 )}
 
-                {/* 6. ADDED: Save plan button */}
-                {mealPlan && mealPlan.length > 0 && plans && (
+                {/* Save plan button */}
+                {mealPlan.length > 0 && plans.savePlan && (
                     <button
                         type="button"
                         onClick={handleOpenSavePlan}
@@ -343,11 +346,8 @@ const MainApp = (logic) => {
             <Header 
                 userId={userId}
                 onOpenSettings={() => setIsSettingsOpen(true)}
-                onNavigateToProfile={() => {
-                    setContentView('profile');
-                    setIsMenuOpen(false); // <--- CORRECTED: Ensures the profile view (right panel) is visible on mobile
-                }}
-                onOpenSavedPlans={handleOpenSavedPlans} // 6. ADDED: My Saved Plans entry point
+                onNavigateToProfile={handleEditProfile} // Use the robust handler from App.jsx
+                onOpenSavedPlans={handleOpenSavedPlans} 
                 onSignOut={handleSignOut}
             />
     
@@ -356,7 +356,7 @@ const MainApp = (logic) => {
                     className="min-h-screen bg-gray-100 p-4 md:p-8 transition-all duration-200 relative" 
                     style={{ 
                         paddingTop: '80px',
-                        paddingBottom: `${isMobile && results && Object.keys(results).length > 0 ? '6rem' : (Number.isFinite(totalLogHeight) ? totalLogHeight : 50) + 'px'}`
+                        paddingBottom: `${isMobile && Object.keys(results).length > 0 ? '6rem' : (Number.isFinite(totalLogHeight) ? totalLogHeight : 50) + 'px'}`
                     }}
                 >
                     <div className="max-w-7xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
@@ -480,10 +480,10 @@ const MainApp = (logic) => {
                                             />
                                         )}
                                         
-                                        {contentView === 'meals' && (results && Object.keys(results).length > 0) && mealPlanContent}
-                                        {contentView === 'ingredients' && (results && Object.keys(results).length > 0) && priceComparisonContent}
+                                        {contentView === 'meals' && (Object.keys(results).length > 0) && mealPlanContent}
+                                        {contentView === 'ingredients' && (Object.keys(results).length > 0) && priceComparisonContent}
                                         
-                                        {(contentView === 'meals' || contentView === 'ingredients') && !(results && Object.keys(results).length > 0) && !loading && (
+                                        {(contentView === 'meals' || contentView === 'ingredients') && (Object.keys(results).length === 0) && !loading && (
                                             <div className="p-6 text-center text-gray-500">
                                                 Generate a plan to view {contentView}.
                                             </div>
@@ -496,7 +496,7 @@ const MainApp = (logic) => {
                 </div>
             </PullToRefresh>
     
-            {isMobile && results && Object.keys(results).length > 0 && (
+            {isMobile && Object.keys(results).length > 0 && (
                 <BottomNav
                     activeTab={contentView}
                     onTabChange={setContentView}
@@ -568,8 +568,9 @@ const MainApp = (logic) => {
                 />
             )}
 
-            {/* 7. NEW MODALS ADDED HERE */}
-            {plans && (
+            {/* NEW MODALS ADDED HERE */}
+            {/* Check if required functions exist before rendering modals that depend on them */}
+            {plans.savePlan && (
                 <SavePlanModal
                     isOpen={isSavePlanOpen}
                     onClose={() => setIsSavePlanOpen(false)}
@@ -579,11 +580,11 @@ const MainApp = (logic) => {
                 />
             )}
 
-            {plans && (
+            {plans.loadPlan && (
                 <SavedPlansList
                     isOpen={isSavedPlansOpen}
                     onClose={() => setIsSavedPlansOpen(false)}
-                    plans={plans.savedPlans}
+                    plans={plans.savedPlans || []} // Default empty array for savedPlans
                     activePlanId={plans.activePlanId}
                     loading={plans.loading}
                     error={plans.error}
