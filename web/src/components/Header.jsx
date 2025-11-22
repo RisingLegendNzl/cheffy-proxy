@@ -1,4 +1,6 @@
 // web/src/components/Header.jsx
+// Modified to include "My Saved Plans" menu item
+
 import React, { useState, useEffect } from 'react';
 import { ChefHat, Menu, X, User, Settings, LogOut, Bookmark } from 'lucide-react';
 import { COLORS, SPACING, SHADOWS, Z_INDEX } from '../constants';
@@ -128,6 +130,7 @@ const Header = ({ userId, onOpenSettings, onNavigateToProfile, onSignOut, onOpen
                 <span style={{ color: COLORS.gray[900] }}>Edit Profile</span>
               </button>
 
+              {/* My Saved Plans - NEW */}
               <button
                 onClick={() => {
                   setIsMenuOpen(false);
