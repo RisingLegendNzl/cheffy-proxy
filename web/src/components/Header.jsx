@@ -1,6 +1,6 @@
 // web/src/components/Header.jsx
 import React, { useState, useEffect } from 'react';
-import { ChefHat, Menu, X, User, Settings, LogOut } from 'lucide-react';
+import { ChefHat, Menu, X, User, Settings, LogOut, Bookmark } from 'lucide-react';
 import { COLORS, SPACING, SHADOWS, Z_INDEX } from '../constants';
 import { APP_CONFIG } from '../constants';
 
@@ -8,7 +8,7 @@ import { APP_CONFIG } from '../constants';
  * Main app header with branding, user menu, and scroll behavior
  * Becomes compact when user scrolls down
  */
-const Header = ({ userId, onOpenSettings, onNavigateToProfile, onSignOut }) => {
+const Header = ({ userId, onOpenSettings, onNavigateToProfile, onSignOut, onOpenSavedPlans }) => {
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
@@ -55,58 +55,21 @@ const Header = ({ userId, onOpenSettings, onNavigateToProfile, onSignOut }) => {
                   }`}
                   style={{ color: COLORS.gray[900] }}
                 >
-                  {APP_CONFIG.name}
+                  Cheffy
                 </h1>
                 {!isScrolled && (
-                  <p
-                    className="text-xs animate-fadeIn"
-                    style={{ color: COLORS.gray[500] }}
-                  >
-                    {APP_CONFIG.tagline}
+                  <p className="text-xs" style={{ color: COLORS.gray[500] }}>
+                    Your AI Meal Planner
                   </p>
                 )}
               </div>
             </div>
 
-            {/* Desktop User Menu */}
-            <div className="hidden md:flex items-center space-x-4">
-              {userId && (
-                <>
-                  <div
-                    className="text-xs px-3 py-1 rounded-full"
-                    style={{
-                      backgroundColor: COLORS.primary[50],
-                      color: COLORS.primary[700],
-                    }}
-                  >
-                    <User size={12} className="inline mr-1" />
-                    Signed In
-                  </div>
-
-                  <button
-                    onClick={() => setIsMenuOpen(!isMenuOpen)}
-                    className="p-2 rounded-full hover-lift transition-spring"
-                    style={{
-                      backgroundColor: COLORS.gray[100],
-                      color: COLORS.gray[700],
-                    }}
-                    aria-label="User menu"
-                  >
-                    <Menu size={20} />
-                  </button>
-                </>
-              )}
-            </div>
-
-            {/* Mobile Menu Button */}
+            {/* User Menu Button */}
             <button
               onClick={() => setIsMenuOpen(!isMenuOpen)}
-              className="md:hidden p-2 rounded-full hover-lift transition-spring"
-              style={{
-                backgroundColor: COLORS.gray[100],
-                color: COLORS.gray[700],
-              }}
-              aria-label="Menu"
+              className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+              style={{ color: COLORS.gray[700] }}
             >
               {isMenuOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
@@ -163,6 +126,21 @@ const Header = ({ userId, onOpenSettings, onNavigateToProfile, onSignOut }) => {
                   style={{ color: COLORS.gray[600] }}
                 />
                 <span style={{ color: COLORS.gray[900] }}>Edit Profile</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  onOpenSavedPlans && onOpenSavedPlans();
+                }}
+                className="w-full flex items-center px-4 py-3 rounded-lg hover:bg-gray-50 transition-fast text-left"
+              >
+                <Bookmark
+                  size={18}
+                  className="mr-3"
+                  style={{ color: COLORS.gray[600] }}
+                />
+                <span style={{ color: COLORS.gray[900] }}>My Saved Plans</span>
               </button>
 
               <button
