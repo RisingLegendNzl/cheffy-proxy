@@ -38,30 +38,29 @@ const RecipeModal = ({ meal, onClose }) => {
                 }}
                 onClick={(e) => e.stopPropagation()}
             >
-                {/* Fixed Header - Always visible with safe area padding */}
+                {/* Sticky Header - Compact single-line layout */}
                 <div 
-                    className="flex-shrink-0 bg-white border-b border-gray-200 rounded-t-3xl sm:rounded-t-2xl"
+                    className="sticky top-0 z-10 bg-white border-b border-gray-200 flex items-center justify-between rounded-t-3xl sm:rounded-t-2xl"
                     style={{
-                        paddingTop: 'max(1.5rem, calc(env(safe-area-inset-top) + 0.75rem))',
-                        paddingBottom: '1rem',
+                        paddingTop: 'max(1rem, calc(env(safe-area-inset-top) + 0.5rem))',
+                        paddingBottom: '0.75rem',
                         paddingLeft: '1.25rem',
                         paddingRight: '1.25rem',
                     }}
                 >
-                    <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                            <h3 className="text-xl sm:text-2xl font-bold text-gray-900 leading-snug">
-                                {meal.name}
-                            </h3>
-                        </div>
-                        <button 
-                            onClick={onClose} 
-                            className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 transition-colors -mt-1"
-                            aria-label="Close"
-                        >
-                            <X size={20} className="text-gray-600" />
-                        </button>
-                    </div>
+                    {/* Meal Name - Truncates if too long */}
+                    <h3 className="text-xl font-bold text-gray-900 truncate pr-3 flex-1">
+                        {meal.name}
+                    </h3>
+                    
+                    {/* Close Button */}
+                    <button 
+                        onClick={onClose} 
+                        className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
+                        aria-label="Close"
+                    >
+                        <X size={20} className="text-gray-600" />
+                    </button>
                 </div>
                 
                 {/* Scrollable Body */}
