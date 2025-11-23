@@ -30,7 +30,9 @@ const DayNavigator = ({
 
   return (
     <div
-      className="relative overflow-hidden rounded-2xl p-6 shadow-lg border backdrop-blur-sm transition-all duration-300 hover:shadow-xl"
+      // 1. Removed overflow-hidden to prevent cutting off expanded pill shadow/animation.
+      // 2. Adjusted padding to ensure enough space for the expanded pill.
+      className="relative rounded-2xl py-6 px-4 sm:px-8 shadow-lg border backdrop-blur-sm transition-all duration-300 hover:shadow-xl"
       style={{ 
         background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95) 0%, rgba(249, 250, 251, 0.98) 100%)',
         borderColor: COLORS.gray[200] 
@@ -139,8 +141,9 @@ const DayNavigator = ({
         </button>
       </div>
 
-      {/* Progress Dots */}
-      <div className="flex justify-center items-center space-x-2.5 mb-1">
+      {/* Progress Dots Container */}
+      {/* Increased spacing flexibility by using gap and removing horizontal margin/padding on dots themselves */}
+      <div className="flex justify-center items-center gap-1.5 flex-wrap">
         {Array.from({ length: totalDays }, (_, i) => i + 1).map((day) => {
           const isCompleted = completedDays.includes(day);
           const isCurrent = day === currentDay;
@@ -150,6 +153,8 @@ const DayNavigator = ({
               key={day}
               onClick={() => onSelectDay(day)}
               className={`relative rounded-full transition-all duration-300 ease-out ${
+                // The current pill is w-10 (40px). The original container padding p-6 (24px) 
+                // on both sides was likely not enough for the full span of dots + the wider pill.
                 isCurrent 
                   ? 'w-10 h-3.5 hover:scale-105' 
                   : 'w-3 h-3 hover:scale-150 hover:-translate-y-0.5'
@@ -217,3 +222,4 @@ const DayNavigator = ({
 };
 
 export default DayNavigator;
+
