@@ -1,5 +1,5 @@
 // web/src/components/ShoppingListWithDetails.jsx
-// Combines summary card tracking with full product detail cards
+// FIXED VERSION - Corrects data mapping for price calculation and product access
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
@@ -34,7 +34,7 @@ const ShoppingListWithDetails = ({
   const [checkedItems, setCheckedItems] = useState({});
   const [expandedCategories, setExpandedCategories] = useState({});
 
-  // Initialize all items as checked when ingredients change
+  // Initialize all items as checked when results change
   useEffect(() => {
     const initialCheckedState = {};
     Object.keys(results).forEach(normalizedKey => {
@@ -46,27 +46,66 @@ const ShoppingListWithDetails = ({
   const totalItems = Object.keys(results).length;
   const checkedCount = Object.values(checkedItems).filter(Boolean).length;
 
-  // Calculate total cost of selected items
+  // Calculate total cost of selected items - FIXED
   const selectedTotal = useMemo(() => {
     let total = 0;
+    
     Object.entries(results).forEach(([normalizedKey, result]) => {
       const isChecked = checkedItems[normalizedKey];
-      if (isChecked && result && result.products && result.products.length > 0) {
-        const selectedProduct = result.selectedIndex !== undefined 
-          ? result.products[result.selectedIndex]
-          : result.products[0];
-        
-        if (selectedProduct && selectedProduct.product_price) {
-          const price = parseFloat(selectedProduct.product_price);
-          const quantity = result.userQuantity || 1;
-          if (!isNaN(price)) {
-            total += price * quantity;
-          }
-        }
+      
+      if (!isChecked || !result) return;
+      
+      // Access products array correctly
+      const products = result.allProducts || result.products || [];
+      if (products.length === 0) return;
+      
+      // Get selected product - check multiple possible locations
+      let selectedProduct = null;
+      
+      if (result.currentSelectionURL) {
+        selectedProduct = products.find(p => p && p.url === result.currentSelectionURL);
       }
+      
+      if (!selectedProduct && result.selectedIndex !== undefined) {
+        selectedProduct = products[result.selectedIndex];
+      }
+      
+      if (!selectedProduct) {
+        selectedProduct = products[0];
+      }
+      
+      if (!selectedProduct) return;
+      
+      // Get price - try multiple possible field names
+      const price = parseFloat(
+        selectedProduct.product_price || 
+        selectedProduct.price || 
+        selectedProduct.current_price || 
+        0
+      );
+      
+      if (isNaN(price) || price <= 0) return;
+      
+      // Get quantity
+      const quantity = result.userQuantity || 1;
+      
+      total += price * quantity;
     });
+    
     return total;
   }, [checkedItems, results]);
+
+  // Detect actual store from products - FIXED
+  const actualStoreName = useMemo(() => {
+    // Try to get store from first product
+    for (const [key, result] of Object.entries(results)) {
+      const products = result.allProducts || result.products || [];
+      if (products.length > 0 && products[0].store) {
+        return products[0].store;
+      }
+    }
+    return storeName; // Fallback to prop
+  }, [results, storeName]);
 
   // Toggle item checked state
   const handleToggleItem = (normalizedKey) => {
@@ -100,7 +139,7 @@ const ShoppingListWithDetails = ({
 
   // Copy list to clipboard
   const handleCopyList = async () => {
-    let text = `Shopping List - ${storeName}\n`;
+    let text = `Shopping List - ${actualStoreName}\n`;
     text += `Total (Selected): $${selectedTotal.toFixed(2)}\n`;
     text += `Items: ${checkedCount} of ${totalItems}\n`;
     text += '='.repeat(40) + '\n\n';
@@ -162,6 +201,17 @@ const ShoppingListWithDetails = ({
     return iconMap[category.toLowerCase()] || '🛒';
   };
 
+  // Debug logging (remove in production)
+  useEffect(() => {
+    console.log('[ShoppingList] Debug Info:', {
+      totalItems,
+      checkedCount,
+      selectedTotal,
+      actualStoreName,
+      sampleResult: results[Object.keys(results)[0]]
+    });
+  }, [totalItems, checkedCount, selectedTotal, actualStoreName, results]);
+
   return (
     <div className="space-y-4">
       {/* Shopping List Summary Card */}
@@ -180,7 +230,7 @@ const ShoppingListWithDetails = ({
             <div>
               <h2 className="text-2xl font-bold text-white mb-1">Shopping List</h2>
               <p className="text-indigo-100 text-sm">
-                {totalItems} items from {storeName}
+                {totalItems} items from {actualStoreName}
               </p>
             </div>
           </div>
@@ -328,8 +378,8 @@ const ShoppingListWithDetails = ({
                             onSelectSubstitute={onSelectSubstitute}
                             onQuantityChange={onQuantityChange}
                             onFetchNutrition={onFetchNutrition}
-                            nutritionData={nutritionCache[result.products?.[result.selectedIndex || 0]?.url]}
-                            isLoadingNutrition={loadingNutritionFor === result.products?.[result.selectedIndex || 0]?.url}
+                            nutritionData={nutritionCache[result.allProducts?.[result.selectedIndex || 0]?.url] || nutritionCache[result.products?.[result.selectedIndex || 0]?.url]}
+                            isLoadingNutrition={loadingNutritionFor === result.allProducts?.[result.selectedIndex || 0]?.url || loadingNutritionFor === result.products?.[result.selectedIndex || 0]?.url}
                           />
                         </div>
                       </div>
