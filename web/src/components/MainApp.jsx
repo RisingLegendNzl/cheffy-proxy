@@ -169,6 +169,16 @@ const MainApp = ({
     isDesktop,
 }) => {
     
+    // Create a wrapped handler that closes meal when changing tabs
+    const handleTabChange = (newTab) => {
+        // Close meal detail if open
+        if (selectedMeal) {
+            setSelectedMeal(null);
+        }
+        // Change the tab
+        setContentView(newTab);
+    };
+    
     // Local state for SavedPlansModal
     const [showSavedPlansModal, setShowSavedPlansModal] = useState(false);
     const [savePlanName, setSavePlanName] = useState('');
@@ -291,7 +301,7 @@ const MainApp = ({
                 userId={userId}
                 onOpenSettings={() => setIsSettingsOpen(true)}
                 onNavigateToProfile={() => {
-                    setContentView('profile');
+                    handleTabChange('profile'); // Updated to use handleTabChange
                     setIsMenuOpen(true);
                 }}
                 onSignOut={handleSignOut}
@@ -406,7 +416,7 @@ const MainApp = ({
                                         {/* Added Navigation Tabs */}
                                         <div className="flex space-x-4 border-b">
                                             <button
-                                                onClick={() => setContentView('profile')}
+                                                onClick={() => handleTabChange('profile')} // UPDATED
                                                 className={`pb-2 text-lg font-semibold ${contentView === 'profile' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
                                             >
                                                 <LayoutDashboard className="inline w-5 h-5 mr-2" /> Summary
@@ -414,13 +424,13 @@ const MainApp = ({
                                             {results && Object.keys(results).length > 0 && (
                                                 <>
                                                     <button
-                                                        onClick={() => setContentView('meals')}
+                                                        onClick={() => handleTabChange('meals')} // UPDATED
                                                         className={`pb-2 text-lg font-semibold ${contentView === 'meals' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
                                                     >
                                                         <Utensils className="inline w-5 h-5 mr-2" /> Meals
                                                     </button>
                                                     <button
-                                                        onClick={() => setContentView('ingredients')}
+                                                        onClick={() => handleTabChange('ingredients')} // UPDATED
                                                         className={`pb-2 text-lg font-semibold ${contentView === 'ingredients' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
                                                     >
                                                         <ShoppingBag className="inline w-5 h-5 mr-2" /> Shopping
@@ -473,7 +483,7 @@ const MainApp = ({
             {isMobile && results && Object.keys(results).length > 0 && (
                 <BottomNav
                     activeTab={contentView}
-                    onTabChange={setContentView}
+                    onTabChange={handleTabChange} // UPDATED
                     showPlanButton={false}
                 />
             )}
@@ -488,7 +498,7 @@ const MainApp = ({
                 onClose={() => setShowSuccessModal(false)}
                 onViewPlan={() => {
                     setShowSuccessModal(false);
-                    setContentView('meals');
+                    handleTabChange('meals'); // Using handleTabChange here for consistency
                 }}
             />
     
