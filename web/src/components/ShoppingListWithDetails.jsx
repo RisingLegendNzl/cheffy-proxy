@@ -1,5 +1,5 @@
 // web/src/components/ShoppingListWithDetails.jsx
-// FIXED VERSION - Corrects data mapping for price calculation and product access
+// FIXED VERSION - Enhanced store name detection
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
@@ -46,7 +46,48 @@ const ShoppingListWithDetails = ({
   const totalItems = Object.keys(results).length;
   const checkedCount = Object.values(checkedItems).filter(Boolean).length;
 
-  // Calculate total cost of selected items - FIXED
+  // Detect actual store from products - ENHANCED
+  const actualStoreName = useMemo(() => {
+    // Strategy 1: Try to extract from product URLs or data
+    for (const [key, result] of Object.entries(results)) {
+      // Check allProducts array
+      const products = result.allProducts || result.products || [];
+      
+      for (const product of products) {
+        if (!product) continue;
+        
+        // Check if product has a store field
+        if (product.store) {
+          return product.store;
+        }
+        
+        // Check if URL contains store name
+        if (product.url) {
+          if (product.url.includes('coles.com')) return 'Coles';
+          if (product.url.includes('woolworths.com')) return 'Woolworths';
+        }
+        
+        // Check product name for store prefix
+        if (product.product_name || product.name) {
+          const name = product.product_name || product.name;
+          if (name.toLowerCase().startsWith('coles')) return 'Coles';
+          if (name.toLowerCase().startsWith('woolworths')) return 'Woolworths';
+        }
+      }
+    }
+    
+    // Strategy 2: Check if ingredients have store info
+    for (const ingredient of ingredients) {
+      if (ingredient.store) {
+        return ingredient.store;
+      }
+    }
+    
+    // Strategy 3: Use provided storeName (should be correct from formData)
+    return storeName;
+  }, [results, ingredients, storeName]);
+
+  // Calculate total cost of selected items
   const selectedTotal = useMemo(() => {
     let total = 0;
     
@@ -94,18 +135,6 @@ const ShoppingListWithDetails = ({
     
     return total;
   }, [checkedItems, results]);
-
-  // Detect actual store from products - FIXED
-  const actualStoreName = useMemo(() => {
-    // Try to get store from first product
-    for (const [key, result] of Object.entries(results)) {
-      const products = result.allProducts || result.products || [];
-      if (products.length > 0 && products[0].store) {
-        return products[0].store;
-      }
-    }
-    return storeName; // Fallback to prop
-  }, [results, storeName]);
 
   // Toggle item checked state
   const handleToggleItem = (normalizedKey) => {
@@ -201,16 +230,14 @@ const ShoppingListWithDetails = ({
     return iconMap[category.toLowerCase()] || '🛒';
   };
 
-  // Debug logging (remove in production)
+  // Debug logging
   useEffect(() => {
-    console.log('[ShoppingList] Debug Info:', {
-      totalItems,
-      checkedCount,
-      selectedTotal,
-      actualStoreName,
-      sampleResult: results[Object.keys(results)[0]]
+    console.log('[ShoppingList] Store Detection:', {
+      providedStoreName: storeName,
+      detectedStoreName: actualStoreName,
+      sampleProduct: results[Object.keys(results)[0]]?.allProducts?.[0] || results[Object.keys(results)[0]]?.products?.[0]
     });
-  }, [totalItems, checkedCount, selectedTotal, actualStoreName, results]);
+  }, [storeName, actualStoreName, results]);
 
   return (
     <div className="space-y-4">
