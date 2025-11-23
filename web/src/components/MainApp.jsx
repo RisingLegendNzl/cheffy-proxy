@@ -233,34 +233,49 @@ const MainApp = ({
         </div>
     );
     
+    // START MODIFIED SECTION
     const mealPlanContent = (
         <div className="flex flex-col md:flex-row p-4 gap-6">
             {mealPlan && mealPlan.length > 0 && (
-                <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
-                    <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
+                // Step 3: Removed p-5 from this wrapper
+                <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 shadow-lg">
                     
-                    {/* --- KEEP: Save and Load Buttons in Sidebar --- */}
-                    <div className="mt-4 pt-4 border-t border-gray-200">
-                        <button
-                            onClick={handleSavePlanClick}
-                            disabled={savingPlan || loading}
-                            className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md bg-indigo-600 text-white"
-                        >
-                            <Save size={18} />
-                            <span>{savingPlan ? 'Saving...' : 'Save Plan'}</span>
-                        </button>
+                    {/* Step 4: Wrap DaySidebar with Top padding only */}
+                    <div className="pt-5">
+                        <DaySidebar 
+                            days={Math.max(1, mealPlan.length)} 
+                            selectedDay={selectedDay} 
+                            onSelect={setSelectedDay} 
+                        />
                     </div>
-                    <div className="mt-2">
-                        <button
-                            onClick={handleOpenSavedPlans}
-                            disabled={loading}
-                            className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md bg-gray-200 text-gray-800"
-                        >
-                            <FolderDown size={18} />
-                            <span>Load Plans</span>
-                        </button>
+                    
+                    {/* Step 5: Wrap Buttons Section with Full padding (px-5 pb-5) */}
+                    <div className="px-5 pb-5">
+                        {/* Save Plan Button */}
+                        <div className="mt-4 pt-4 border-t border-gray-200">
+                            <button
+                                onClick={handleSavePlanClick}
+                                disabled={savingPlan || loading}
+                                className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md bg-indigo-600 text-white"
+                            >
+                                <Save size={18} />
+                                <span>{savingPlan ? 'Saving...' : 'Save Plan'}</span>
+                            </button>
+                        </div>
+                        
+                        {/* Load Plans Button */}
+                        <div className="mt-2">
+                            <button
+                                onClick={handleOpenSavedPlans}
+                                disabled={loading}
+                                className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md bg-gray-200 text-gray-800"
+                            >
+                                <FolderDown size={18} />
+                                <span>Load Plans</span>
+                            </button>
+                        </div>
                     </div>
-                    {/* --- END KEEP --- */}
+                    
                 </div>
             )}
             
@@ -292,6 +307,7 @@ const MainApp = ({
             )}
         </div>
     );
+    // END MODIFIED SECTION
 
     const totalLogHeight = (failedIngredientsHistory?.length > 0 ? 60 : 0) + (isLogOpen ? Math.max(50, logHeight) : 50);
 
