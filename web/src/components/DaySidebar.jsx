@@ -21,8 +21,16 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                 </div>
             )}
 
-            {/* Day Pills Container - FIXED: Added px-4 for horizontal padding */}
-            <div className={`flex md:flex-col gap-3 overflow-x-auto md:overflow-visible px-4 md:px-0 pb-2 md:pb-0 scroll-smooth snap-x snap-mandatory md:snap-none ${isSingleDay ? 'justify-center' : ''}`}>
+            {/* Day Pills Container - FIXED: negative margin to extend beyond parent padding */}
+            <div 
+                className={`flex md:flex-col gap-3 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scroll-smooth snap-x snap-mandatory md:snap-none ${isSingleDay ? 'justify-center' : ''}`}
+                style={{
+                    marginLeft: '-1.25rem',
+                    marginRight: '-1.25rem',
+                    paddingLeft: '1.25rem',
+                    paddingRight: '1.25rem',
+                }}
+            >
                 {Array.from({ length: days }, (_, i) => i + 1).map(day => {
                     const isSelected = day === selectedDay;
                     
@@ -124,6 +132,16 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                 
                 .active\\:scale-98:active {
                     transform: scale(0.98);
+                }
+                
+                /* Desktop-only: remove negative margins */
+                @media (min-width: 768px) {
+                    .flex.md\\:flex-col {
+                        margin-left: 0 !important;
+                        margin-right: 0 !important;
+                        padding-left: 0 !important;
+                        padding-right: 0 !important;
+                    }
                 }
             `}</style>
         </div>
