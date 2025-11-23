@@ -28,39 +28,38 @@ const RecipeModal = ({ meal, onClose }) => {
         <div 
             className="fixed inset-0 bg-black/60 z-[200] flex items-end sm:items-center justify-center transition-opacity duration-300"
             onClick={handleBackdropClick}
-            style={{
-                paddingTop: 'env(safe-area-inset-top)',
-                paddingBottom: 'env(safe-area-inset-bottom)',
-            }}
         >
             {/* Modal Container */}
             <div 
                 className="bg-white w-full sm:max-w-2xl sm:rounded-2xl rounded-t-3xl shadow-2xl flex flex-col transform transition-all duration-300 ease-out"
                 style={{
-                    maxHeight: 'min(85vh, 900px)',
+                    maxHeight: 'min(90vh, 900px)',
                     animation: 'slideUp 0.3s ease-out',
                 }}
                 onClick={(e) => e.stopPropagation()}
             >
-                {/* Fixed Header - Always visible */}
+                {/* Fixed Header - Always visible with safe area padding */}
                 <div 
-                    className="flex-shrink-0 sticky top-0 bg-white z-10 border-b border-gray-200 px-5 py-4 sm:px-6 sm:py-5 rounded-t-3xl sm:rounded-t-2xl"
+                    className="flex-shrink-0 bg-white border-b border-gray-200 rounded-t-3xl sm:rounded-t-2xl"
                     style={{
-                        paddingTop: 'max(1rem, env(safe-area-inset-top))',
+                        paddingTop: 'max(1.5rem, calc(env(safe-area-inset-top) + 0.75rem))',
+                        paddingBottom: '1rem',
+                        paddingLeft: '1.25rem',
+                        paddingRight: '1.25rem',
                     }}
                 >
-                    <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0">
-                            <h3 className="text-2xl sm:text-3xl font-bold text-gray-900 leading-tight pr-2">
+                            <h3 className="text-xl sm:text-2xl font-bold text-gray-900 leading-snug">
                                 {meal.name}
                             </h3>
                         </div>
                         <button 
                             onClick={onClose} 
-                            className="flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
+                            className="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 transition-colors -mt-1"
                             aria-label="Close"
                         >
-                            <X size={24} className="text-gray-600" />
+                            <X size={20} className="text-gray-600" />
                         </button>
                     </div>
                 </div>
@@ -137,9 +136,8 @@ const RecipeModal = ({ meal, onClose }) => {
 
                     {/* Bottom padding for safe area */}
                     <div 
-                        className="h-8"
                         style={{
-                            paddingBottom: 'env(safe-area-inset-bottom)',
+                            paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
                         }}
                     />
                 </div>
