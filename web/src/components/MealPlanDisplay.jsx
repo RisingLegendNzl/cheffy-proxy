@@ -3,8 +3,7 @@ import React, { useMemo } from 'react';
 import { BookOpen, Target, CheckCircle, AlertTriangle, Soup, Droplet, Wheat } from 'lucide-react';
 import MacroBar from './MacroBar';
 
-// --- [MODIFIED] MealPlanDisplay Component ---
-const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe, onSavePlanClick }) => {
+const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe }) => {
     const dayData = mealPlan[selectedDay - 1];
 
     // Calculate eaten macros for the day
@@ -46,19 +45,6 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
     
     return (
         <div className="space-y-6">
-            
-            {/* Save Plan Button - Visible only if mealPlan exists */}
-            {mealPlan.length > 0 && (
-                <button
-                    onClick={() => onSavePlanClick && onSavePlanClick()}
-                    className="w-full py-3 px-4 rounded-lg font-semibold text-white transition-fast shadow-lg hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-indigo-300"
-                    // Using indigo-500 as a placeholder for COLORS.primary[500]
-                    style={{ backgroundColor: '#6366f1' }} 
-                >
-                    Save Plan
-                </button>
-            )}
-
             {/* Premium Header */}
             <div className="flex items-center justify-between pb-4 border-b border-gray-200">
                 <div className="flex items-center gap-3">
@@ -87,23 +73,22 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                     <Target className="w-5 h-5 mr-2"/>Daily Progress
                 </h4>
                 
-                {/* Main Calorie Bar - FIXED: Added relative and overflow-hidden */}
+                {/* Main Calorie Bar */}
                 <div className="mb-4">
                     <div className="flex justify-between items-center mb-1">
                         <span className="text-sm font-semibold text-gray-700">Calories</span>
                         <span className="text-sm font-bold">
-                            <span className={dailyMacrosEaten.calories > calTarget * 1.05 ? 'text-red-600' : 'text-green-600'}>
+                            <span className={dailyMacrosEaten.calories > calTarget * 1.05 ? 'text-red-600' : 
+                                dailyMacrosEaten.calories >= calTarget * 0.95 ? 'text-green-600' : 
+                                'text-gray-700'}>
                                 {dailyMacrosEaten.calories}
                             </span>
-                            <span className="text-gray-400"> / </span>
-                            <span className="text-gray-600">{calTarget} kcal</span>
+                            {' / '}{calTarget} kcal
                         </span>
                     </div>
-                    {/* FIXED: Added relative and overflow-hidden to container */}
-                    <div className="relative w-full bg-gray-200 rounded-full h-4 mb-1 overflow-hidden">
-                        {/* FIXED: Added absolute positioning and will-change */}
+                    <div className="relative w-full bg-gray-200 rounded-full h-3 overflow-hidden">
                         <div 
-                            className={`absolute top-0 left-0 h-full rounded-full transition-all duration-500 ${
+                            className={`h-3 transition-all duration-500 ease-out ${
                                 dailyMacrosEaten.calories > calTarget * 1.05 ? 'bg-red-500' : 
                                 dailyMacrosEaten.calories >= calTarget * 0.95 ? 'bg-green-500' : 
                                 'bg-indigo-500'
@@ -168,74 +153,75 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
 
                 // Calculate what % of daily target this meal represents
                 const percentOfDaily = {
-                    cal: calTarget > 0 ? Math.round((meal.subtotal_kcal / calTarget) * 100) : 0,
-                    protein: nutritionalTargets.protein > 0 ? Math.round((mealMacros.p / nutritionalTargets.protein) * 100) : 0,
+                    calories: calTarget > 0 ? Math.round((meal.subtotal_kcal / calTarget) * 100) : 0,
+                    protein: nutritionalTargets.protein > 0 ? Math.round((meal.subtotal_protein / nutritionalTargets.protein) * 100) : 0,
                 };
-
-                // Determine if meal is high protein
-                const isHighProtein = percentOfDaily.protein >= 30;
 
                 return (
                     <div 
-                        key={index} 
-                        className={`p-5 border-l-4 bg-white rounded-lg shadow-md ${isEaten ? 'border-green-500 opacity-60' : 'border-indigo-500'} cursor-pointer hover:shadow-lg transition-shadow`}
-                        onClick={() => onViewRecipe(meal)}
+                        key={index}
+                        className={`bg-white rounded-xl shadow-md border transition-all ${
+                            isEaten ? 'opacity-70 border-green-300' : 'border-gray-200 hover:shadow-lg'
+                        }`}
                     >
-                        <div className="flex justify-between items-start">
-                            <div className="flex-1">
-                                <div className="flex items-center gap-2">
-                                    <p className="text-sm font-bold uppercase text-indigo-600">{mealType}</p>
-                                    {isHighProtein && (
-                                        <span className="px-2 py-0.5 text-xs font-bold bg-green-100 text-green-700 rounded-full">
-                                            High Protein
+                        <div className="p-5">
+                            <div className="flex justify-between items-start mb-3">
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-xs font-semibold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                                            {mealType}
                                         </span>
-                                    )}
+                                        <span className="text-xs text-gray-500">
+                                            {percentOfDaily.calories}% daily calories
+                                        </span>
+                                    </div>
+                                    <h4 
+                                        className="text-xl font-bold text-gray-900 cursor-pointer hover:text-indigo-600 transition-colors"
+                                        onClick={() => onViewRecipe && onViewRecipe(meal)}
+                                    >
+                                        {mealName}
+                                    </h4>
+                                    <p className="text-sm font-semibold text-gray-700 mt-1">{mealCalories}</p>
                                 </div>
-                                <h4 className="text-xl font-semibold">{mealName}</h4>
-                                <p className="text-xl font-bold text-red-600 mt-1">{mealCalories}</p>
-                                <p className="text-xs text-gray-500 mt-1">
-                                    {percentOfDaily.cal}% of daily calories
-                                </p>
+                                <button
+                                    onClick={() => onToggleMealEaten(selectedDay, mealName)}
+                                    className={`flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${
+                                        isEaten ? 'bg-green-600 text-white' : 'bg-gray-200 hover:bg-gray-300'
+                                    }`}
+                                >
+                                    <CheckCircle className="w-4 h-4 mr-1" /> {isEaten ? 'Eaten' : 'Mark as Eaten'}
+                                </button>
                             </div>
-                            <button 
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    onToggleMealEaten(selectedDay, mealName);
-                                }} 
-                                className={`flex items-center text-xs py-1 px-3 rounded-full ${isEaten ? 'bg-green-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
-                            >
-                                <CheckCircle className="w-4 h-4 mr-1" /> {isEaten ? 'Eaten' : 'Mark as Eaten'}
-                            </button>
-                        </div>
-                        
-                        <p className="text-gray-600 leading-relaxed mt-2">{mealDesc}</p>
+                            
+                            <p className="text-gray-600 leading-relaxed mt-2">{mealDesc}</p>
 
-                        {/* Macro Breakout with Visual Indicators */}
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4 text-center">
-                            <div className="bg-green-50 p-2 rounded-lg border border-green-200">
-                                <p className="text-sm font-semibold text-green-800">Protein</p>
-                                <p className="text-lg font-bold">{mealMacros.p}g</p>
-                                <p className="text-xs text-green-600">{percentOfDaily.protein}% daily</p>
+                            {/* Macro Breakout with Visual Indicators */}
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4 text-center">
+                                <div className="bg-green-50 p-2 rounded-lg border border-green-200">
+                                    <p className="text-sm font-semibold text-green-800">Protein</p>
+                                    <p className="text-lg font-bold">{mealMacros.p}g</p>
+                                    <p className="text-xs text-green-600">{percentOfDaily.protein}% daily</p>
+                                </div>
+                                <div className="bg-yellow-50 p-2 rounded-lg border border-yellow-200">
+                                    <p className="text-sm font-semibold text-yellow-800">Fat</p>
+                                    <p className="text-lg font-bold">{mealMacros.f}g</p>
+                                </div>
+                                <div className="bg-orange-50 p-2 rounded-lg border border-orange-200">
+                                    <p className="text-sm font-semibold text-orange-800">Carbs</p>
+                                    <p className="text-lg font-bold">{mealMacros.c}g</p>
+                                </div>
                             </div>
-                            <div className="bg-yellow-50 p-2 rounded-lg border border-yellow-200">
-                                <p className="text-sm font-semibold text-yellow-800">Fat</p>
-                                <p className="text-lg font-bold">{mealMacros.f}g</p>
-                            </div>
-                            <div className="bg-orange-50 p-2 rounded-lg border border-orange-200">
-                                <p className="text-sm font-semibold text-orange-800">Carbs</p>
-                                <p className="text-lg font-bold">{mealMacros.c}g</p>
-                            </div>
-                        </div>
 
-                        {/* Ingredient Pills */}
-                        <div className="mt-4">
-                            <h5 className="text-sm font-semibold mb-2 text-gray-700">Ingredients:</h5>
-                            <div className="flex flex-wrap gap-2">
-                                {meal.items && meal.items.map((item, i) => (
-                                    <span key={i} className="bg-gray-200 text-gray-800 text-xs font-medium px-3 py-1 rounded-full">
-                                        {item.qty}{item.unit} {item.key}
-                                    </span>
-                                ))}
+                            {/* Ingredient Pills */}
+                            <div className="mt-4">
+                                <h5 className="text-sm font-semibold mb-2 text-gray-700">Ingredients:</h5>
+                                <div className="flex flex-wrap gap-2">
+                                    {meal.items && meal.items.map((item, i) => (
+                                        <span key={i} className="bg-gray-200 text-gray-800 text-xs font-medium px-3 py-1 rounded-full">
+                                            {item.qty}{item.unit} {item.key}
+                                        </span>
+                                    ))}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -246,4 +232,3 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
 };
 
 export default MealPlanDisplay;
-
