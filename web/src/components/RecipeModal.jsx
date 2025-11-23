@@ -1,78 +1,165 @@
-// web/src/components/RecipeModal.js
+// web/src/components/RecipeModal.jsx
 import React from 'react';
 import { X, ListChecks, ListOrdered } from 'lucide-react';
 
-// --- [NEW] Recipe Modal Component ---
+/**
+ * RecipeModal - Mobile-optimized meal detail view
+ * Displays meal name, description, ingredients, and instructions in a scrollable modal
+ */
 const RecipeModal = ({ meal, onClose }) => {
     if (!meal) return null;
 
-    // Handle backdrop click
+    // Handle backdrop click to close
     const handleBackdropClick = (e) => {
-        // Close only if the backdrop itself (the outer div) is clicked
         if (e.target === e.currentTarget) {
             onClose();
         }
     };
 
+    // Prevent scroll when modal is open
+    React.useEffect(() => {
+        document.body.style.overflow = 'hidden';
+        return () => {
+            document.body.style.overflow = 'unset';
+        };
+    }, []);
+
     return (
         <div 
-            className="fixed inset-0 bg-black/50 z-50 flex justify-center items-center p-4 transition-opacity duration-300"
-            onClick={handleBackdropClick} // Add backdrop click
+            className="fixed inset-0 bg-black/60 z-[200] flex items-end sm:items-center justify-center transition-opacity duration-300"
+            onClick={handleBackdropClick}
+            style={{
+                paddingTop: 'env(safe-area-inset-top)',
+                paddingBottom: 'env(safe-area-inset-bottom)',
+            }}
         >
-            <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col transform transition-all duration-300 scale-100">
-                {/* Header */}
-                <div className="flex justify-between items-center p-5 border-b">
-                    <h3 className="text-2xl font-bold text-indigo-700">{meal.name}</h3>
-                    <button 
-                        onClick={onClose} 
-                        className="text-gray-400 hover:text-gray-600"
-                    >
-                        <X size={24} />
-                    </button>
+            {/* Modal Container */}
+            <div 
+                className="bg-white w-full sm:max-w-2xl sm:rounded-2xl rounded-t-3xl shadow-2xl flex flex-col transform transition-all duration-300 ease-out"
+                style={{
+                    maxHeight: 'min(85vh, 900px)',
+                    animation: 'slideUp 0.3s ease-out',
+                }}
+                onClick={(e) => e.stopPropagation()}
+            >
+                {/* Fixed Header - Always visible */}
+                <div 
+                    className="flex-shrink-0 sticky top-0 bg-white z-10 border-b border-gray-200 px-5 py-4 sm:px-6 sm:py-5 rounded-t-3xl sm:rounded-t-2xl"
+                    style={{
+                        paddingTop: 'max(1rem, env(safe-area-inset-top))',
+                    }}
+                >
+                    <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                            <h3 className="text-2xl sm:text-3xl font-bold text-gray-900 leading-tight pr-2">
+                                {meal.name}
+                            </h3>
+                        </div>
+                        <button 
+                            onClick={onClose} 
+                            className="flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
+                            aria-label="Close"
+                        >
+                            <X size={24} className="text-gray-600" />
+                        </button>
+                    </div>
                 </div>
                 
                 {/* Scrollable Body */}
-                <div className="p-6 overflow-y-auto space-y-6">
+                <div 
+                    className="flex-1 overflow-y-auto overscroll-contain px-5 py-6 sm:px-6 sm:py-8 space-y-8"
+                    style={{
+                        WebkitOverflowScrolling: 'touch',
+                    }}
+                >
                     {/* Description */}
-                    <p className="text-gray-700 text-lg">{meal.description}</p>
-                    
-                    {/* Ingredients */}
                     <div>
-                        <h4 className="text-lg font-semibold flex items-center mb-3">
-                            <ListChecks className="w-5 h-5 mr-2 text-indigo-600" />
-                            Ingredients
-                        </h4>
-                        <ul className="list-disc list-inside space-y-1 text-gray-600">
-                            {meal.items.map((item, index) => (
-                                <li key={index}>
-                                    <span className="font-medium">{item.qty}{item.unit}</span> {item.key}
+                        <p className="text-gray-700 text-base sm:text-lg leading-relaxed">
+                            {meal.description}
+                        </p>
+                    </div>
+                    
+                    {/* Ingredients Section */}
+                    <div>
+                        <div className="flex items-center gap-2 mb-4">
+                            <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                                <ListChecks className="w-5 h-5 text-indigo-600" />
+                            </div>
+                            <h4 className="text-xl font-bold text-gray-900">
+                                Ingredients
+                            </h4>
+                        </div>
+                        <ul className="space-y-3">
+                            {meal.items && meal.items.map((item, index) => (
+                                <li 
+                                    key={index}
+                                    className="flex items-start gap-3 text-gray-700"
+                                >
+                                    <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0 mt-2"></span>
+                                    <span className="flex-1 text-base leading-relaxed">
+                                        <span className="font-semibold text-gray-900">
+                                            {item.qty}{item.unit}
+                                        </span>
+                                        {' '}
+                                        {item.key}
+                                    </span>
                                 </li>
                             ))}
                         </ul>
                     </div>
                     
-                    {/* Instructions */}
+                    {/* Instructions Section */}
                     <div>
-                        <h4 className="text-lg font-semibold flex items-center mb-3">
-                            <ListOrdered className="w-5 h-5 mr-2 text-indigo-600" />
-                            Instructions
-                        </h4>
-                        <ol className="list-decimal list-inside space-y-2 text-gray-700 leading-relaxed">
-                            {meal.instructions.map((step, index) => (
-                                <li key={index}>{step}</li>
+                        <div className="flex items-center gap-2 mb-4">
+                            <div className="w-8 h-8 rounded-lg bg-green-100 flex items-center justify-center flex-shrink-0">
+                                <ListOrdered className="w-5 h-5 text-green-600" />
+                            </div>
+                            <h4 className="text-xl font-bold text-gray-900">
+                                Instructions
+                            </h4>
+                        </div>
+                        <ol className="space-y-4">
+                            {meal.instructions && meal.instructions.map((step, index) => (
+                                <li 
+                                    key={index}
+                                    className="flex gap-4 text-gray-700"
+                                >
+                                    <span className="flex-shrink-0 w-7 h-7 rounded-full bg-green-100 text-green-700 font-bold text-sm flex items-center justify-center">
+                                        {index + 1}
+                                    </span>
+                                    <span className="flex-1 text-base leading-relaxed pt-0.5">
+                                        {step}
+                                    </span>
+                                </li>
                             ))}
                         </ol>
                     </div>
+
+                    {/* Bottom padding for safe area */}
+                    <div 
+                        className="h-8"
+                        style={{
+                            paddingBottom: 'env(safe-area-inset-bottom)',
+                        }}
+                    />
                 </div>
             </div>
+
+            {/* Slide-up animation keyframes */}
+            <style>{`
+                @keyframes slideUp {
+                    from {
+                        transform: translateY(100%);
+                        opacity: 0;
+                    }
+                    to {
+                        transform: translateY(0);
+                        opacity: 1;
+                    }
+                }
+            `}</style>
         </div>
     );
 };
-// --- END: New Component ---
 
 export default RecipeModal;
-
-/* ✅ Migrated without modifications
-   ❗ TODO: verify props/state wiring from App.js */
-
-
