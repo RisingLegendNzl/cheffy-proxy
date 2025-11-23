@@ -31,8 +31,7 @@ import LoadingOverlay from './LoadingOverlay';
 import SuccessModal from './SuccessModal';
 import MealCard from './MealCard';
 import DayNavigator from './DayNavigator';
-// import ShoppingListEnhanced from './ShoppingListEnhanced'; // <-- REMOVED
-import ShoppingListWithDetails from './ShoppingListWithDetails'; // <-- ADDED
+import ShoppingListWithDetails from './ShoppingListWithDetails';
 import FormSection from './FormSection';
 import SettingsPanel from './SettingsPanel';
 import BottomNav from './BottomNav';
@@ -205,7 +204,7 @@ const MainApp = ({
         setSavePlanName('');
     };
 
-    // --- STEP 2: Replace with ShoppingListWithDetails ---
+    // --- Shopping List Content Definition ---
     const shoppingListContent = (
         <div className="p-4">
             <ShoppingListWithDetails
@@ -230,7 +229,7 @@ const MainApp = ({
                 <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 p-5 shadow-lg">
                     <DaySidebar days={Math.max(1, mealPlan.length)} selectedDay={selectedDay} onSelect={setSelectedDay} />
                     
-                    {/* Save Plan Button */}
+                    {/* --- KEEP: Save and Load Buttons in Sidebar --- */}
                     <div className="mt-4 pt-4 border-t border-gray-200">
                         <button
                             onClick={handleSavePlanClick}
@@ -241,8 +240,7 @@ const MainApp = ({
                             <span>{savingPlan ? 'Saving...' : 'Save Plan'}</span>
                         </button>
                     </div>
-                    {/* Load Plans Button */}
-                     <div className="mt-2">
+                    <div className="mt-2">
                         <button
                             onClick={handleOpenSavedPlans}
                             disabled={loading}
@@ -252,8 +250,11 @@ const MainApp = ({
                             <span>Load Plans</span>
                         </button>
                     </div>
+                    {/* --- END KEEP --- */}
                 </div>
             )}
+            {/* The standalone Save Plan button that was here is now REMOVED. */}
+            
             {mealPlan && mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
                 <MealPlanDisplay
                     key={selectedDay}
