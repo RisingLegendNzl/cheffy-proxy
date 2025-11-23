@@ -253,9 +253,9 @@ const MainApp = ({
                     {/* --- END KEEP --- */}
                 </div>
             )}
-            {/* The standalone Save Plan button that was here is now REMOVED. */}
             
             {mealPlan && mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
+                // --- MEAL PLAN DISPLAY CONTENT ---
                 <MealPlanDisplay
                     key={selectedDay}
                     mealPlan={mealPlan}
