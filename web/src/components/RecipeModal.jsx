@@ -31,16 +31,18 @@ const RecipeModal = ({ meal, onClose }) => {
         >
             {/* Modal Container */}
             <div 
-                className="bg-white w-full sm:max-w-2xl sm:rounded-2xl rounded-t-3xl shadow-2xl flex flex-col transform transition-all duration-300 ease-out"
+                className="bg-white w-full sm:max-w-2xl sm:rounded-2xl rounded-t-3xl shadow-2xl overflow-hidden transform transition-all duration-300 ease-out"
                 style={{
                     maxHeight: 'min(90vh, 900px)',
                     animation: 'slideUp 0.3s ease-out',
+                    display: 'flex',
+                    flexDirection: 'column',
                 }}
                 onClick={(e) => e.stopPropagation()}
             >
-                {/* Sticky Header - Compact single-line layout */}
+                {/* Header - Compact single-line layout */}
                 <div 
-                    className="sticky top-0 z-10 bg-white border-b border-gray-200 flex items-center justify-between rounded-t-3xl sm:rounded-t-2xl"
+                    className="flex items-center justify-between bg-white border-b border-gray-200 flex-shrink-0"
                     style={{
                         paddingTop: 'max(1rem, calc(env(safe-area-inset-top) + 0.5rem))',
                         paddingBottom: '0.75rem',
@@ -49,7 +51,7 @@ const RecipeModal = ({ meal, onClose }) => {
                     }}
                 >
                     {/* Meal Name - Truncates if too long */}
-                    <h3 className="text-xl font-bold text-gray-900 truncate pr-3 flex-1">
+                    <h3 className="text-xl font-bold text-gray-900 truncate pr-3 flex-1 min-w-0">
                         {meal.name}
                     </h3>
                     
@@ -71,67 +73,73 @@ const RecipeModal = ({ meal, onClose }) => {
                     }}
                 >
                     {/* Description */}
-                    <div>
-                        <p className="text-gray-700 text-base sm:text-lg leading-relaxed">
-                            {meal.description}
-                        </p>
-                    </div>
+                    {meal.description && (
+                        <div>
+                            <p className="text-gray-700 text-base sm:text-lg leading-relaxed">
+                                {meal.description}
+                            </p>
+                        </div>
+                    )}
                     
                     {/* Ingredients Section */}
-                    <div>
-                        <div className="flex items-center gap-2 mb-4">
-                            <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
-                                <ListChecks className="w-5 h-5 text-indigo-600" />
+                    {meal.items && meal.items.length > 0 && (
+                        <div>
+                            <div className="flex items-center gap-2 mb-4">
+                                <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                                    <ListChecks className="w-5 h-5 text-indigo-600" />
+                                </div>
+                                <h4 className="text-xl font-bold text-gray-900">
+                                    Ingredients
+                                </h4>
                             </div>
-                            <h4 className="text-xl font-bold text-gray-900">
-                                Ingredients
-                            </h4>
-                        </div>
-                        <ul className="space-y-3">
-                            {meal.items && meal.items.map((item, index) => (
-                                <li 
-                                    key={index}
-                                    className="flex items-start gap-3 text-gray-700"
-                                >
-                                    <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0 mt-2"></span>
-                                    <span className="flex-1 text-base leading-relaxed">
-                                        <span className="font-semibold text-gray-900">
-                                            {item.qty}{item.unit}
+                            <ul className="space-y-3">
+                                {meal.items.map((item, index) => (
+                                    <li 
+                                        key={index}
+                                        className="flex items-start gap-3 text-gray-700"
+                                    >
+                                        <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0 mt-2"></span>
+                                        <span className="flex-1 text-base leading-relaxed">
+                                            <span className="font-semibold text-gray-900">
+                                                {item.qty}{item.unit}
+                                            </span>
+                                            {' '}
+                                            {item.key}
                                         </span>
-                                        {' '}
-                                        {item.key}
-                                    </span>
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
                     
                     {/* Instructions Section */}
-                    <div>
-                        <div className="flex items-center gap-2 mb-4">
-                            <div className="w-8 h-8 rounded-lg bg-green-100 flex items-center justify-center flex-shrink-0">
-                                <ListOrdered className="w-5 h-5 text-green-600" />
+                    {meal.instructions && meal.instructions.length > 0 && (
+                        <div>
+                            <div className="flex items-center gap-2 mb-4">
+                                <div className="w-8 h-8 rounded-lg bg-green-100 flex items-center justify-center flex-shrink-0">
+                                    <ListOrdered className="w-5 h-5 text-green-600" />
+                                </div>
+                                <h4 className="text-xl font-bold text-gray-900">
+                                    Instructions
+                                </h4>
                             </div>
-                            <h4 className="text-xl font-bold text-gray-900">
-                                Instructions
-                            </h4>
+                            <ol className="space-y-4">
+                                {meal.instructions.map((step, index) => (
+                                    <li 
+                                        key={index}
+                                        className="flex gap-4 text-gray-700"
+                                    >
+                                        <span className="flex-shrink-0 w-7 h-7 rounded-full bg-green-100 text-green-700 font-bold text-sm flex items-center justify-center">
+                                            {index + 1}
+                                        </span>
+                                        <span className="flex-1 text-base leading-relaxed pt-0.5">
+                                            {step}
+                                        </span>
+                                    </li>
+                                ))}
+                            </ol>
                         </div>
-                        <ol className="space-y-4">
-                            {meal.instructions && meal.instructions.map((step, index) => (
-                                <li 
-                                    key={index}
-                                    className="flex gap-4 text-gray-700"
-                                >
-                                    <span className="flex-shrink-0 w-7 h-7 rounded-full bg-green-100 text-green-700 font-bold text-sm flex items-center justify-center">
-                                        {index + 1}
-                                    </span>
-                                    <span className="flex-1 text-base leading-relaxed pt-0.5">
-                                        {step}
-                                    </span>
-                                </li>
-                            ))}
-                        </ol>
-                    </div>
+                    )}
 
                     {/* Bottom padding for safe area */}
                     <div 
