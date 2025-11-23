@@ -233,14 +233,14 @@ const MainApp = ({
         </div>
     );
     
-    // START MODIFIED SECTION
+    // Fix 1: Removed p-4 from the outer wrapper
     const mealPlanContent = (
-        <div className="flex flex-col md:flex-row p-4 gap-6">
+        <div className="flex flex-col md:flex-row gap-6">
             {mealPlan && mealPlan.length > 0 && (
-                // Step 3: Removed p-5 from this wrapper
+                // This wrapper previously had p-5, now has selective padding wrappers inside
                 <div className="sticky top-4 z-20 self-start w-full md:w-auto mb-4 md:mb-0 bg-white/90 backdrop-blur-md rounded-2xl border border-gray-100/50 shadow-lg">
                     
-                    {/* Step 4: Wrap DaySidebar with Top padding only */}
+                    {/* DaySidebar Section - Top padding only */}
                     <div className="pt-5">
                         <DaySidebar 
                             days={Math.max(1, mealPlan.length)} 
@@ -249,7 +249,7 @@ const MainApp = ({
                         />
                     </div>
                     
-                    {/* Step 5: Wrap Buttons Section with Full padding (px-5 pb-5) */}
+                    {/* Buttons Section - Full padding (px-5 pb-5) */}
                     <div className="px-5 pb-5">
                         {/* Save Plan Button */}
                         <div className="mt-4 pt-4 border-t border-gray-200">
@@ -281,15 +281,18 @@ const MainApp = ({
             
             {mealPlan && mealPlan.length > 0 && selectedDay >= 1 && selectedDay <= mealPlan.length ? (
                 // --- MEAL PLAN DISPLAY CONTENT ---
-                <MealPlanDisplay
-                    key={selectedDay}
-                    mealPlan={mealPlan}
-                    selectedDay={selectedDay}
-                    nutritionalTargets={nutritionalTargets}
-                    eatenMeals={eatenMeals}
-                    onToggleMealEaten={onToggleMealEaten}
-                    onViewRecipe={setSelectedMeal} 
-                />
+                // Fix 2: Wrapped MealPlanDisplay in p-4 div
+                <div className="p-4">
+                    <MealPlanDisplay
+                        key={selectedDay}
+                        mealPlan={mealPlan}
+                        selectedDay={selectedDay}
+                        nutritionalTargets={nutritionalTargets}
+                        eatenMeals={eatenMeals}
+                        onToggleMealEaten={onToggleMealEaten}
+                        onViewRecipe={setSelectedMeal} 
+                    />
+                </div>
             ) : (
                 <div className="flex-1 text-center p-8 text-gray-500">
                     {error && !loading ? (
@@ -307,7 +310,6 @@ const MainApp = ({
             )}
         </div>
     );
-    // END MODIFIED SECTION
 
     const totalLogHeight = (failedIngredientsHistory?.length > 0 ? 60 : 0) + (isLogOpen ? Math.max(50, logHeight) : 50);
 
