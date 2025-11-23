@@ -21,8 +21,8 @@ const DaySidebar = ({ days, selectedDay, onSelect }) => {
                 </div>
             )}
 
-            {/* Day Pills Container */}
-            <div className={`flex md:flex-col gap-3 overflow-x-auto md:overflow-visible pb-2 md:pb-0 scroll-smooth snap-x snap-mandatory md:snap-none ${isSingleDay ? 'justify-center' : ''}`}>
+            {/* Day Pills Container - FIXED: Added px-4 for horizontal padding */}
+            <div className={`flex md:flex-col gap-3 overflow-x-auto md:overflow-visible px-4 md:px-0 pb-2 md:pb-0 scroll-smooth snap-x snap-mandatory md:snap-none ${isSingleDay ? 'justify-center' : ''}`}>
                 {Array.from({ length: days }, (_, i) => i + 1).map(day => {
                     const isSelected = day === selectedDay;
                     
