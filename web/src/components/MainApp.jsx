@@ -291,6 +291,7 @@ const MainApp = ({
                         eatenMeals={eatenMeals}
                         onToggleMealEaten={onToggleMealEaten}
                         onViewRecipe={setSelectedMeal} 
+                         showToast={showToast}
                     />
                 </div>
             ) : (
