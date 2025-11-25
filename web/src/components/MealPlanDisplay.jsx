@@ -1,10 +1,12 @@
 // web/src/components/MealPlanDisplay.jsx
-import React, { useMemo } from 'react';
-import { BookOpen, Target, CheckCircle, AlertTriangle, Soup, Droplet, Wheat } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { BookOpen, Target, CheckCircle, AlertTriangle, Soup, Droplet, Wheat, Copy } from 'lucide-react';
 import MacroBar from './MacroBar';
+import { exportMealPlanToClipboard } from '../utils/mealPlanExporter';
 
-const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe }) => {
+const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals, onToggleMealEaten, onViewRecipe, showToast }) => {
     const dayData = mealPlan[selectedDay - 1];
+    const [copying, setCopying] = useState(false);
 
     // Calculate eaten macros for the day
     const dailyMacrosEaten = useMemo(() => {
@@ -32,6 +34,26 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
         };
     }, [dayData, eatenMeals, selectedDay]);
 
+    // Handle copy all meals button click
+    const handleCopyAllMeals = async () => {
+        setCopying(true);
+        
+        try {
+            const result = await exportMealPlanToClipboard(mealPlan || []);
+            
+            if (showToast) {
+                showToast(result.message, result.success ? 'success' : 'error');
+            }
+        } catch (error) {
+            console.error('[MealPlanDisplay] Error copying meals:', error);
+            if (showToast) {
+                showToast('Failed to copy meal plan', 'error');
+            }
+        } finally {
+            setCopying(false);
+        }
+    };
+
     if (!dayData) {
         console.warn(`[MealPlanDisplay] No valid data found for day ${selectedDay}.`);
         return <div className="p-6 text-center bg-yellow-50 rounded-lg"><AlertTriangle className="inline mr-2" />No meal plan data found for Day {selectedDay}.</div>;
@@ -45,7 +67,7 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
     
     return (
         <div className="space-y-6">
-            {/* Premium Header */}
+            {/* Premium Header with Copy Button */}
             <div className="flex items-center justify-between pb-4 border-b border-gray-200">
                 <div className="flex items-center gap-3">
                     <div 
@@ -65,6 +87,19 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                         </p>
                     </div>
                 </div>
+                
+                {/* Copy All Meals Button */}
+                <button
+                    onClick={handleCopyAllMeals}
+                    disabled={copying || !mealPlan || mealPlan.length === 0}
+                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Copy all meals to clipboard"
+                >
+                    <Copy className="w-4 h-4" />
+                    <span className="hidden sm:inline">
+                        {copying ? 'Copying...' : 'Copy Meals'}
+                    </span>
+                </button>
             </div>
             
             {/* Enhanced Tracker with Macro Bars */}
@@ -154,37 +189,36 @@ const MealPlanDisplay = ({ mealPlan, selectedDay, nutritionalTargets, eatenMeals
                 // Calculate what % of daily target this meal represents
                 const percentOfDaily = {
                     calories: calTarget > 0 ? Math.round((meal.subtotal_kcal / calTarget) * 100) : 0,
-                    protein: nutritionalTargets.protein > 0 ? Math.round((meal.subtotal_protein / nutritionalTargets.protein) * 100) : 0,
+                    protein: nutritionalTargets.protein > 0 ? Math.round((mealMacros.p / nutritionalTargets.protein) * 100) : 0,
                 };
 
                 return (
                     <div 
                         key={index}
-                        className={`bg-white rounded-xl shadow-md border transition-all ${
-                            isEaten ? 'opacity-70 border-green-300' : 'border-gray-200 hover:shadow-lg'
+                        className={`bg-white rounded-xl shadow-lg border-2 overflow-hidden transition-all duration-300 hover:shadow-2xl ${
+                            isEaten ? 'border-green-400 bg-green-50/30' : 'border-gray-200 hover:border-indigo-300'
                         }`}
                     >
-                        <div className="p-5">
-                            <div className="flex justify-between items-start mb-3">
+                        <div className="p-6">
+                            <div className="flex items-start justify-between mb-3">
                                 <div className="flex-1">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-xs font-semibold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
-                                            {mealType}
-                                        </span>
-                                        <span className="text-xs text-gray-500">
-                                            {percentOfDaily.calories}% daily calories
-                                        </span>
-                                    </div>
-                                    <h4 
-                                        className="text-xl font-bold text-gray-900 cursor-pointer hover:text-indigo-600 transition-colors"
-                                        onClick={() => onViewRecipe && onViewRecipe(meal)}
-                                    >
-                                        {mealName}
-                                    </h4>
-                                    <p className="text-sm font-semibold text-gray-700 mt-1">{mealCalories}</p>
+                                    <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 bg-indigo-100 px-3 py-1 rounded-full inline-block mb-2">
+                                        {mealType}
+                                    </span>
+                                    <h4 className="text-xl font-bold text-gray-900">{mealName}</h4>
+                                    <p className="text-sm text-gray-600 font-semibold mt-1">{mealCalories}</p>
                                 </div>
                                 <button
-                                    onClick={() => onToggleMealEaten(selectedDay, mealName)}
+                                    onClick={() => onViewRecipe && onViewRecipe(meal)}
+                                    className="ml-3 px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 transition-colors"
+                                >
+                                    View Recipe
+                                </button>
+                            </div>
+                            
+                            <div className="flex gap-2 mb-3">
+                                <button
+                                    onClick={() => onToggleMealEaten && onToggleMealEaten(selectedDay, mealName)}
                                     className={`flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${
                                         isEaten ? 'bg-green-600 text-white' : 'bg-gray-200 hover:bg-gray-300'
                                     }`}
