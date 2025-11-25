@@ -1,5 +1,5 @@
 /**
- * Cheffy Orchestrator (V12.1)
+ * Cheffy Orchestrator (V12.2)
  * Cooking Transforms & Nutrition Calculation Logic
  *
  * This module contains the canonical logic for:
@@ -9,10 +9,15 @@
  * 4. Functions to convert "cooked" user-facing quantities back to "as_sold" (dry/raw) equivalents
  * for accurate calorie calculation.
  *
+ * PHASE 1 UPDATE (2025): Fixed inferHints() defaults to align with new prompt semantics.
+ * - Grains now default to "dry" (not "cooked")
+ * - Expanded protein detection
+ * - Expanded YIELDS table with additional grains/legumes
+ *
  * This file is in CommonJS format.
  */
 
-const TRANSFORM_VERSION = "2025-10-30.2"; // Incremented version
+const TRANSFORM_VERSION = "2025-11-26.1"; // Phase 1 update version
 
 // --- Moved from day.js: Unit Normalization Dependencies ---
 const CANONICAL_UNIT_WEIGHTS_G = {
@@ -41,6 +46,20 @@ const YIELDS = {
     couscous: { dry_to_cooked: 2.5 },
     lentils: { dry_to_cooked: 2.8 },
 
+    // --- PHASE 1 ADDITION: Additional grains ---
+    bulgur: { dry_to_cooked: 2.8 },
+    barley: { dry_to_cooked: 3.5 },
+    farro: { dry_to_cooked: 3.0 },
+    buckwheat: { dry_to_cooked: 3.0 },
+    millet: { dry_to_cooked: 3.5 },
+    
+    // --- PHASE 1 ADDITION: Additional legumes ---
+    chickpea: { dry_to_cooked: 2.5 },
+    chickpeas: { dry_to_cooked: 2.5 },
+    black_bean: { dry_to_cooked: 2.5 },
+    kidney_bean: { dry_to_cooked: 2.5 },
+    // --- END PHASE 1 ADDITION ---
+
     // Meats (Raw to Cooked, by weight - represents water/fat loss)
     // 100g raw -> 75g cooked (so, cooked_weight / 0.75 = raw_weight)
     chicken: { raw_to_cooked: 0.75 },
@@ -49,11 +68,23 @@ const YIELDS = {
     pork: { raw_to_cooked: 0.72 },
     salmon: { raw_to_cooked: 0.80 },
     fish_white: { raw_to_cooked: 0.85 },
+    
+    // --- PHASE 1 ADDITION: Additional proteins ---
+    lamb: { raw_to_cooked: 0.70 },
+    turkey: { raw_to_cooked: 0.75 },
+    prawn: { raw_to_cooked: 0.85 },
+    shrimp: { raw_to_cooked: 0.85 },
+    tuna: { raw_to_cooked: 0.80 },
+    // --- END PHASE 1 ADDITION ---
 
     // Veggies (mostly stable, but good to have)
     veg_watery: { raw_to_cooked: 0.85 }, // e.g., mushrooms, spinach
     veg_dense: { raw_to_cooked: 0.95 },  // e.g., broccoli, carrots
     potato: { raw_to_cooked: 0.90 },    // baked/boiled
+    
+    // --- PHASE 1 ADDITION: Sweet potato (distinct from potato) ---
+    sweet_potato: { raw_to_cooked: 0.85 },
+    // --- END PHASE 1 ADDITION ---
 
     // Default catch-alls
     default_grain: { dry_to_cooked: 2.8 },
@@ -158,12 +189,28 @@ function normalizeToGramsOrMl(item, log) {
 function getYield(itemKey) {
     const key = (itemKey || '').toLowerCase();
 
+    // --- Grains (dry -> cooked) ---
     if (key.includes('rice')) return { yieldFactor: YIELDS.rice.dry_to_cooked, factorType: 'dry_to_cooked' };
     if (key.includes('pasta') || key.includes('noodle')) return { yieldFactor: YIELDS.pasta.dry_to_cooked, factorType: 'dry_to_cooked' };
     if (key.includes('oat') || key.includes('porridge')) return { yieldFactor: YIELDS.oats.dry_to_cooked, factorType: 'dry_to_cooked' };
     if (key.includes('quinoa')) return { yieldFactor: YIELDS.quinoa.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('couscous')) return { yieldFactor: YIELDS.couscous.dry_to_cooked, factorType: 'dry_to_cooked' };
     if (key.includes('lentil')) return { yieldFactor: YIELDS.lentils.dry_to_cooked, factorType: 'dry_to_cooked' };
+    
+    // --- PHASE 1 ADDITION: Additional grains ---
+    if (key.includes('bulgur')) return { yieldFactor: YIELDS.bulgur.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('barley')) return { yieldFactor: YIELDS.barley.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('farro')) return { yieldFactor: YIELDS.farro.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('buckwheat')) return { yieldFactor: YIELDS.buckwheat.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('millet')) return { yieldFactor: YIELDS.millet.dry_to_cooked, factorType: 'dry_to_cooked' };
+    
+    // --- PHASE 1 ADDITION: Additional legumes ---
+    if (key.includes('chickpea')) return { yieldFactor: YIELDS.chickpea.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('black bean') || key.includes('black_bean')) return { yieldFactor: YIELDS.black_bean.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('kidney bean') || key.includes('kidney_bean')) return { yieldFactor: YIELDS.kidney_bean.dry_to_cooked, factorType: 'dry_to_cooked' };
+    // --- END PHASE 1 ADDITION ---
 
+    // --- Meats (raw -> cooked) ---
     if (key.includes('chicken')) return { yieldFactor: YIELDS.chicken.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('beef') || key.includes('steak') || key.includes('mince')) {
         const factor = key.includes('lean') ? YIELDS.beef_lean.raw_to_cooked : YIELDS.beef_fatty.raw_to_cooked;
@@ -172,7 +219,18 @@ function getYield(itemKey) {
     if (key.includes('pork')) return { yieldFactor: YIELDS.pork.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('salmon')) return { yieldFactor: YIELDS.salmon.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('fish')) return { yieldFactor: YIELDS.fish_white.raw_to_cooked, factorType: 'raw_to_cooked' };
+    
+    // --- PHASE 1 ADDITION: Additional proteins ---
+    if (key.includes('lamb')) return { yieldFactor: YIELDS.lamb.raw_to_cooked, factorType: 'raw_to_cooked' };
+    if (key.includes('turkey')) return { yieldFactor: YIELDS.turkey.raw_to_cooked, factorType: 'raw_to_cooked' };
+    if (key.includes('prawn')) return { yieldFactor: YIELDS.prawn.raw_to_cooked, factorType: 'raw_to_cooked' };
+    if (key.includes('shrimp')) return { yieldFactor: YIELDS.shrimp.raw_to_cooked, factorType: 'raw_to_cooked' };
+    if (key.includes('tuna')) return { yieldFactor: YIELDS.tuna.raw_to_cooked, factorType: 'raw_to_cooked' };
+    // --- END PHASE 1 ADDITION ---
 
+    // --- Vegetables ---
+    // PHASE 1 FIX: Check sweet_potato BEFORE potato to avoid incorrect matching
+    if (key.includes('sweet potato') || key.includes('sweet_potato')) return { yieldFactor: YIELDS.sweet_potato.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('potato')) return { yieldFactor: YIELDS.potato.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('spinach') || key.includes('mushroom')) return { yieldFactor: YIELDS.veg_watery.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('broccoli') || key.includes('carrot') || key.includes('bean') || key.includes('veg')) {
@@ -204,6 +262,12 @@ function getOilAbsorptionRate(methodHint) {
 
 /**
  * Infers stateHint and methodHint if the LLM fails to provide them.
+ * 
+ * PHASE 1 UPDATE (2025): Aligned defaults with new prompt semantics.
+ * - Grains now default to "dry" (was incorrectly "cooked")
+ * - Expanded detection for proteins and packaged items
+ * - Added telemetry logging when fallback is triggered
+ * 
  * @param {object} item - The meal item object.
  * @param {function} log - The logger function.
  * @returns {{stateHint: string, methodHint: string | null}}
@@ -220,35 +284,75 @@ function inferHints(item, log) {
         return { stateHint, methodHint };
     }
 
-    // AI did not provide state, we must infer
-    safeLog(`[inferHints] No/invalid stateHint '${stateHint}' for '${key}', inferring...`, 'WARN', 'CALC');
+    // --- PHASE 1 ADDITION: Telemetry for inference frequency ---
+    // Every time this code path is hit, the LLM failed to provide valid stateHint.
+    // This should be visible in logs for monitoring prompt compliance.
+    safeLog(`[inferHints] FALLBACK TRIGGERED for '${key}' (stateHint was '${stateHint}'). LLM did not provide valid stateHint.`, 'WARN', 'CALC');
+    // --- END PHASE 1 ADDITION ---
 
-    if (keyLower.includes('cooked') || keyLower.includes('baked') || keyLower.includes('grilled') || keyLower.includes('steamed') || keyLower.includes('boiled')) {
+    // --- Priority 1: Explicit cooking words in the key ---
+    if (keyLower.includes('cooked') || keyLower.includes('baked') || keyLower.includes('grilled') || 
+        keyLower.includes('steamed') || keyLower.includes('boiled') || keyLower.includes('roasted') ||
+        keyLower.includes('fried')) {
         stateHint = 'cooked';
-    } else if (keyLower.includes('rice') || keyLower.includes('pasta') || keyLower.includes('oats') || keyLower.includes('quinoa')) {
-        // Assumption: If AI gives a grain quantity, it's the final *cooked* amount.
-        stateHint = 'cooked';
-        safeLog(`[inferHints] Inferred '${key}' as 'cooked'.`, 'DEBUG', 'CALC');
-    } else if (keyLower.includes('chicken') || keyLower.includes('beef') || keyLower.includes('pork') || keyLower.includes('salmon') || keyLower.includes('fish') || keyLower.includes('mince') || keyLower.includes('steak')) {
-        // Assumption: If AI gives a meat quantity, it's the *raw* (as-sold) amount unless specified.
+        safeLog(`[inferHints] Inferred '${key}' as 'cooked' (cooking word in name).`, 'DEBUG', 'CALC');
+    } 
+    // --- Priority 2: Grains default to DRY (PHASE 1 FIX - was incorrectly "cooked") ---
+    else if (keyLower.includes('rice') || keyLower.includes('pasta') || keyLower.includes('oats') || 
+             keyLower.includes('oat') || keyLower.includes('quinoa') || keyLower.includes('couscous') || 
+             keyLower.includes('lentil') || keyLower.includes('bulgur') || keyLower.includes('barley') || 
+             keyLower.includes('farro') || keyLower.includes('buckwheat') || keyLower.includes('millet') ||
+             keyLower.includes('porridge')) {
+        // PHASE 1 FIX: Grains default to "dry" - quantities typically measured in dry weight
+        stateHint = 'dry';
+        safeLog(`[inferHints] Inferred '${key}' as 'dry' (grain - default to dry weight).`, 'DEBUG', 'CALC');
+    } 
+    // --- Priority 3: Proteins default to RAW ---
+    else if (keyLower.includes('chicken') || keyLower.includes('beef') || keyLower.includes('pork') || 
+             keyLower.includes('salmon') || keyLower.includes('fish') || keyLower.includes('mince') || 
+             keyLower.includes('steak') || keyLower.includes('lamb') || keyLower.includes('turkey') ||
+             keyLower.includes('prawn') || keyLower.includes('shrimp') || keyLower.includes('tuna') ||
+             keyLower.includes('cod') || keyLower.includes('tofu') || keyLower.includes('tempeh')) {
+        // Meats/proteins default to "raw" (as-sold weight from butcher/supermarket)
         stateHint = 'raw';
-        safeLog(`[inferHints] Inferred '${key}' as 'raw'.`, 'DEBUG', 'CALC');
-    } else {
-        // Default assumption: as_pack (e.g., yogurt, milk, bread, oil, sauce, cheese)
+        safeLog(`[inferHints] Inferred '${key}' as 'raw' (protein).`, 'DEBUG', 'CALC');
+    } 
+    // --- Priority 4: Packaged items default to AS_PACK ---
+    else if (keyLower.includes('yogurt') || keyLower.includes('yoghurt') || keyLower.includes('milk') || 
+             keyLower.includes('cheese') || keyLower.includes('bread') || keyLower.includes('butter') || 
+             keyLower.includes('cream') || keyLower.includes('juice') || keyLower.includes('sauce') || 
+             keyLower.includes('oil') || keyLower.includes('honey') || keyLower.includes('syrup') || 
+             keyLower.includes('jam') || keyLower.includes('whey') || keyLower.includes('protein powder') ||
+             keyLower.includes('cereal') || keyLower.includes('granola')) {
         stateHint = 'as_pack';
-        safeLog(`[inferHints] Inferred '${key}' as 'as_pack'.`, 'DEBUG', 'CALC');
+        safeLog(`[inferHints] Inferred '${key}' as 'as_pack' (packaged item).`, 'DEBUG', 'CALC');
+    } 
+    // --- Default: as_pack (safest assumption for unknown items) ---
+    else {
+        stateHint = 'as_pack';
+        safeLog(`[inferHints] Inferred '${key}' as 'as_pack' (default fallback).`, 'DEBUG', 'CALC');
     }
 
-    // Simple method inference if not provided
+    // --- Method inference (only relevant if state is 'cooked') ---
     if (!methodHint) {
         if (keyLower.includes('baked')) methodHint = 'baked';
         else if (keyLower.includes('grilled')) methodHint = 'grilled';
         else if (keyLower.includes('boiled') || keyLower.includes('steamed')) methodHint = 'boiled';
-        else if (keyLower.includes('rice') || keyLower.includes('pasta')) methodHint = 'boiled'; // Assume boiled for grains
+        else if (keyLower.includes('fried')) methodHint = 'pan_fried';
+        else if (keyLower.includes('roasted')) methodHint = 'roasted';
+        // PHASE 1 FIX: Only infer boiled for grains if state is actually 'cooked'
+        else if (stateHint === 'cooked' && (keyLower.includes('rice') || keyLower.includes('pasta') || 
+                 keyLower.includes('quinoa') || keyLower.includes('oats'))) {
+            methodHint = 'boiled'; // Common default for cooked grains
+        }
         else if (stateHint === 'cooked') {
-             // If cooked state was inferred but method wasn't obvious from name, default based on type
-             if (keyLower.includes('chicken') || keyLower.includes('beef') || keyLower.includes('pork') || keyLower.includes('mince')) methodHint = 'pan_fried'; // Common default
-             else if (keyLower.includes('potato') || keyLower.includes('veg')) methodHint = 'boiled'; // Common default
+            // If cooked state was inferred but method wasn't obvious from name, default based on type
+            if (keyLower.includes('chicken') || keyLower.includes('beef') || keyLower.includes('pork') || 
+                keyLower.includes('mince') || keyLower.includes('steak')) {
+                methodHint = 'pan_fried'; // Common default for meats
+            } else if (keyLower.includes('potato') || keyLower.includes('veg')) {
+                methodHint = 'boiled'; // Common default for veggies
+            }
         }
     }
 
@@ -261,7 +365,7 @@ function inferHints(item, log) {
  * @param {object} item - The meal item object (must have key, qty_value, qty_unit).
  * @param {number} gramsOrMl - The quantity already normalized to g/ml.
  * @param {function} log - The logger function.
- *a * @returns {{grams_as_sold: number, log_msg: string, inferredState: string, inferredMethod: string | null}}
+ * @returns {{grams_as_sold: number, log_msg: string, inferredState: string, inferredMethod: string | null}}
  */
 function toAsSold(item, gramsOrMl, log) {
     // Ensure log is a function, provide a dummy if not
@@ -332,7 +436,7 @@ function getAbsorbedOil(item, methodHint, mealItems, log) {
 
     // Find the oil in the meal. Assumes *one* oil item per meal.
     const oilItem = mealItems.find(i => (i.key || '').toLowerCase().includes('oil'));
-    if (!oilItem || !oilItem.qty_value) { // [V12] Check qty_value
+    if (!oilItem || !oilItem.qty_value) {
         return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', no oil in meal` };
     }
 
@@ -348,7 +452,7 @@ function getAbsorbedOil(item, methodHint, mealItems, log) {
     
     // Simple model: Distribute absorbed oil proportionally by "as_sold" weight of fried items
     const friedItems = mealItems.filter(i => {
-        const m = (inferHints(i, safeLog).methodHint || '').toLowerCase(); // Use safeLog
+        const m = (inferHints(i, safeLog).methodHint || '').toLowerCase();
         // Consider roasted items as potentially absorbing oil too
         return (m.includes('pan_fried') || m.includes('roasted')) && !(i.key || '').toLowerCase().includes('oil');
     });
@@ -360,23 +464,20 @@ function getAbsorbedOil(item, methodHint, mealItems, log) {
     // Calculate total weight of fried/roasted items to get proportion
     let totalFriedWeight = 0;
     for (const friedItem of friedItems) {
-        // Use normalizeToGramsOrMl *defined in this file*
-        const { value: gOrMl } = normalizeToGramsOrMl(friedItem, safeLog); // Use safeLog
-        const { grams_as_sold } = toAsSold(friedItem, gOrMl, safeLog); // Use safeLog
+        const { value: gOrMl } = normalizeToGramsOrMl(friedItem, safeLog);
+        const { grams_as_sold } = toAsSold(friedItem, gOrMl, safeLog);
         totalFriedWeight += grams_as_sold;
     }
 
-    if (totalFriedWeight <= 0) { // Check for non-positive total weight
-         return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', total fried/roasted weight is ${totalFriedWeight}` };
+    if (totalFriedWeight <= 0) {
+        return { absorbed_oil_g: 0, log_msg: `method='${methodHint}', total fried/roasted weight is ${totalFriedWeight}` };
     }
     
     // Get this item's as_sold weight
-    // Use normalizeToGramsOrMl *defined in this file*
-    const { value: currentGOrMl } = normalizeToGramsOrMl(item, safeLog); // Use safeLog
-    const { grams_as_sold: currentAsSoldWeight } = toAsSold(item, currentGOrMl, safeLog); // Use safeLog
+    const { value: currentGOrMl } = normalizeToGramsOrMl(item, safeLog);
+    const { grams_as_sold: currentAsSoldWeight } = toAsSold(item, currentGOrMl, safeLog);
 
     // Calculate this item's share of the absorbed oil
-    // Ensure currentAsSoldWeight is non-negative before calculating proportion
     const thisItemProportion = currentAsSoldWeight >= 0 ? currentAsSoldWeight / totalFriedWeight : 0;
     const absorbed_oil_g = (oil_g_total_in_meal * oilAbsorptionRate) * thisItemProportion;
     
@@ -389,13 +490,10 @@ module.exports = {
     TRANSFORM_VERSION,
     YIELDS,
     OIL_ABSORPTION,
-    // --- Export the moved function ---
     normalizeToGramsOrMl,
-    // --- End Export ---
     toAsSold,
     getAbsorbedOil,
     inferHints,
     getOilAbsorptionRate,
     getYield
 };
-
