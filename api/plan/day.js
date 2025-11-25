@@ -83,6 +83,18 @@ const MAX_CALORIES_PER_ITEM = 1200; // 1360 kcal for an egg was the bug. 1200 is
 
 /// ===== CONFIG-END ===== ////
 
+// --- [NEW] Conservative Nutrition Fallback Data (per 100g) ---
+const GENERIC_FALLBACK_NUTRITION = {
+    // Very basic macros for common food groups if API fails
+    grain_generic: { protein: 8, fat: 2, carbs: 70, kcal: 322, source: 'FALLBACK_GRAIN' }, // E.g., uncooked rice/pasta
+    meat_generic: { protein: 25, fat: 10, carbs: 0, kcal: 190, source: 'FALLBACK_MEAT' }, // E.g., raw chicken breast/mince
+    vegetable_generic: { protein: 2, fat: 0.5, carbs: 5, kcal: 35, source: 'FALLBACK_VEG' }, // E.g., broccoli/carrot
+    fruit_generic: { protein: 0.5, fat: 0.5, carbs: 12, kcal: 50, source: 'FALLBACK_FRUIT' }, // E.g., apple/banana
+    dairy_generic: { protein: 3, fat: 3, carbs: 5, kcal: 60, source: 'FALLBACK_DAIRY' }, // E.g., milk/yogurt
+    oil_generic: { protein: 0, fat: 100, carbs: 0, kcal: 900, source: 'FALLBACK_OIL' } // E.g., olive oil
+};
+// --- [END NEW] ---
+
 /// ===== MOCK-START ===== \\\\
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (Not Found)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
 const MOCK_RECIPE_FALLBACK = {
@@ -204,8 +216,19 @@ function createLogger(run_id, day, responseStream = null) {
             try { responseStream.end(); } catch (e) { console.error("[SSE Logger] Error closing stream after final data:", e.message); }
         }
     };
+    
+    // --- [NEW] Add warnings array for final payload ---
+    const PRE_RESPONSE_WARNINGS = [];
 
-    return { log, getLogs: () => logs, logErrorAndClose, sendFinalDataAndClose, writeSseEvent };
+    const addWarning = (type, message, data = null) => {
+        const warning = { type, message, data: data ? JSON.parse(JSON.stringify(data)) : null };
+        PRE_RESPONSE_WARNINGS.push(warning);
+        log(`Warning Added: ${type} - ${message}`, 'WARN', 'VALIDATION', data);
+    }
+    // --- [END NEW] ---
+
+    // [MODIFIED] Return new functions
+    return { log, getLogs: () => logs, logErrorAndClose, sendFinalDataAndClose, writeSseEvent, addWarning, getWarnings: () => PRE_RESPONSE_WARNINGS };
 }
 // --- End Logger ---
 
@@ -447,6 +470,86 @@ function synthWide(ing, store) {
   if (!noun) return null;
   return `${store} ${noun}`.toLowerCase().trim();
 }
+
+// --- [NEW] State Hint Normalizer (Task 1) ---
+function normalizeStateHintForItem(item, log) {
+    const key = (item.key || '').toLowerCase();
+    let hint = (item.stateHint || '').toLowerCase().trim();
+    let originalHint = hint;
+
+    // 1. Validate hint
+    const validHints = ['dry', 'raw', 'cooked', 'as_pack'];
+    if (!validHints.includes(hint)) {
+        hint = '';
+    }
+
+    // 2. Apply defaults if hint is empty/invalid
+    if (!hint) {
+        // Grain / pasta default: DRY
+        const isGrain =
+            key.includes('oat') ||
+            key.includes('rice') ||
+            key.includes('pasta') ||
+            key.includes('noodle') ||
+            key.includes('quinoa') ||
+            key.includes('couscous') ||
+            key.includes('barley') ||
+            key.includes('bulgur') ||
+            key.includes('polenta') ||
+            key.includes('buckwheat') ||
+            key.includes('millet') ||
+            key.includes('lentil');
+
+        if (isGrain) {
+            hint = 'dry';
+        }
+
+        // Meat / fish default: RAW
+        const isMeatOrFish =
+            key.includes('chicken') ||
+            key.includes('beef') ||
+            key.includes('pork') ||
+            key.includes('lamb') ||
+            key.includes('fish') ||
+            key.includes('salmon') ||
+            key.includes('tuna') ||
+            key.includes('mince') ||
+            key.includes('egg');
+
+        if (!hint && isMeatOrFish) {
+            hint = 'raw';
+        }
+
+        // Dairy / bread / packaged default: AS_PACK
+        const isPackaged =
+            key.includes('milk') ||
+            key.includes('yogurt') ||
+            key.includes('yoghurt') ||
+            key.includes('bread') ||
+            key.includes('cheese') ||
+            key.includes('wrap') ||
+            key.includes('tortilla');
+
+        if (!hint && isPackaged) {
+            hint = 'as_pack';
+        }
+    }
+
+    // 3. Logging
+    if (originalHint && originalHint !== hint) {
+        log(`StateHint corrected for '${item.key}': Invalid '${originalHint}' changed to '${hint}'`, 'WARN', 'STATE_HINT');
+    } else if (!originalHint && hint) {
+        log(`StateHint inferred for '${item.key}': Defaulted to '${hint}'`, 'DEBUG', 'STATE_HINT');
+    } else if (!hint && log) {
+        log(`No stateHint for '${item.key}', leaving empty (will use transforms fallback).`, 'DEBUG', 'STATE_HINT');
+    }
+
+    // Mutate item in place
+    item.stateHint = hint;
+    return item;
+}
+// --- [END NEW] ---
+
 /// ===== HELPERS-END ===== ////
 
 
@@ -583,7 +686,7 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
     }
 }
 
-// --- generateMealPlan (Unchanged) ---
+// --- generateMealPlan (MODIFIED to call stateHint normalization) ---
 async function generateMealPlan(day, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets;
@@ -639,6 +742,20 @@ async function generateMealPlan(day, formData, nutritionalTargets, log) {
             throw new Error(`Meal Plan generation failed for Day ${day}: Both AI models failed. Last error: ${fallbackError.message}`);
         }
     }
+    
+    // --- [NEW] Post-LLM stateHint normalization (Task 2) ---
+    if (parsedResult && parsedResult.meals) {
+        parsedResult.meals.forEach(meal => {
+            if (meal && meal.items) {
+                meal.items.forEach(item => {
+                    // Normalize/default stateHint immediately after parsing
+                    normalizeStateHintForItem(item, log);
+                });
+            }
+        });
+    }
+    // --- [END NEW] ---
+
     if (parsedResult && parsedResult.meals && parsedResult.meals.length > 0) {
         await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
     }
@@ -846,7 +963,8 @@ module.exports = async (request, response) => {
     response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); 
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); 
     
-    const { log, getLogs, logErrorAndClose, sendFinalDataAndClose } = createLogger(run_id, day || 'unknown', response);
+    // [MODIFIED] Destructure new logger functions
+    const { log, getLogs, logErrorAndClose, sendFinalDataAndClose, addWarning, getWarnings } = createLogger(run_id, day || 'unknown', response);
     // --- End SSE Setup ---
 
     if (request.method === 'OPTIONS') {
@@ -864,6 +982,7 @@ module.exports = async (request, response) => {
 
     // --- Main Logic ---
     let scaleFactor = null; 
+    let preResponseWarnings = [];
 
     try {
         log(`Generating plan for Day ${day}...`, 'INFO', 'SYSTEM');
@@ -1078,9 +1197,15 @@ module.exports = async (request, response) => {
                  const resultData = currentResult[ingredientKey];
                  const normalizedKey = normalizeKey(ingredientKey);
                  const planItem = dayIngredientsPlan.find(i => i.normalizedKey === normalizedKey);
+                 
+                 // --- [NEW] Orphan Key Check (Task 4) ---
                  if (!planItem) {
-                     log(`Market run key "${ingredientKey}" (norm: "${normalizedKey}") not found in day plan. Skipping.`, 'ERROR', 'SYSTEM'); return;
+                     log(`Market run key "${ingredientKey}" (norm: "${normalizedKey}") not found in day plan. Orphan key detected. Skipping item but logging warning.`, 'ERROR', 'SYSTEM'); 
+                     addWarning('ORPHAN_KEY', `Ingredient "${ingredientKey}" was found in market results but not linked back to the meal plan.`, { normalizedKey });
+                     return;
                  }
+                 // --- [END NEW] ---
+
                  if (resultData && typeof resultData === 'object') {
                      dayResultsMap.set(normalizedKey, { ...planItem, ...resultData, normalizedKey: planItem.normalizedKey });
                  } else {
@@ -1182,55 +1307,129 @@ module.exports = async (request, response) => {
          }
         if (canonicalHitsToday > 0) log(`Used ${canonicalHitsToday} canonical fallbacks for Day ${day}.`, 'INFO', 'CALC');
 
-        // --- [MODIFIED] computeItemMacros (Use shared normalizer) ---
-        const computeItemMacros = (item, mealItems) => {
+        // --- [MODIFIED] computeItemMacros (Task 3, 5, 6 logic hardening) ---
+        const computeItemMacros = (item, mealItems, isReconciliation = false) => {
              if (!item || !item.key || typeof item.qty_value !== 'number' || !item.qty_unit) {
                 log(`[computeItemMacros] Invalid item structure received (Day ${day}).`, 'ERROR', 'CALC', item);
                 throw new Error(`Plan generation failed for Day ${day}: Invalid item structure during calculation for "${item?.key || 'unknown'}".`);
              }
-             // [MODIFIED] Use shared normalizer
+             // [MODIFIED] Use shared normalizer & guarantee item is normalized
              const normalizedKey = item.normalizedKey || normalizeKey(item.key);
              item.normalizedKey = normalizedKey;
+             // State hint is guaranteed to be normalized by generateMealPlan, but run again just in case reconciliation adjusted it
+             if(isReconciliation) normalizeStateHintForItem(item, log); 
 
              const { value: gramsOrMl, unit: normalizedUnit } = normalizeToGramsOrMl(item, log);
-
-             if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0 || gramsOrMl > 5000) {
-                 log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${item.key}' (Day ${day}).`, 'CRITICAL', 'CALC', { item, gramsOrMl });
-                 throw new Error(`Plan generation failed for Day ${day}: Invalid quantity (${item.qty_value} ${item.qty_unit} -> ${gramsOrMl}${normalizedUnit}) for item: "${item.key}"`);
+             
+             // --- [NEW] Quantity Sanity Check (Task 5) ---
+             if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0) {
+                 log(`[computeItemMacros] CRITICAL: Invalid quantity for item '${item.key}'.`, 'CRITICAL', 'CALC', { item, gramsOrMl });
+                 throw new Error(`Calculation error: Invalid quantity for item "${item.key}"`);
              }
+             if (gramsOrMl < 10 && item.qty_unit !== 'ml' && item.qty_unit !== 'tsp' && item.qty_unit !== 'tbsp') { // Allow small quantities for liquids/spices
+                 addWarning('LOW_QTY', `Item '${item.key}' portion is extremely small (${gramsOrMl.toFixed(1)}g). Check for unit conversion issues.`, { item });
+             }
+             const MAX_QUANTITY_G = 5000;
+             if (gramsOrMl > MAX_QUANTITY_G) {
+                 log(`[computeItemMacros] WARNING: Absurd quantity ${gramsOrMl.toFixed(0)}g for '${item.key}'. Capping to ${MAX_QUANTITY_G}g.`, 'WARN', 'CALC', { item });
+                 addWarning('ABSURD_QTY_CAPPED', `Item '${item.key}' portion (${gramsOrMl.toFixed(0)}g) capped at ${MAX_QUANTITY_G}g.`, { item, originalQty: gramsOrMl });
+                 item.qty_value = MAX_QUANTITY_G; // Mutate the item quantity for calculation purposes
+             }
+             // --- [END NEW] ---
+
              if (gramsOrMl === 0) { return { p: 0, f: 0, c: 0, kcal: 0, key: item.key, densityHeuristicUsed: false }; }
              
+             // --- [MODIFIED] Yield Conversion Correctness (Task 6: Logic moved to toAsSold/transforms.js) ---
+             // toAsSold is responsible for all yield conversions and respects stateHint.
              const { grams_as_sold, log_msg: transform_log, inferredState, inferredMethod } = toAsSold(item, gramsOrMl, log);
              const nutritionData = nutritionDataMap.get(normalizedKey);
              let grams = grams_as_sold;
              let p = 0, f = 0, c = 0, kcal = 0;
              let densityHeuristicUsed = false; 
+             let nutritionSource = 'None';
+             let nutritionRef = {}; // for logging
 
              if (nutritionData && nutritionData.status === 'found') {
-                 // [MODIFIED] Check for both old 'protein' and new 'protein_g_per_100g' schemas
+                 // Use real data
                  const proteinPer100 = Number(nutritionData.protein || nutritionData.protein_g_per_100g) || 0;
                  const fatPer100 = Number(nutritionData.fat || nutritionData.fat_g_per_100g) || 0;
                  const carbsPer100 = Number(nutritionData.carbs || nutritionData.carb_g_per_100g) || 0;
                  p = (proteinPer100 / 100) * grams;
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
-             } else { log(`[computeItemMacros] No valid nutrition found for '${item.key}' (Day ${day}). Base macros set to 0.`, 'WARN', 'CALC', { normalizedKey }); }
+                 nutritionSource = nutritionData.source;
+                 nutritionRef = { p: proteinPer100, f: fatPer100, c: carbsPer100 };
+             } else { 
+                // --- [NEW] Conservative Fallback Logic (Task 3) ---
+                let fallback = null;
+                const keyLower = item.key.toLowerCase();
+                const category = dayResultsMap.get(normalizedKey)?.allowedCategories?.[0] || 'unknown';
+
+                if (keyLower.includes('oil') || keyLower.includes('butter') || keyLower.includes('ghee')) {
+                    fallback = GENERIC_FALLBACK_NUTRITION.oil_generic;
+                } else if (category.includes('grain') || keyLower.includes('rice') || keyLower.includes('pasta') || keyLower.includes('oat')) {
+                    fallback = GENERIC_FALLBACK_NUTRITION.grain_generic;
+                } else if (category.includes('meat') || category.includes('seafood') || keyLower.includes('chicken') || keyLower.includes('fish')) {
+                    fallback = GENERIC_FALLBACK_NUTRITION.meat_generic;
+                } else if (category.includes('dairy') || keyLower.includes('milk') || keyLower.includes('yogurt') || keyLower.includes('cheese')) {
+                    fallback = GENERIC_FALLBACK_NUTRITION.dairy_generic;
+                } else if (category.includes('fruit')) {
+                    fallback = GENERIC_FALLBACK_NUTRITION.fruit_generic;
+                } else if (category.includes('veg') || category.includes('produce')) {
+                    fallback = GENERIC_FALLBACK_NUTRITION.vegetable_generic;
+                }
+                
+                if (fallback) {
+                    p = (fallback.protein / 100) * grams;
+                    f = (fallback.fat / 100) * grams;
+                    c = (fallback.carbs / 100) * grams;
+                    nutritionSource = fallback.source;
+                    nutritionRef = { p: fallback.protein, f: fallback.fat, c: fallback.carbs };
+                    log(`[computeItemMacros] WARNING: Using conservative fallback nutrition (${fallback.source}) for '${item.key}'.`, 'WARN', 'CALC', { normalizedKey });
+                } else {
+                    log(`[computeItemMacros] CRITICAL: No nutrition found for '${item.key}'. Macros set to 0.`, 'CRITICAL', 'CALC', { normalizedKey });
+                    addWarning('ZERO_KCAL_ITEM', `Item '${item.key}' has no nutrition data and fell through the generic fallback.`, { item });
+                }
+                // --- [END NEW] ---
+             }
              
              const { absorbed_oil_g, log_msg: oil_log_msg } = getAbsorbedOil(item, inferredMethod, mealItems, log);
              if (absorbed_oil_g > 0) { f += absorbed_oil_g; }
              
-             kcal = (p * 4) + (f * 9) + (c * 4);
+             // Calculate final kcal based on the 4/9/4 model
+             const calculatedKcal = (p * 4) + (f * 9) + (c * 4);
              
-             // --- [NEW] Solution 2: Defensive Sanity Check ---
-             // Check if calculated kcal exceeds the defined limit, but ignore oils/fats
-             if (kcal > MAX_CALORIES_PER_ITEM && !item.key.toLowerCase().includes('oil') && !item.key.toLowerCase().includes('butter') && !item.key.toLowerCase().includes('ghee')) {
-                log(`CRITICAL: Item '${item.key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit of ${MAX_CALORIES_PER_ITEM}.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
+             // --- [NEW] Kcal Comparison for Warning (Task 7) ---
+             // This warning tier is only relevant if we used real nutrition data (or a good fallback)
+             if (nutritionData && nutritionData.status === 'found') {
+                const apiKcal = Number(nutritionData.kcal || nutritionData.kcal_per_100g) || 0;
+                // Compare our calculated kcal per 100g vs API reported kcal per 100g
+                const pPer100 = nutritionRef.p || (p / grams) * 100;
+                const fPer100 = nutritionRef.f || (f / grams) * 100;
+                const cPer100 = nutritionRef.c || (c / grams) * 100;
+                const calculatedKcalPer100 = (pPer100 * 4) + (fPer100 * 9) + (cPer100 * 4);
+                
+                if (apiKcal > 0) {
+                    const deviation = Math.abs(calculatedKcalPer100 - apiKcal) / apiKcal;
+                    if (deviation > 0.10) {
+                         addWarning('KCAL_DEV_HIGH', `4/9/4 model for '${item.key}' deviates from API kcal by >10% (${calculatedKcalPer100.toFixed(0)} vs ${apiKcal.toFixed(0)} per 100g).`, { item, apiKcal, calculatedKcalPer100 });
+                    }
+                }
+             }
+             kcal = calculatedKcal; // Use the 4/9/4 calculated value
+
+             // --- [NEW] Sanity Check for Item Kcal (Task 7) ---
+             if (kcal > 1500 && !item.key.toLowerCase().includes('oil') && !item.key.toLowerCase().includes('butter') && !item.key.toLowerCase().includes('ghee')) {
+                 addWarning('HIGH_KCAL_ITEM', `Item '${item.key}' calculates to ${kcal.toFixed(0)} kcal (>=1500 kcal).`, { item });
+             }
+             if (kcal > MAX_CALORIES_PER_ITEM) {
+                log(`CRITICAL: Item '${item.key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
                 // This is a non-recoverable data error. Fail fast.
                 throw new Error(`Calculation error: Item "${item.key}" has an impossibly high calorie count (${kcal.toFixed(0)} kcal). Check unit conversion.`);
              }
              // --- [END NEW] ---
 
-             log(`[computeItemMacros] ${item.key}: ${transform_log} | ${oil_log_msg} | Final: ${kcal.toFixed(0)}kcal`, 'DEBUG', 'CALC', {
+             log(`[computeItemMacros] ${item.key} (${nutritionSource}): ${transform_log} | ${oil_log_msg} | Final: ${kcal.toFixed(0)}kcal`, 'DEBUG', 'CALC', {
                  item, gramsOrMl_user: gramsOrMl, grams_as_sold: grams_as_sold, abs_oil_g: absorbed_oil_g, final_p: p, final_f: f, final_c: c, final_kcal: kcal
              });
 
@@ -1279,6 +1478,15 @@ module.exports = async (request, response) => {
             meal.getItemMacros = mealSpecificGetItemMacros;
         }
         if (mealHasInvalidItems) { throw new Error(`Plan generation failed for Day ${day}: One or more meals contain invalid items or calculate to zero/negative calories.`); }
+        
+        // --- [NEW] Meal Kcal Sanity Check (Task 7) ---
+        for (const meal of finalDayMeals) {
+            if (meal.subtotal_kcal > 2500) {
+                 addWarning('HIGH_KCAL_MEAL', `Meal '${meal.name}' calculates to ${meal.subtotal_kcal.toFixed(0)} kcal (>=2500 kcal).`, { meal: meal.name, kcal: meal.subtotal_kcal });
+            }
+        }
+        // --- [END NEW] ---
+
         log(`Initial Day ${day} Totals (Float): Kcal=${initialDayKcal.toFixed(1)}, P=${initialDayP.toFixed(1)}g, F=${initialDayF.toFixed(1)}g, C=${initialDayC.toFixed(1)}g`, 'INFO', 'CALC');
 
         // --- Run Reconciliation (Unchanged) ---
@@ -1287,10 +1495,13 @@ module.exports = async (request, response) => {
         const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1';
         let reconciledMeals = finalDayMeals;
         let finalDayTotals = { calories: initialDayKcal, protein: initialDayP, fat: initialDayF, carbs: initialDayC };
+        
+        // [MODIFIED] Pass isReconciliation=true to computeItemMacros
         const reconcilerGetItemMacros = (item) => {
             const meal = finalDayMeals.find(m => m.items.some(i => i.key === item.key && i.qty_value === item.qty_value && i.stateHint === item.stateHint));
             if (meal && meal.getItemMacros) { return meal.getItemMacros(item); }
-            log(`[RECON] Could not find meal context for item ${item.key}. Using context-less calc.`, 'WARN', 'CALC'); return computeItemMacros(item, []);
+            log(`[RECON] Could not find meal context for item ${item.key}. Using context-less calc.`, 'WARN', 'CALC'); 
+            return computeItemMacros(item, [], true); // <--- Pass true for reconciliation
         };
         if (RECONCILE_FLAG && Math.abs(initialDeviation) > 0.05) {
             log(`[RECON Day ${day}] Deviation ${(initialDeviation * 100).toFixed(1)}% > 5%. Attempting reconciliation.`, 'WARN', 'CALC');
@@ -1302,12 +1513,18 @@ module.exports = async (request, response) => {
                 let scaledKcal = 0, scaledP = 0, scaledF = 0, scaledC = 0;
                  for (const meal of reconciledMeals) {
                      let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0; if (!meal || !Array.isArray(meal.items)) continue;
-                     for (const item of meal.items) { try { const macros = computeItemMacros(item, meal.items); mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c; } catch (reconItemError) { 
+                     for (const item of meal.items) { 
+                        try { 
+                            // [MODIFIED] Pass true for reconciliation
+                            const macros = computeItemMacros(item, meal.items, true); 
+                            mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c; 
+                        } catch (reconItemError) { 
                          // --- [MODIFIED] Also catch sanity check errors here ---
                          log(`Error recalculating macros post-reconciliation for "${item.key}" (Day ${day}): ${reconItemError.message}`, 'CRITICAL', 'CALC'); 
                          if (reconItemError.message.startsWith('Calculation error:')) throw reconItemError;
                          scaledKcal=NaN; break; 
-                        } }
+                        } 
+                    }
                      meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC; if(isNaN(scaledKcal)) break;
                      scaledKcal += mealKcal; scaledP += mealP; scaledF += mealF; scaledC += mealC;
                  }
@@ -1358,6 +1575,9 @@ module.exports = async (request, response) => {
             mealPlanForDay: { day: day, meals: reconciledMeals },
             dayResults: Object.fromEntries(dayResultsMap.entries()),
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
+            // --- [NEW] Add warnings to final payload (Task 7) ---
+            warnings: getWarnings()
+            // --- [END NEW] ---
         };
 
         log(`Successfully completed generation for Day ${day}.`, 'SUCCESS', 'SYSTEM');
