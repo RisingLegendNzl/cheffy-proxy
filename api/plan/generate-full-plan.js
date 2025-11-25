@@ -524,6 +524,82 @@ function runSmarterChecklist(product, ingredientData, log) {
     return { pass: true, score: 1.0 }; // Simple score
 }
 
+// --- State Hint Normalizer (New function for step 4) ---
+function normalizeStateHintForItem(item, log) {
+  const key = (item.key || '').toLowerCase();
+  let hint = (item.stateHint || '').toLowerCase().trim();
+
+  // If hint is invalid, drop it to force defaulting
+  const validHints = ['dry', 'raw', 'cooked', 'as_pack'];
+  if (!validHints.includes(hint)) {
+    if (hint) {
+      log(`Invalid stateHint '${hint}' for '${item.key}'. Clearing hint to force default/fallback.`, 'WARN', 'STATE_HINT');
+    }
+    hint = '';
+  }
+
+  // If the hint is still empty, apply defaults based on key:
+  if (!hint) {
+    // Grain / pasta default: DRY
+    const isGrain =
+      key.includes('oat') ||
+      key.includes('rice') ||
+      key.includes('pasta') ||
+      key.includes('noodle') ||
+      key.includes('quinoa') ||
+      key.includes('couscous') ||
+      key.includes('barley') ||
+      key.includes('bulgur') ||
+      key.includes('polenta') ||
+      key.includes('buckwheat') ||
+      key.includes('millet');
+
+    if (isGrain) {
+      hint = 'dry';
+    }
+
+    // Meat / fish default: RAW
+    const isMeatOrFish =
+      key.includes('chicken') ||
+      key.includes('beef') ||
+      key.includes('pork') ||
+      key.includes('lamb') ||
+      key.includes('fish') ||
+      key.includes('salmon') ||
+      key.includes('tuna') ||
+      key.includes('mince');
+
+    if (!hint && isMeatOrFish) {
+      hint = 'raw';
+    }
+
+    // Dairy / bread / packaged default: AS_PACK
+    const isPackaged =
+      key.includes('milk') ||
+      key.includes('yogurt') ||
+      key.includes('yoghurt') ||
+      key.includes('bread') ||
+      key.includes('cheese') ||
+      key.includes('wrap') ||
+      key.includes('tortilla');
+
+    if (!hint && isPackaged) {
+      hint = 'as_pack';
+    }
+
+    // Final fallback: leave empty, transforms will still handle it
+    if (!hint && log) {
+      log(`No stateHint for '${item.key}', leaving undefined (will use transforms fallback).`, 'WARN', 'STATE_HINT');
+    }
+  }
+
+  // Mutate item in place so downstream code uses normalized stateHint
+  item.stateHint = hint;
+
+  return item;
+}
+// --- End State Hint Normalizer ---
+
 // --- Synthesis functions ---
 function synthTight(ing, store) {
   if (!ing || !store) return null;
@@ -545,6 +621,7 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\\\
 
+// --- LLM System Prompt (Step 3: State Hint Rules Added) ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
 RULES:
@@ -561,6 +638,20 @@ RULES:
 6.  Adhere to all user constraints.
 7.  'meals' array is MANDATORY. Do NOT include 'ingredients' array.
 8.  Do NOT include calorie estimates in your response.
+
+CRITICAL STATE HINT RULES:
+- "dry": Quantity refers to dry or uncooked weight (oats, rice, pasta, noodles, lentils, quinoa, other grains).
+- "raw": Quantity refers to raw weight (meat, poultry, fish, eggs, raw vegetables).
+- "cooked": Quantity refers to cooked or prepared weight (only if the user explicitly says "cooked" or the food is eaten cooked and measured after cooking).
+- "as_pack": Quantity refers to packaged or ready-to-eat form (yogurt, milk, bread, cheese, ready-to-eat snacks).
+
+DEFAULT BY CATEGORY:
+- Grains and pasta (oats, rice, pasta, noodles, couscous, quinoa, bulgur, barley, polenta, etc.) → "dry" unless the user explicitly specifies cooked weight.
+- Meats and fish (chicken, beef, pork, lamb, fish, mince, etc.) → "raw" unless explicitly cooked.
+- Dairy, bread and packaged foods → "as_pack" unless clearly prepared differently.
+
+You MUST return a valid "stateHint" for every ingredient. Do NOT leave it null or empty.
+Valid values are only: "dry", "raw", "cooked", "as_pack".
 
 Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
 
@@ -712,6 +803,7 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5);
 
+    // [Step 3 location confirmed]
     const systemPrompt = MEAL_PLANNER_SYSTEM_PROMPT(weight, calories, mealMax, day);
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
@@ -1053,7 +1145,11 @@ module.exports = async (request, response) => {
                 meal.items.forEach(item => { if(item && item.key) { item.normalizedKey = normalizeKey(item.key); } });
 
                 for (const item of meal.items) {
+                    // [Step 5] Ensure stateHint is normalized before use in quantity normalization
+                    normalizeStateHintForItem(item, log);
+                    
                     // This is a "dry run" to get quantities. No log needed.
+                    // This function respects item.stateHint now that it is normalized
                     const { value: gramsOrMl } = normalizeToGramsOrMl(item, () => {}); 
                     
                     const existing = ingredientMap.get(item.normalizedKey);
@@ -1350,6 +1446,7 @@ module.exports = async (request, response) => {
         /**
          * Calculates the macros for a single item using the master nutrition map.
          * This is the "Solver V1" / Deterministic Calculator.
+         * (Step 5: Item assumed to be normalized already via normalizeStateHintForItem)
          */
         const computeItemMacros = (item, mealItems) => {
              const normalizedKey = item.normalizedKey; 
@@ -1363,6 +1460,7 @@ module.exports = async (request, response) => {
              if (gramsOrMl === 0) { return { p: 0, f: 0, c: 0, kcal: 0, key: item.key }; }
              
              // 2. Convert to 'as_sold' (e.g., 200g cooked rice -> 67g dry rice)
+             // `toAsSold` respects item.stateHint, which is guaranteed to be normalized here.
              const { grams_as_sold, inferredMethod } = toAsSold(item, gramsOrMl, log);
              
              // 3. Get nutrition data (per 100g)
@@ -1412,6 +1510,10 @@ module.exports = async (request, response) => {
                      for (const item of meal.items) {
                          // Attach normalizedKey again as it was lost in deep copy
                          item.normalizedKey = normalizeKey(item.key); 
+                         
+                         // [Step 5] Ensure stateHint is normalized before macro calculation
+                         normalizeStateHintForItem(item, log);
+                         
                          const macros = computeItemMacros(item, meal.items);
                          mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                      }
@@ -1433,7 +1535,14 @@ module.exports = async (request, response) => {
             // The `reconcileNonProtein` function needs a callback that has access to the full `nutritionDataMap`
             const reconcilerGetItemMacros = (item) => {
                 item.normalizedKey = normalizeKey(item.key); // Ensure key is normalized
+                // [Step 5] Need to normalize here too, as reconciler might modify quantities/items
+                normalizeStateHintForItem(item, log); 
+                
                 // Find the meal this item belongs to (for oil calculation context)
+                // Note: The meal context passed to computeItemMacros is for oil absorption checks
+                // We're passing `[]` here as the context in this callback is for an item potentially 
+                // outside the main loop, but computeItemMacros is designed to use it. 
+                // For safety, we use the items list of the current meal being reconciled.
                 const mealContext = mealsForThisDay.find(m => m.items.some(i => i.key === item.key))?.items || [];
                 return computeItemMacros(item, mealContext);
             };
@@ -1571,5 +1680,4 @@ module.exports = async (request, response) => {
 };
 
 /// ===== MAIN-HANDLER-END ===== ////
-
 
