@@ -99,6 +99,13 @@ const useAppLogic = ({
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
     
+    // A) Add Macro Debug State Declarations
+    const [macroDebug, setMacroDebug] = useState(null);
+
+    const [showMacroDebugLog, setShowMacroDebugLog] = useState(
+      () => JSON.parse(localStorage.getItem('cheffy_show_macro_debug_log') ?? 'false')
+    );
+    
     const [showOrchestratorLogs, setShowOrchestratorLogs] = useState(
       () => JSON.parse(localStorage.getItem('cheffy_show_orchestrator_logs') ?? 'true')
     );
@@ -115,9 +122,6 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
-    
-    // 1. Extend app state
-    const [macroDebug, setMacroDebug] = useState(null);
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -127,6 +131,11 @@ const useAppLogic = ({
     useEffect(() => {
       localStorage.setItem('cheffy_show_failed_ingredients_logs', JSON.stringify(showFailedIngredientsLogs));
     }, [showFailedIngredientsLogs]);
+    
+    // B) Add localStorage Persistence Effect
+    useEffect(() => {
+      localStorage.setItem('cheffy_show_macro_debug_log', JSON.stringify(showMacroDebugLog));
+    }, [showMacroDebugLog]);
 
     // --- Base Helpers ---
     const showToast = useCallback((message, type = 'info', duration = 3000) => {
@@ -240,6 +249,7 @@ const useAppLogic = ({
             const settingsData = {
                 showOrchestratorLogs: showOrchestratorLogs,
                 showFailedIngredientsLogs: showFailedIngredientsLogs,
+                showMacroDebugLog: showMacroDebugLog,
                 lastUpdated: new Date().toISOString()
             };
 
@@ -249,7 +259,7 @@ const useAppLogic = ({
         } catch (error) {
             console.error("[SETTINGS] Error saving settings:", error);
         }
-    }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, db, isAuthReady]);
+    }, [showOrchestratorLogs, showFailedIngredientsLogs, showMacroDebugLog, userId, db, isAuthReady]);
 
     const handleLoadSettings = useCallback(async () => {
         if (!isAuthReady || !userId || !db || userId.startsWith('local_')) {
@@ -264,6 +274,7 @@ const useAppLogic = ({
                 const data = settingsSnap.data();
                 setShowOrchestratorLogs(data.showOrchestratorLogs ?? true);
                 setShowFailedIngredientsLogs(data.showFailedIngredientsLogs ?? true);
+                setShowMacroDebugLog(data.showMacroDebugLog ?? false);
                 console.log("[SETTINGS] Settings loaded successfully");
             }
             
@@ -336,7 +347,7 @@ const useAppLogic = ({
         if (userId && !userId.startsWith('local_') && isAuthReady) {
             handleSaveSettings();
         }
-    }, [showOrchestratorLogs, showFailedIngredientsLogs, userId, isAuthReady, handleSaveSettings]);
+    }, [showOrchestratorLogs, showFailedIngredientsLogs, showMacroDebugLog, userId, isAuthReady, handleSaveSettings]);
 
     useEffect(() => {
         if (userId && !userId.startsWith('local_') && isAuthReady && db) {
@@ -371,7 +382,6 @@ const useAppLogic = ({
         setFailedIngredientsHistory([]);
         setGenerationStepKey('targets');
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
-        // 5. Reset macroDebug state
         setMacroDebug(null);
 
         let targets;
@@ -617,8 +627,10 @@ const useAppLogic = ({
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
                                 
-                                // 2. Capture macroDebug from SSE
-                                setMacroDebug(eventData.macroDebug ?? null);
+                                // D) Capture macroDebug from SSE
+                                if (eventData.macroDebug) {
+                                    setMacroDebug(eventData.macroDebug);
+                                }
                                 
                                 setGenerationStepKey('complete');
                                 setGenerationStatus('Plan generation complete!');
@@ -752,6 +764,22 @@ const useAppLogic = ({
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
     }, [diagnosticLogs]); 
+
+    // C) Add Download Handler
+    const handleDownloadMacroDebugLogs = useCallback(() => {
+      if (!macroDebug || Object.keys(macroDebug).length === 0) return;
+      const logContent = JSON.stringify(macroDebug, null, 2);
+      const blob = new Blob([logContent], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.download = `cheffy_macro_debug_${timestamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }, [macroDebug]);
 
     const handleSignUp = useCallback(async ({ name, email, password }) => {
         try {
@@ -922,7 +950,10 @@ const useAppLogic = ({
         toasts,
         showSuccessModal,
         planStats,
-        macroDebug, // 4. Expose macroDebug from the hook
+        
+        // E) Add to Return Object
+        macroDebug,
+        showMacroDebugLog,
         categorizedResults,
         hasInvalidMeals,
         latestLog,
@@ -933,6 +964,7 @@ const useAppLogic = ({
         setIsLogOpen,
         setShowOrchestratorLogs,
         setShowFailedIngredientsLogs,
+        setShowMacroDebugLog, // Add setter
         setSelectedMeal,
         setUseBatchedMode,
         setShowSuccessModal,
@@ -951,6 +983,7 @@ const useAppLogic = ({
         handleQuantityChange,
         handleDownloadFailedLogs,
         handleDownloadLogs,
+        handleDownloadMacroDebugLogs, // Add handler
         handleSignUp,
         handleSignIn,
         handleSignOut,
