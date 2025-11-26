@@ -17,9 +17,10 @@
  * This file is in CommonJS format.
  */
 
-const TRANSFORM_VERSION = "2025-11-26.1"; // Phase 1 update version
+const TRANSFORM_VERSION = "2025-11-26.2"; // Phase 2 update version
 
 // --- Moved from day.js: Unit Normalization Dependencies ---
+// PHASE 2: Expanded to support size hints (small/medium/large)
 const CANONICAL_UNIT_WEIGHTS_G = {
     'egg': 50, 'slice': 35, 'piece': 150, 'banana': 120, 'potato': 200, 'medium pancake': 60, 'large tortilla': 60, 'bun': 55
     // --- TACTICAL FIX (Solution 1) ---
@@ -29,6 +30,120 @@ const CANONICAL_UNIT_WEIGHTS_G = {
     // This directly fixes the bug identified in the logs.
     // ---------------------------------
 };
+
+// --- PHASE 2: Dynamic Unit Weights with Size Hints ---
+/**
+ * Size-aware unit weight lookup table.
+ * Each item has a default weight and optional size variants.
+ * Values are in grams.
+ */
+const UNIT_WEIGHTS = {
+    // Eggs
+    egg: { default: 50, small: 40, medium: 50, large: 55, xl: 65, jumbo: 70, extra_large: 65 },
+    
+    // Fruits
+    banana: { default: 120, small: 100, medium: 120, large: 150 },
+    apple: { default: 180, small: 150, medium: 180, large: 220 },
+    orange: { default: 130, small: 100, medium: 130, large: 180 },
+    avocado: { default: 150, small: 120, medium: 150, large: 200, hass: 150 },
+    mango: { default: 200, small: 150, medium: 200, large: 280 },
+    pear: { default: 180, small: 140, medium: 180, large: 220 },
+    peach: { default: 150, small: 120, medium: 150, large: 180 },
+    kiwi: { default: 75, small: 60, medium: 75, large: 90 },
+    
+    // Vegetables
+    potato: { default: 200, small: 150, medium: 200, large: 280, baby: 50 },
+    sweet_potato: { default: 200, small: 150, medium: 200, large: 280 },
+    tomato: { default: 120, small: 80, medium: 120, large: 180, cherry: 15, roma: 60 },
+    onion: { default: 150, small: 100, medium: 150, large: 200 },
+    carrot: { default: 80, small: 50, medium: 80, large: 120, baby: 10 },
+    
+    // Proteins
+    chicken_breast: { default: 175, small: 140, medium: 175, large: 225 },
+    chicken_thigh: { default: 110, small: 85, medium: 110, large: 140 },
+    chicken_drumstick: { default: 100, small: 80, medium: 100, large: 130 },
+    
+    // Bread/Bakery
+    slice: { default: 35, thin: 25, regular: 35, thick: 50 },
+    bun: { default: 55, small: 45, regular: 55, large: 70, brioche: 60 },
+    tortilla: { default: 45, small: 30, medium: 45, large: 65, wrap: 65 },
+    pancake: { default: 60, small: 40, medium: 60, large: 90 },
+    muffin: { default: 115, mini: 30, regular: 115, large: 140 },
+    bagel: { default: 100, mini: 60, regular: 100, large: 130 },
+    croissant: { default: 60, mini: 30, regular: 60, large: 80 },
+    
+    // Generic fallbacks
+    piece: { default: 150 },
+};
+
+/**
+ * Extracts a size hint from an ingredient key.
+ * 
+ * @param {string} key - The ingredient key
+ * @returns {string|null} Size hint or null
+ */
+function extractSizeHint(key) {
+    const keyLower = (key || '').toLowerCase();
+    
+    if (keyLower.includes('jumbo')) return 'jumbo';
+    if (keyLower.includes('extra large') || keyLower.includes('extra_large') || keyLower.includes('xl')) return 'xl';
+    if (keyLower.includes('large')) return 'large';
+    if (keyLower.includes('medium')) return 'medium';
+    if (keyLower.includes('small')) return 'small';
+    if (keyLower.includes('mini')) return 'mini';
+    if (keyLower.includes('baby')) return 'baby';
+    if (keyLower.includes('thin')) return 'thin';
+    if (keyLower.includes('thick')) return 'thick';
+    if (keyLower.includes('cherry')) return 'cherry';
+    if (keyLower.includes('roma')) return 'roma';
+    if (keyLower.includes('hass')) return 'hass';
+    if (keyLower.includes('brioche')) return 'brioche';
+    
+    return null;
+}
+
+/**
+ * Gets the weight for a unit-based item, considering size hints.
+ * 
+ * @param {string} key - The ingredient key
+ * @param {string} unit - The unit (e.g., 'egg', 'slice')
+ * @param {string|null} sizeHint - Optional size hint
+ * @returns {number} Weight in grams
+ */
+function getUnitWeight(key, unit, sizeHint = null) {
+    const keyLower = (key || '').toLowerCase();
+    const unitLower = (unit || '').toLowerCase().replace(/s$/, ''); // Remove trailing 's'
+    
+    // First, try to find a matching config by key (e.g., 'chicken_breast')
+    let config = null;
+    for (const [itemKey, weights] of Object.entries(UNIT_WEIGHTS)) {
+        if (keyLower.includes(itemKey.replace(/_/g, ' ')) || keyLower.includes(itemKey)) {
+            config = weights;
+            break;
+        }
+    }
+    
+    // If no key match, try unit itself (e.g., 'slice', 'bun')
+    if (!config && UNIT_WEIGHTS[unitLower]) {
+        config = UNIT_WEIGHTS[unitLower];
+    }
+    
+    // If still no config, fall back to CANONICAL_UNIT_WEIGHTS_G
+    if (!config) {
+        return CANONICAL_UNIT_WEIGHTS_G[unitLower] || CANONICAL_UNIT_WEIGHTS_G['piece'] || 150;
+    }
+    
+    // Apply size hint if provided
+    if (sizeHint) {
+        const sizeNormalized = sizeHint.toLowerCase().replace(/[- ]/g, '_');
+        if (config[sizeNormalized] !== undefined) {
+            return config[sizeNormalized];
+        }
+    }
+    
+    return config.default;
+}
+// --- END PHASE 2 ADDITION ---
 const DENSITY_MAP = {
     'milk': 1.03, 'cream': 1.01, 'oil': 0.92, 'sauce': 1.05, 'water': 1.0,
     'juice': 1.04, 'yogurt': 1.05, 'wine': 0.98, 'beer': 1.01, 'syrup': 1.33
@@ -59,6 +174,20 @@ const YIELDS = {
     black_bean: { dry_to_cooked: 2.5 },
     kidney_bean: { dry_to_cooked: 2.5 },
     // --- END PHASE 1 ADDITION ---
+    
+    // --- PHASE 2 ADDITION: Additional grains ---
+    freekeh: { dry_to_cooked: 2.5 },
+    spelt: { dry_to_cooked: 2.8 },
+    teff: { dry_to_cooked: 3.5 },
+    amaranth: { dry_to_cooked: 2.5 },
+    // --- END PHASE 2 ADDITION ---
+    
+    // --- PHASE 2 ADDITION: Additional legumes ---
+    split_pea: { dry_to_cooked: 2.5 },
+    black_eyed_pea: { dry_to_cooked: 2.5 },
+    navy_bean: { dry_to_cooked: 2.5 },
+    pinto_bean: { dry_to_cooked: 2.5 },
+    // --- END PHASE 2 ADDITION ---
 
     // Meats (Raw to Cooked, by weight - represents water/fat loss)
     // 100g raw -> 75g cooked (so, cooked_weight / 0.75 = raw_weight)
@@ -76,6 +205,14 @@ const YIELDS = {
     shrimp: { raw_to_cooked: 0.85 },
     tuna: { raw_to_cooked: 0.80 },
     // --- END PHASE 1 ADDITION ---
+    
+    // --- PHASE 2 ADDITION: Additional proteins ---
+    duck: { raw_to_cooked: 0.65 },      // Higher fat loss
+    goat: { raw_to_cooked: 0.72 },
+    veal: { raw_to_cooked: 0.75 },
+    venison: { raw_to_cooked: 0.75 },
+    kangaroo: { raw_to_cooked: 0.72 },  // Australian game meat
+    // --- END PHASE 2 ADDITION ---
 
     // Veggies (mostly stable, but good to have)
     veg_watery: { raw_to_cooked: 0.85 }, // e.g., mushrooms, spinach
@@ -151,17 +288,14 @@ function normalizeToGramsOrMl(item, log) {
     }
 
     // Heuristic unit weights (converts pieces/slices etc. to g)
-    let weightPerUnit = CANONICAL_UNIT_WEIGHTS_G[unit];
+    // PHASE 2: Use dynamic unit weights with size hints
+    const sizeHint = extractSizeHint(key);
+    let weightPerUnit = getUnitWeight(key, unit, sizeHint);
     let usedHeuristic = true;
 
-    if (!weightPerUnit) {
-        if (key.includes('egg')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['egg'];
-        else if (key.includes('bread') || key.includes('toast')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['slice'];
-        else if (key.includes('banana')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['banana'];
-        else if (key.includes('potato')) weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['potato'];
-        else weightPerUnit = CANONICAL_UNIT_WEIGHTS_G['piece']; // Default
-    } else {
-        usedHeuristic = false;
+    // Log if size hint was detected
+    if (sizeHint) {
+        safeLog(`[Unit Conversion] Detected size hint '${sizeHint}' for '${key}'`, 'DEBUG', 'CALC');
     }
 
     // Final check for weightPerUnit
@@ -189,6 +323,10 @@ function normalizeToGramsOrMl(item, log) {
 function getYield(itemKey) {
     const key = (itemKey || '').toLowerCase();
 
+    // --- PRIORITY CHECKS: Items that contain substrings of other items ---
+    // Check 'goat' before 'oat' since 'goat' contains 'oat'
+    if (key.includes('goat')) return { yieldFactor: YIELDS.goat.raw_to_cooked, factorType: 'raw_to_cooked' };
+
     // --- Grains (dry -> cooked) ---
     if (key.includes('rice')) return { yieldFactor: YIELDS.rice.dry_to_cooked, factorType: 'dry_to_cooked' };
     if (key.includes('pasta') || key.includes('noodle')) return { yieldFactor: YIELDS.pasta.dry_to_cooked, factorType: 'dry_to_cooked' };
@@ -209,6 +347,20 @@ function getYield(itemKey) {
     if (key.includes('black bean') || key.includes('black_bean')) return { yieldFactor: YIELDS.black_bean.dry_to_cooked, factorType: 'dry_to_cooked' };
     if (key.includes('kidney bean') || key.includes('kidney_bean')) return { yieldFactor: YIELDS.kidney_bean.dry_to_cooked, factorType: 'dry_to_cooked' };
     // --- END PHASE 1 ADDITION ---
+    
+    // --- PHASE 2 ADDITION: Additional grains ---
+    if (key.includes('freekeh')) return { yieldFactor: YIELDS.freekeh.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('spelt')) return { yieldFactor: YIELDS.spelt.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('teff')) return { yieldFactor: YIELDS.teff.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('amaranth')) return { yieldFactor: YIELDS.amaranth.dry_to_cooked, factorType: 'dry_to_cooked' };
+    // --- END PHASE 2 ADDITION ---
+    
+    // --- PHASE 2 ADDITION: Additional legumes ---
+    if (key.includes('split pea') || key.includes('split_pea')) return { yieldFactor: YIELDS.split_pea.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('black eyed') || key.includes('black_eyed')) return { yieldFactor: YIELDS.black_eyed_pea.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('navy bean') || key.includes('navy_bean')) return { yieldFactor: YIELDS.navy_bean.dry_to_cooked, factorType: 'dry_to_cooked' };
+    if (key.includes('pinto bean') || key.includes('pinto_bean')) return { yieldFactor: YIELDS.pinto_bean.dry_to_cooked, factorType: 'dry_to_cooked' };
+    // --- END PHASE 2 ADDITION ---
 
     // --- Meats (raw -> cooked) ---
     if (key.includes('chicken')) return { yieldFactor: YIELDS.chicken.raw_to_cooked, factorType: 'raw_to_cooked' };
@@ -227,6 +379,14 @@ function getYield(itemKey) {
     if (key.includes('shrimp')) return { yieldFactor: YIELDS.shrimp.raw_to_cooked, factorType: 'raw_to_cooked' };
     if (key.includes('tuna')) return { yieldFactor: YIELDS.tuna.raw_to_cooked, factorType: 'raw_to_cooked' };
     // --- END PHASE 1 ADDITION ---
+    
+    // --- PHASE 2 ADDITION: Additional proteins ---
+    if (key.includes('duck')) return { yieldFactor: YIELDS.duck.raw_to_cooked, factorType: 'raw_to_cooked' };
+    // Note: 'goat' is checked at the top of this function (before 'oat') to prevent false matching
+    if (key.includes('veal')) return { yieldFactor: YIELDS.veal.raw_to_cooked, factorType: 'raw_to_cooked' };
+    if (key.includes('venison')) return { yieldFactor: YIELDS.venison.raw_to_cooked, factorType: 'raw_to_cooked' };
+    if (key.includes('kangaroo')) return { yieldFactor: YIELDS.kangaroo.raw_to_cooked, factorType: 'raw_to_cooked' };
+    // --- END PHASE 2 ADDITION ---
 
     // --- Vegetables ---
     // PHASE 1 FIX: Check sweet_potato BEFORE potato to avoid incorrect matching
@@ -490,10 +650,13 @@ module.exports = {
     TRANSFORM_VERSION,
     YIELDS,
     OIL_ABSORPTION,
+    UNIT_WEIGHTS,              // PHASE 2: Export new unit weights table
     normalizeToGramsOrMl,
     toAsSold,
     getAbsorbedOil,
     inferHints,
     getOilAbsorptionRate,
-    getYield
+    getYield,
+    getUnitWeight,             // PHASE 2: Export new function
+    extractSizeHint,           // PHASE 2: Export new function
 };
