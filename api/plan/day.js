@@ -18,6 +18,9 @@ const { normalizeKey } = require('../../scripts/normalize.js');
 const { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
 // --- [END FIX] ---
 
+// --- [NEW] Import validation helper (Task 1) ---
+const { validateDayPlan } = require('../../utils/validation');
+
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
@@ -81,8 +84,6 @@ const FAIL_FAST_CATEGORIES = ["produce", "meat", "dairy", "veg", "fruit", "seafo
 const MAX_CALORIES_PER_ITEM = 1200; // 1360 kcal for an egg was the bug. 1200 is a safe cap.
 // --- [END NEW] ---
 
-/// ===== CONFIG-END ===== ////
-
 // --- [NEW] Conservative Nutrition Fallback Data (per 100g) ---
 const GENERIC_FALLBACK_NUTRITION = {
     // Very basic macros for common food groups if API fails
@@ -94,6 +95,8 @@ const GENERIC_FALLBACK_NUTRITION = {
     oil_generic: { protein: 0, fat: 100, carbs: 0, kcal: 900, source: 'FALLBACK_OIL' } // E.g., olive oil
 };
 // --- [END NEW] ---
+
+/// ===== CONFIG-END ===== ////
 
 /// ===== MOCK-START ===== \\\\
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (Not Found)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
@@ -217,7 +220,7 @@ function createLogger(run_id, day, responseStream = null) {
         }
     };
     
-    // --- [NEW] Add warnings array for final payload ---
+    // --- [NEW] Add warnings array for final payload (Logger part) ---
     const PRE_RESPONSE_WARNINGS = [];
 
     const addWarning = (type, message, data = null) => {
@@ -471,7 +474,7 @@ function synthWide(ing, store) {
   return `${store} ${noun}`.toLowerCase().trim();
 }
 
-// --- [NEW] State Hint Normalizer (Task 1) ---
+// --- [NEW] State Hint Normalizer ---
 function normalizeStateHintForItem(item, log) {
     const key = (item.key || '').toLowerCase();
     let hint = (item.stateHint || '').toLowerCase().trim();
@@ -982,7 +985,7 @@ module.exports = async (request, response) => {
 
     // --- Main Logic ---
     let scaleFactor = null; 
-    let preResponseWarnings = [];
+    let finalDayTotals = {}; // Initialize here for wider scope
 
     try {
         log(`Generating plan for Day ${day}...`, 'INFO', 'SYSTEM');
@@ -1285,7 +1288,7 @@ module.exports = async (request, response) => {
                  } else { log(`Invalid item in nutrition results loop (Day ${day})`, 'WARN', 'CALC', {item}); }
             });
         } else { 
-            nutrition_ms = Date.now() - nutritionStartTime; // [PERF] Log time
+            nutrition_ms = Date.Now() - nutritionStartTime; // [PERF] Log time
             log(`No items require nutrition fetching for Day ${day}.`, 'INFO', 'CALC'); 
         }
 
@@ -1308,6 +1311,7 @@ module.exports = async (request, response) => {
         if (canonicalHitsToday > 0) log(`Used ${canonicalHitsToday} canonical fallbacks for Day ${day}.`, 'INFO', 'CALC');
 
         // --- [MODIFIED] computeItemMacros (Task 3, 5, 6 logic hardening) ---
+        // This is the function used as the `getMacros` input for validation later (Task 3)
         const computeItemMacros = (item, mealItems, isReconciliation = false) => {
              if (!item || !item.key || typeof item.qty_value !== 'number' || !item.qty_unit) {
                 log(`[computeItemMacros] Invalid item structure received (Day ${day}).`, 'ERROR', 'CALC', item);
@@ -1363,7 +1367,9 @@ module.exports = async (request, response) => {
                 // --- [NEW] Conservative Fallback Logic (Task 3) ---
                 let fallback = null;
                 const keyLower = item.key.toLowerCase();
-                const category = dayResultsMap.get(normalizedKey)?.allowedCategories?.[0] || 'unknown';
+                // Safe check for dayResultsMap entry
+                const dayResult = dayResultsMap.get(normalizedKey);
+                const category = dayResult?.allowedCategories?.[0] || 'unknown';
 
                 if (keyLower.includes('oil') || keyLower.includes('butter') || keyLower.includes('ghee')) {
                     fallback = GENERIC_FALLBACK_NUTRITION.oil_generic;
@@ -1433,7 +1439,7 @@ module.exports = async (request, response) => {
                  item, gramsOrMl_user: gramsOrMl, grams_as_sold: grams_as_sold, abs_oil_g: absorbed_oil_g, final_p: p, final_f: f, final_c: c, final_kcal: kcal
              });
 
-             return { p, f, c, kcal, key: item.key, densityHeuristicUsed }; 
+             return { p, f, c, kcal, key: item.key, densityHeuristicUsed: false }; 
          };
          // --- End Modification ---
 
@@ -1494,7 +1500,7 @@ module.exports = async (request, response) => {
         const initialDeviation = (targetCalories > 0) ? (initialDayKcal - targetCalories) / targetCalories : 0;
         const RECONCILE_FLAG = process.env.CHEFFY_RECONCILE_NONPROTEIN === '1';
         let reconciledMeals = finalDayMeals;
-        let finalDayTotals = { calories: initialDayKcal, protein: initialDayP, fat: initialDayF, carbs: initialDayC };
+        finalDayTotals = { calories: initialDayKcal, protein: initialDayP, fat: initialDayF, carbs: initialDayC };
         
         // [MODIFIED] Pass isReconciliation=true to computeItemMacros
         const reconcilerGetItemMacros = (item) => {
@@ -1553,7 +1559,7 @@ module.exports = async (request, response) => {
             }
         });
 
-        // --- Phase 5: Assemble Day Response (Unchanged) ---
+        // --- Phase 5: Assemble Day Response (Task 2, 3, 4, 5) ---
         log("Phase 5: Assembling Response (Day " + day + ")...", 'INFO', 'PHASE');
         const plan_total_ms = Date.now() - planStartTime; // [PERF] Log time
         
@@ -1570,13 +1576,34 @@ module.exports = async (request, response) => {
             // --- [END PERF] ---
         });
 
+        // --- [NEW] Run Validation (Task 3) ---
+        const validationResult = validateDayPlan({
+          meals: reconciledMeals,
+          dayTotals: finalDayTotals,
+          targets: nutritionalTargets,
+          nutritionDataMap: nutritionDataMap,
+          getMacros: (item) => computeItemMacros(item, []), // Use computeItemMacros
+          log: log
+        });
+
+        // --- [NEW] Log Validation Issues (Task 5) ---
+        if (validationResult && validationResult.hasIssues && validationResult.hasIssues()) {
+          log(
+            `[VALIDATION] Day ${day}: ${validationResult.issues.length} issues detected (confidence=${validationResult.confidenceScore.toFixed(2)})`,
+            'WARN',
+            'CALC'
+          );
+        }
+        
         const responseData = {
             message: `Successfully generated plan for Day ${day}.`, day: day,
             mealPlanForDay: { day: day, meals: reconciledMeals },
             dayResults: Object.fromEntries(dayResultsMap.entries()),
             dayUniqueIngredients: dayIngredientsPlan.map(({ normalizedKey, ...rest }) => rest),
             // --- [NEW] Add warnings to final payload (Task 7) ---
-            warnings: getWarnings()
+            warnings: getWarnings(),
+            // --- [NEW] Add validation result to final payload (Task 4) ---
+            validation: validationResult.toJSON()
             // --- [END NEW] ---
         };
 
