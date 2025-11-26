@@ -18,6 +18,7 @@ import MealPlanDisplay from './MealPlanDisplay';
 import LogEntry from './LogEntry';
 import DiagnosticLogViewer from './DiagnosticLogViewer';
 import FailedIngredientLogViewer from './FailedIngredientLogViewer';
+import MacroDebugLogViewer from './MacroDebugLogViewer'; // CHANGE 1
 import RecipeModal from './RecipeModal';
 import EmojiIcon from './EmojiIcon';
 import ProfileTab from './ProfileTab';
@@ -114,6 +115,12 @@ const MainApp = ({
     isLogOpen,
     setIsLogOpen,
     latestLog,
+    
+    // CHANGE 2: Add new props to the MainApp component signature
+    macroDebug = {},
+    showMacroDebugLog = false,
+    setShowMacroDebugLog = () => {},
+    handleDownloadMacroDebugLogs = () => {},
     
     // Generation State
     generationStepKey,
@@ -537,15 +544,21 @@ const MainApp = ({
                 onToggleOrchestratorLogs={setShowOrchestratorLogs}
                 showFailedIngredientsLogs={showFailedIngredientsLogs}
                 onToggleFailedIngredientsLogs={setShowFailedIngredientsLogs}
+                // CHANGE 3: Add new props
+                showMacroDebugLog={showMacroDebugLog}
+                onToggleMacroDebugLog={setShowMacroDebugLog}
                 settings={{
                     showOrchestratorLogs,
                     showFailedIngredientsLogs,
+                    showMacroDebugLog, // Also ensure it's in the settings object
                 }}
                 onToggleSetting={(key) => {
                     if (key === 'showOrchestratorLogs') {
                         setShowOrchestratorLogs(!showOrchestratorLogs);
                     } else if (key === 'showFailedIngredientsLogs') {
                         setShowFailedIngredientsLogs(!showFailedIngredientsLogs);
+                    } else if (key === 'showMacroDebugLog') { // Add macro debug toggle logic
+                        setShowMacroDebugLog(!showMacroDebugLog);
                     }
                 }}
             />
@@ -600,6 +613,7 @@ const MainApp = ({
                 loadingPlan={loadingPlan}
             />
     
+            {/* CHANGE 4: Update the fixed bottom log area */}
             <div className="fixed bottom-0 left-0 right-0 z-[100] flex flex-col-reverse">
                 {showOrchestratorLogs && (
                     <DiagnosticLogViewer logs={diagnosticLogs} height={logHeight} setHeight={setLogHeight} isOpen={isLogOpen} setIsOpen={setIsLogOpen} onDownloadLogs={handleDownloadLogs} />
@@ -607,8 +621,13 @@ const MainApp = ({
                 {showFailedIngredientsLogs && (
                     <FailedIngredientLogViewer failedHistory={failedIngredientsHistory} onDownload={handleDownloadFailedLogs} />
                 )}
-                {!showOrchestratorLogs && !showFailedIngredientsLogs && (
-                    <div className="bg-gray-800 text-white p-2 text-xs text-center cursor-pointer hover:bg-gray-700" onClick={() => { setShowOrchestratorLogs(true); setShowFailedIngredientsLogs(true); }}>
+                {/* NEW: Macro Debug Log Viewer */}
+                {showMacroDebugLog && (
+                    <MacroDebugLogViewer macroDebug={macroDebug} onDownload={handleDownloadMacroDebugLogs} />
+                )}
+                {/* Updated condition to include macro debug log */}
+                {!showOrchestratorLogs && !showFailedIngredientsLogs && !showMacroDebugLog && (
+                    <div className="bg-gray-800 text-white p-2 text-xs text-center cursor-pointer hover:bg-gray-700" onClick={() => { setShowOrchestratorLogs(true); setShowFailedIngredientsLogs(true); setShowMacroDebugLog(true); }}>
                         📋 Show Logs
                     </div>
                 )}
