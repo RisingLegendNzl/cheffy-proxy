@@ -1,5 +1,5 @@
 // web/src/hooks/useAppLogic.js
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
 import usePlanPersistence from './usePlanPersistence';
 
@@ -82,6 +82,9 @@ const useAppLogic = ({
     nutritionalTargets,
     setNutritionalTargets
 }) => {
+    // --- Refs ---
+    const abortControllerRef = useRef(null);
+    
     // --- State ---
     const [results, setResults] = useState({});
     const [uniqueIngredients, setUniqueIngredients] = useState([]);
@@ -99,7 +102,7 @@ const useAppLogic = ({
     const [failedIngredientsHistory, setFailedIngredientsHistory] = useState([]);
     const [statusMessage, setStatusMessage] = useState({ text: '', type: '' });
     
-    // A) Add Macro Debug State Declarations
+    // Macro Debug State
     const [macroDebug, setMacroDebug] = useState(null);
 
     const [showMacroDebugLog, setShowMacroDebugLog] = useState(
@@ -123,6 +126,16 @@ const useAppLogic = ({
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
 
+    // --- Cleanup Effect (Aborts pending requests on unmount) ---
+    useEffect(() => {
+        return () => {
+            if (abortControllerRef.current) {
+                console.log("[CLEANUP] Aborting pending request on unmount.");
+                abortControllerRef.current.abort();
+            }
+        };
+    }, []);
+
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
       localStorage.setItem('cheffy_show_orchestrator_logs', JSON.stringify(showOrchestratorLogs));
@@ -132,7 +145,7 @@ const useAppLogic = ({
       localStorage.setItem('cheffy_show_failed_ingredients_logs', JSON.stringify(showFailedIngredientsLogs));
     }, [showFailedIngredientsLogs]);
     
-    // B) Add localStorage Persistence Effect
+    // Macro Debug Log Persistence
     useEffect(() => {
       localStorage.setItem('cheffy_show_macro_debug_log', JSON.stringify(showMacroDebugLog));
     }, [showMacroDebugLog]);
@@ -367,6 +380,15 @@ const useAppLogic = ({
     const handleGeneratePlan = useCallback(async (e) => {
         e.preventDefault();
         
+        // --- RECOMMENDED FIX: Abort any pending request ---
+        if (abortControllerRef.current) {
+            console.log('[GENERATE] Aborting previous request.');
+            abortControllerRef.current.abort();
+        }
+        abortControllerRef.current = new AbortController();
+        const signal = abortControllerRef.current.signal;
+        // --- End Abort Fix ---
+
         setLoading(true);
         setError(null);
         setDiagnosticLogs([]);
@@ -391,6 +413,7 @@ const useAppLogic = ({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(formData),
+                signal: signal, // Pass signal to targets calculation as well
             });
 
             if (!targetsResponse.ok) {
@@ -404,6 +427,11 @@ const useAppLogic = ({
             setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
             
         } catch (err) {
+            if (err.name === 'AbortError') {
+                console.log('[GENERATE] Targets request aborted.');
+                setLoading(false);
+                return; // Exit gracefully
+            }
             console.error("Plan generation failed critically at Targets:", err);
             setError(`Critical failure: ${err.message}`);
             setGenerationStepKey('error');
@@ -430,10 +458,13 @@ const useAppLogic = ({
                     let dayFetchError = null;
 
                     try {
+                        // NOTE: AbortController implementation for per-day mode requires managing multiple controllers or signals.
+                        // For simplicity in this context, we'll keep the SSE reader logic but rely on the main signal for stream cleanup.
                         const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
                             body: JSON.stringify({ formData, nutritionalTargets: targets }),
+                            signal: signal, // Pass the main signal
                         });
 
                         if (!dayResponse.ok) {
@@ -499,6 +530,10 @@ const useAppLogic = ({
                             if (dayFetchError) break;
                         }
                     } catch (dayError) {
+                        if (dayError.name === 'AbortError') {
+                            console.log(`[GENERATE] Day ${day} request aborted.`);
+                            return; // Exit gracefully
+                        }
                         console.error(`Error processing day ${day}:`, dayError);
                         setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
                         setGenerationStepKey('error');
@@ -537,6 +572,7 @@ const useAppLogic = ({
                         formData,
                         nutritionalTargets: targets
                     }),
+                    signal: signal, // ADD THIS
                 });
 
                 if (!planResponse.ok) {
@@ -627,10 +663,7 @@ const useAppLogic = ({
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
                                 
-                                // D) Capture macroDebug from SSE
-                                if (eventData.macroDebug) {
-                                    setMacroDebug(eventData.macroDebug);
-                                }
+                                setMacroDebug(eventData.macroDebug ?? null);
                                 
                                 setGenerationStepKey('complete');
                                 setGenerationStatus('Plan generation complete!');
@@ -656,6 +689,10 @@ const useAppLogic = ({
                 }
                 
             } catch (err) {
+                if (err.name === 'AbortError') {
+                    console.log('[GENERATE] Batched request aborted.');
+                    return; // Exit gracefully
+                }
                 console.error("Batched plan generation failed critically:", err);
                 setError(`Critical failure: ${err.message}`);
                 setGenerationStepKey('error');
@@ -765,7 +802,6 @@ const useAppLogic = ({
         URL.revokeObjectURL(url);
     }, [diagnosticLogs]); 
 
-    // C) Add Download Handler
     const handleDownloadMacroDebugLogs = useCallback(() => {
       if (!macroDebug || Object.keys(macroDebug).length === 0) return;
       const logContent = JSON.stringify(macroDebug, null, 2);
@@ -950,9 +986,7 @@ const useAppLogic = ({
         toasts,
         showSuccessModal,
         planStats,
-        
-        // E) Add to Return Object
-        macroDebug,
+        macroDebug, 
         showMacroDebugLog,
         categorizedResults,
         hasInvalidMeals,
@@ -964,7 +998,7 @@ const useAppLogic = ({
         setIsLogOpen,
         setShowOrchestratorLogs,
         setShowFailedIngredientsLogs,
-        setShowMacroDebugLog, // Add setter
+        setShowMacroDebugLog,
         setSelectedMeal,
         setUseBatchedMode,
         setShowSuccessModal,
@@ -983,7 +1017,7 @@ const useAppLogic = ({
         handleQuantityChange,
         handleDownloadFailedLogs,
         handleDownloadLogs,
-        handleDownloadMacroDebugLogs, // Add handler
+        handleDownloadMacroDebugLogs,
         handleSignUp,
         handleSignIn,
         handleSignOut,
