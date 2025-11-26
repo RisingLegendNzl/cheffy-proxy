@@ -32,6 +32,9 @@ try {
     var { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js');
 }
 
+// --- [NEW] Import validation helper (Task 1) ---
+const { validateDayPlan } = require('../../utils/validation');
+
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
@@ -803,7 +806,6 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
     const mealAvg = Math.round(calories / numMeals);
     const mealMax = Math.round(mealAvg * 1.5);
 
-    // [Step 3 location confirmed]
     const systemPrompt = MEAL_PLANNER_SYSTEM_PROMPT(weight, calories, mealMax, day);
     let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
@@ -1446,7 +1448,6 @@ module.exports = async (request, response) => {
         /**
          * Calculates the macros for a single item using the master nutrition map.
          * This is the "Solver V1" / Deterministic Calculator.
-         * (Step 5: Item assumed to be normalized already via normalizeStateHintForItem)
          */
         const computeItemMacros = (item, mealItems) => {
              const normalizedKey = item.normalizedKey; 
@@ -1460,7 +1461,6 @@ module.exports = async (request, response) => {
              if (gramsOrMl === 0) { return { p: 0, f: 0, c: 0, kcal: 0, key: item.key }; }
              
              // 2. Convert to 'as_sold' (e.g., 200g cooked rice -> 67g dry rice)
-             // `toAsSold` respects item.stateHint, which is guaranteed to be normalized here.
              const { grams_as_sold, inferredMethod } = toAsSold(item, gramsOrMl, log);
              
              // 3. Get nutrition data (per 100g)
@@ -1499,6 +1499,7 @@ module.exports = async (request, response) => {
         // --- Run Solver V1 (Shadow) vs Reconciler V0 (Live) ---
         for (const day of fullMealPlan) {
             let mealsForThisDay = JSON.parse(JSON.stringify(day.meals)); // Deep copy for safety
+            // nutritionalTargets is the targets object for the current day
             const targetCalories = nutritionalTargets.calories;
             
             // Helper to calculate totals for a list of meals
@@ -1511,9 +1512,10 @@ module.exports = async (request, response) => {
                          // Attach normalizedKey again as it was lost in deep copy
                          item.normalizedKey = normalizeKey(item.key); 
                          
-                         // [Step 5] Ensure stateHint is normalized before macro calculation
+                         // Ensure stateHint is normalized before macro calculation
                          normalizeStateHintForItem(item, log);
                          
+                         // This is the call to the macro calculator (the getMacros function for validation)
                          const macros = computeItemMacros(item, meal.items);
                          mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
                      }
@@ -1524,6 +1526,7 @@ module.exports = async (request, response) => {
                      }
                      totalKcal += mealKcal; totalP += mealP; totalF += mealF; totalC += mealC;
                 }
+                // Return total object, which serves as the dayTotals input for validation
                 return { totalKcal, totalP, totalF, totalC, planHasInvalidItems };
             };
 
@@ -1532,17 +1535,11 @@ module.exports = async (request, response) => {
             const solverV1Totals = calculateTotals(solverV1Meals, day.dayNumber);
 
             // --- 2. Run Reconciler V0 (Live Path by default) ---
-            // The `reconcileNonProtein` function needs a callback that has access to the full `nutritionDataMap`
             const reconcilerGetItemMacros = (item) => {
                 item.normalizedKey = normalizeKey(item.key); // Ensure key is normalized
-                // [Step 5] Need to normalize here too, as reconciler might modify quantities/items
-                normalizeStateHintForItem(item, log); 
+                // State hint is normalized inside calculateTotals, but we must ensure consistency here too
+                normalizeStateHintForItem(item, log);
                 
-                // Find the meal this item belongs to (for oil calculation context)
-                // Note: The meal context passed to computeItemMacros is for oil absorption checks
-                // We're passing `[]` here as the context in this callback is for an item potentially 
-                // outside the main loop, but computeItemMacros is designed to use it. 
-                // For safety, we use the items list of the current meal being reconciled.
                 const mealContext = mealsForThisDay.find(m => m.items.some(i => i.key === item.key))?.items || [];
                 return computeItemMacros(item, mealContext);
             };
@@ -1557,6 +1554,10 @@ module.exports = async (request, response) => {
             // Re-format scaled meals and calculate their *final* totals
             const reconcilerV0Meals = scaledMeals.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty_value: i.qty, qty_unit: i.unit })) }));
             const reconcilerV0Totals = calculateTotals(reconcilerV0Meals, day.dayNumber);
+            
+            // --- Determine which meal/total set to use ---
+            let selectedMeals = USE_SOLVER_V1 ? solverV1Meals : reconcilerV0Meals;
+            let selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Totals;
 
             // --- 3. Log Comparison ---
             log(`[Solver] Day ${day.dayNumber} Shadow Mode Comparison:`, 'INFO', 'SOLVER', {
@@ -1568,14 +1569,46 @@ module.exports = async (request, response) => {
                 reconciler_factor: factor
             });
 
-            // --- 4. Select Path based on Feature Flag ---
-            if (USE_SOLVER_V1) {
-                log(`[Solver] Using SOLVER_V1 (Deterministic Calc) for Day ${day.dayNumber}`, 'INFO', 'SOLVER');
-                finalMealPlan.push({ ...day, meals: solverV1Meals });
-            } else {
-                log(`[Solver] Using RECONCILER_V0 (Legacy Scaling) for Day ${day.dayNumber}`, 'INFO', 'SOLVER');
-                finalMealPlan.push({ ...day, meals: reconcilerV0Meals });
+            // --- 4. Validation (Task 3) ---
+            const validationResult = validateDayPlan({
+              meals: selectedMeals,
+              dayTotals: {
+                calories: selectedTotals.totalKcal,
+                protein: selectedTotals.totalP,
+                fat: selectedTotals.totalF,
+                carbs: selectedTotals.totalC
+              },
+              targets: nutritionalTargets, 
+              nutritionDataMap: nutritionDataMap,
+              getMacros: computeItemMacros,
+              log: log
+            });
+
+            // --- 5. Optional Log Validation Issues (Task 5) ---
+            if (validationResult && validationResult.hasIssues && validationResult.hasIssues()) {
+              log(
+                `[VALIDATION] Day ${day.dayNumber}: ${validationResult.issues.length} issues (confidence=${validationResult.confidenceScore.toFixed(2)})`,
+                'WARN',
+                'CALC'
+              );
             }
+            // --- End Validation ---
+
+            // --- 6. Select Path and Finalize Day Object (Task 4) ---
+            log(`[Solver] Using ${USE_SOLVER_V1 ? 'SOLVER_V1' : 'RECONCILER_V0'} for Day ${day.dayNumber}`, 'INFO', 'SOLVER');
+            
+            finalMealPlan.push({ 
+                dayNumber: day.dayNumber, 
+                meals: selectedMeals, 
+                totals: {
+                    calories: selectedTotals.totalKcal,
+                    protein: selectedTotals.totalP,
+                    fat: selectedTotals.totalF,
+                    carbs: selectedTotals.totalC
+                },
+                // [NEW] Attach validation result (Task 4)
+                validation: validationResult.toJSON()
+            });
         }
         solver_ms = Date.now() - solverStartTime;
         sendEvent('phase:end', { name: 'solver', duration_ms: solver_ms, using_solver_v1: USE_SOLVER_V1 });
@@ -1617,8 +1650,17 @@ module.exports = async (request, response) => {
         
         // Clean up meal objects for the frontend
         finalMealPlan.forEach(day => {
+            // Store rounded totals separately for frontend consumption
+            const dayTotals = day.totals;
+            day.totals = {
+                calories: Math.round(dayTotals.calories || 0),
+                protein: Math.round(dayTotals.protein || 0),
+                fat: Math.round(dayTotals.fat || 0),
+                carbs: Math.round(dayTotals.carbs || 0),
+            }
+
             day.meals.forEach(meal => {
-                // Round macros
+                // Round meal macros
                 meal.subtotal_kcal = Math.round(meal.subtotal_kcal || 0);
                 meal.subtotal_protein = Math.round(meal.subtotal_protein || 0);
                 meal.subtotal_fat = Math.round(meal.subtotal_fat || 0);
@@ -1639,7 +1681,7 @@ module.exports = async (request, response) => {
             message: `Successfully generated full ${numDays}-day plan.`,
             mealPlan: finalMealPlan,
             results: Object.fromEntries(fullResultsMap.entries()),
-            uniqueIngredients: fullIngredientPlan.map(({ normalizedKey, dayRefs, ...rest }) => ({
+            uniqueIngredients: aggregatedIngredients.map(({ normalizedKey, dayRefs, ...rest }) => ({
                 ...rest,
                 dayRefs: Array.from(dayRefs) // Convert Set to Array
             })),
