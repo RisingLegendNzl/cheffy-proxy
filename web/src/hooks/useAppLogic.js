@@ -417,8 +417,8 @@ const useAppLogic = ({
             });
 
             if (!targetsResponse.ok) {
-                const errorData = await targetsResponse.json();
-                throw new Error(`Failed to calculate targets: ${errorData.message || targetsResponse.statusText}`);
+                const errorMsg = await getResponseErrorDetails(targetsResponse);
+                throw new Error(`Failed to calculate targets: ${errorMsg}`);
             }
 
             const targetsData = await targetsResponse.json();
@@ -466,8 +466,8 @@ const useAppLogic = ({
                         });
 
                         if (!dayResponse.ok) {
-                            const errorData = await dayResponse.json();
-                            throw new Error(`Day ${day} request failed: ${errorData.message || 'Unknown server error'}`);
+                            const errorMsg = await getResponseErrorDetails(dayResponse);
+                            throw new Error(`Day ${day} request failed: ${errorMsg}`);
                         }
 
                         const reader = dayResponse.body.getReader();
@@ -560,7 +560,7 @@ const useAppLogic = ({
             setGenerationStatus("Generating full plan (batched mode)...");
             
             try {
-                console.log('[DEBUG] Starting batched plan generation...'); // DIAGNOSTIC LOG
+                // console.log('[DEBUG] Starting batched plan generation...'); // Diagnostic log removed for cleanup
                 
                 const planResponse = await fetch(ORCHESTRATOR_FULL_PLAN_API_URL, {
                     method: 'POST',
@@ -575,24 +575,20 @@ const useAppLogic = ({
                     signal: signal,
                 });
 
-                console.log('[DEBUG] Fetch completed, status:', planResponse.status, 'ok:', planResponse.ok); // DIAGNOSTIC LOG
+                // console.log('[DEBUG] Fetch completed, status:', planResponse.status, 'ok:', planResponse.ok); // Diagnostic log removed for cleanup
 
                 if (!planResponse.ok) {
-                    let errorMsg = 'Unknown server error';
-                    try {
-                        const errorData = await planResponse.json();
-                        errorMsg = errorData.message || JSON.stringify(errorData);
-                    } catch (e) {
-                        errorMsg = await planResponse.text();
-                    }
+                    // --- FIXED ERROR HANDLING (Alternative Fix: Clone/Text/JSON) ---
+                    const errorMsg = await getResponseErrorDetails(planResponse);
                     throw new Error(`Full plan request failed (${planResponse.status}): ${errorMsg}`);
+                    // --- END FIXED ERROR HANDLING ---
                 }
 
-                console.log('[DEBUG] About to get reader from body...'); // DIAGNOSTIC LOG
-                console.log('[DEBUG] planResponse.body exists:', !!planResponse.body); // DIAGNOSTIC LOG
+                // console.log('[DEBUG] About to get reader from body...'); // Diagnostic log removed for cleanup
+                // console.log('[DEBUG] planResponse.body exists:', !!planResponse.body); // Diagnostic log removed for cleanup
                 
                 const reader = planResponse.body.getReader();
-                console.log('[DEBUG] Reader obtained successfully'); // DIAGNOSTIC LOG
+                // console.log('[DEBUG] Reader obtained successfully'); // Diagnostic log removed for cleanup
                 
                 const decoder = new TextDecoder();
                 let buffer = '';
@@ -704,13 +700,6 @@ const useAppLogic = ({
                     return; // Exit gracefully
                 }
                 
-                // ENHANCED DIAGNOSTIC LOGGING
-                console.error('[DEBUG] Caught error:', err);
-                console.error('[DEBUG] Error name:', err.name);
-                console.error('[DEBUG] Error message:', err.message);
-                console.error('[DEBUG] Error stack:', err.stack);
-                // END ENHANCED DIAGNOSTIC LOGGING
-                
                 console.error("Batched plan generation failed critically:", err);
                 setError(`Critical failure: ${err.message}`);
                 setGenerationStepKey('error');
@@ -722,6 +711,27 @@ const useAppLogic = ({
             }
         }
     }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode, showToast, nutritionalTargets.calories, error]);
+
+    // --- NEW HELPER FUNCTION for robust error parsing ---
+    const getResponseErrorDetails = useCallback(async (response) => {
+        let errorMsg = `HTTP ${response.status}`;
+        try {
+            // Clone the response so we can safely read the body without disturbing the stream
+            const clonedResponse = response.clone();
+            try {
+                // Attempt to read as JSON first
+                const errorData = await clonedResponse.json();
+                errorMsg = errorData.message || JSON.stringify(errorData);
+            } catch (jsonErr) {
+                // If JSON parsing fails, read the raw text
+                errorMsg = await response.text() || `HTTP ${response.status} - Could not read body`;
+            }
+        } catch (e) {
+            console.error('[ERROR] Could not read error response body:', e);
+            errorMsg = `HTTP ${response.status} - Could not read response body`;
+        }
+        return errorMsg;
+    }, []);
 
     const handleFetchNutrition = useCallback(async (product) => {
         if (!product || !product.url || nutritionCache[product.url]) { return; }
