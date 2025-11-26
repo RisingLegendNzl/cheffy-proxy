@@ -115,6 +115,9 @@ const useAppLogic = ({
     const [toasts, setToasts] = useState([]);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [planStats, setPlanStats] = useState([]);
+    
+    // 1. Extend app state
+    const [macroDebug, setMacroDebug] = useState(null);
 
     // --- Persist Log Visibility Preferences ---
     useEffect(() => {
@@ -368,6 +371,8 @@ const useAppLogic = ({
         setFailedIngredientsHistory([]);
         setGenerationStepKey('targets');
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
+        // 5. Reset macroDebug state
+        setMacroDebug(null);
 
         let targets;
 
@@ -611,6 +616,9 @@ const useAppLogic = ({
                                 setResults(eventData.results || {});
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
+                                
+                                // 2. Capture macroDebug from SSE
+                                setMacroDebug(eventData.macroDebug ?? null);
                                 
                                 setGenerationStepKey('complete');
                                 setGenerationStatus('Plan generation complete!');
@@ -914,6 +922,7 @@ const useAppLogic = ({
         toasts,
         showSuccessModal,
         planStats,
+        macroDebug, // 4. Expose macroDebug from the hook
         categorizedResults,
         hasInvalidMeals,
         latestLog,
