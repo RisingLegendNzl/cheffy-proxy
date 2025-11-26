@@ -404,7 +404,7 @@ const useAppLogic = ({
         setFailedIngredientsHistory([]);
         setGenerationStepKey('targets');
         if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
-        setMacroDebug(null);
+        setMacroDebug(null); // Macro Debug Reset
 
         let targets;
 
@@ -413,7 +413,7 @@ const useAppLogic = ({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(formData),
-                signal: signal, // Pass signal to targets calculation as well
+                signal: signal,
             });
 
             if (!targetsResponse.ok) {
@@ -458,13 +458,11 @@ const useAppLogic = ({
                     let dayFetchError = null;
 
                     try {
-                        // NOTE: AbortController implementation for per-day mode requires managing multiple controllers or signals.
-                        // For simplicity in this context, we'll keep the SSE reader logic but rely on the main signal for stream cleanup.
                         const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
                             body: JSON.stringify({ formData, nutritionalTargets: targets }),
-                            signal: signal, // Pass the main signal
+                            signal: signal,
                         });
 
                         if (!dayResponse.ok) {
@@ -562,6 +560,8 @@ const useAppLogic = ({
             setGenerationStatus("Generating full plan (batched mode)...");
             
             try {
+                console.log('[DEBUG] Starting batched plan generation...'); // DIAGNOSTIC LOG
+                
                 const planResponse = await fetch(ORCHESTRATOR_FULL_PLAN_API_URL, {
                     method: 'POST',
                     headers: { 
@@ -572,8 +572,10 @@ const useAppLogic = ({
                         formData,
                         nutritionalTargets: targets
                     }),
-                    signal: signal, // ADD THIS
+                    signal: signal,
                 });
+
+                console.log('[DEBUG] Fetch completed, status:', planResponse.status, 'ok:', planResponse.ok); // DIAGNOSTIC LOG
 
                 if (!planResponse.ok) {
                     let errorMsg = 'Unknown server error';
@@ -586,7 +588,12 @@ const useAppLogic = ({
                     throw new Error(`Full plan request failed (${planResponse.status}): ${errorMsg}`);
                 }
 
+                console.log('[DEBUG] About to get reader from body...'); // DIAGNOSTIC LOG
+                console.log('[DEBUG] planResponse.body exists:', !!planResponse.body); // DIAGNOSTIC LOG
+                
                 const reader = planResponse.body.getReader();
+                console.log('[DEBUG] Reader obtained successfully'); // DIAGNOSTIC LOG
+                
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let planComplete = false;
@@ -663,7 +670,10 @@ const useAppLogic = ({
                                 setUniqueIngredients(eventData.uniqueIngredients || []);
                                 recalculateTotalCost(eventData.results || {});
                                 
-                                setMacroDebug(eventData.macroDebug ?? null);
+                                // Capture Macro Debug Data
+                                if (eventData.macroDebug) {
+                                    setMacroDebug(eventData.macroDebug);
+                                }
                                 
                                 setGenerationStepKey('complete');
                                 setGenerationStatus('Plan generation complete!');
@@ -693,6 +703,14 @@ const useAppLogic = ({
                     console.log('[GENERATE] Batched request aborted.');
                     return; // Exit gracefully
                 }
+                
+                // ENHANCED DIAGNOSTIC LOGGING
+                console.error('[DEBUG] Caught error:', err);
+                console.error('[DEBUG] Error name:', err.name);
+                console.error('[DEBUG] Error message:', err.message);
+                console.error('[DEBUG] Error stack:', err.stack);
+                // END ENHANCED DIAGNOSTIC LOGGING
+                
                 console.error("Batched plan generation failed critically:", err);
                 setError(`Critical failure: ${err.message}`);
                 setGenerationStepKey('error');
