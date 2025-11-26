@@ -13,7 +13,8 @@ import {
   Eye,
   EyeOff,
   Terminal,
-  ListX
+  ListX,
+  Target
 } from 'lucide-react';
 import { COLORS, Z_INDEX, SHADOWS } from '../constants';
 import { APP_CONFIG } from '../constants';
@@ -32,6 +33,9 @@ const SettingsPanel = ({
   onToggleOrchestratorLogs,
   showFailedIngredientsLogs = true,
   onToggleFailedIngredientsLogs,
+  // NEW: Macro Debug Log props with defensive defaults
+  showMacroDebugLog = false,
+  onToggleMacroDebugLog = () => {},
 }) => {
   const [selectedStore, setSelectedStore] = useState(currentStore);
 
@@ -169,7 +173,7 @@ const SettingsPanel = ({
             </div>
 
             {/* Show Failed Ingredients Logs Toggle */}
-            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-fast">
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-3 hover:bg-gray-100 transition-fast">
               <div className="flex items-center">
                 <ListX size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
                 <label className="text-sm font-semibold" style={{ color: COLORS.gray[700] }}>
@@ -185,6 +189,26 @@ const SettingsPanel = ({
                 }}
               >
                 {showFailedIngredientsLogs ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+            </div>
+
+            {/* NEW: Show Macro Debug Log Toggle */}
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-3 hover:bg-gray-100 transition-fast">
+              <div className="flex items-center">
+                <Target size={16} className="mr-2" style={{ color: COLORS.gray[600] }} />
+                <label className="text-sm font-semibold" style={{ color: COLORS.gray[700] }}>
+                  Macro Debug Log
+                </label>
+              </div>
+              <button
+                onClick={() => onToggleMacroDebugLog && onToggleMacroDebugLog(!showMacroDebugLog)}
+                className="p-2 rounded-lg transition-fast"
+                style={{
+                  backgroundColor: showMacroDebugLog ? COLORS.success.light : COLORS.gray[200],
+                  color: showMacroDebugLog ? COLORS.success.dark : COLORS.gray[600],
+                }}
+              >
+                {showMacroDebugLog ? <Eye size={18} /> : <EyeOff size={18} />}
               </button>
             </div>
 
@@ -266,4 +290,3 @@ const SettingsPanel = ({
 };
 
 export default SettingsPanel;
-
