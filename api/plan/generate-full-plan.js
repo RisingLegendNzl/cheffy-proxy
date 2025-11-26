@@ -457,7 +457,7 @@ function sizeOk(productSizeParsed, targetSize, allowedCategories = [], log, ingr
     
     // Set multipliers based on category
     const isPantry = PANTRY_CATEGORIES.some(c => allowedCategories?.some(ac => ac.toLowerCase() === c));
-    const maxMultiplier = isPantry ? 3.0 : 2.0; // Allow buying larger pantry items
+    const maxMultiplier = 3.0; // Allow buying larger pantry items
     const minMultiplier = 0.5; // Don't buy less than half the target size
     
     const lowerBound = targetValue * minMultiplier;
@@ -712,6 +712,28 @@ JSON Structure:
       "allowedCategories": ["string"]
     }
   ]
+}
+`;
+
+const CHEF_SYSTEM_PROMPT = (store) => `
+You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
+RULES:
+1.  You will be given a meal name and a list of ingredients with quantities.
+2.  Your job is to generate an appetizing 1-sentence 'description' for the meal.
+3.  You MUST also generate a 'instructions' array, with each element being one step.
+4.  Instructions MUST be safe, clear, and logical.
+5.  **FOOD SAFETY IS CRITICAL:**
+    * ALWAYS include a step to "cook chicken/pork thoroughly until no longer pink and juices run clear."
+    * ALWAYS include a step to "wash all produce (vegetables/fruit) thoroughly."
+6.  Be concise. Aim for 4-7 steps.
+7.  Do NOT add any ingredients not in the provided list, except for "salt, pepper, and water" which are assumed.
+
+Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
+
+JSON Structure:
+{
+  "description": "string",
+  "instructions": ["string"]
 }
 `;
 
@@ -1263,8 +1285,13 @@ module.exports = async (request, response) => {
                     if (filteredProducts.length > 0) {
                         log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
                         // Add new, unique products to the list
-                        const currentUrls = new Set(result.allProducts.map(p => p.url));
-                        filteredProducts.forEach(vp => { if (!currentUrls.has(vp.product.url)) { result.allProducts.push(vp.product); } });
+                        const currentUrls = new Set(result.allProducts.map(p => p.product.url));
+                        filteredProducts.forEach(vp => { 
+                             // Make sure product URLs are unique before pushing
+                             if (!currentUrls.has(vp.product.url)) { 
+                                result.allProducts.push(vp.product); 
+                             } 
+                        });
 
                         if (result.allProducts.length > 0) {
                              // Select the best (cheapest) product from ALL found so far
@@ -1389,6 +1416,7 @@ module.exports = async (request, response) => {
         }
         
         // 4b. Fetch in parallel
+        let canonicalHitsToday = 0; // Move outside the loop for global tracking
         if (itemsToFetchNutrition.length > 0) {
             log(`Fetching nutrition for ${itemsToFetchNutrition.length} items...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, NUTRITION_CONCURRENCY, async (item) => {
@@ -1416,7 +1444,6 @@ module.exports = async (request, response) => {
         
         // 4d. Nutrition Fallback (Canonical)
         // For any item that failed the market run OR its nutrition fetch, try the canonical DB
-        let canonicalHitsToday = 0;
         for (const [normalizedKey, result] of fullResultsMap.entries()) {
              const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
              if (!hasNutri) {
@@ -1445,56 +1472,166 @@ module.exports = async (request, response) => {
         const solverStartTime = Date.now();
         finalMealPlan = []; // Reset final plan, will be rebuilt here
 
+        // [NEW] Macro Debug Data Initialization
+        const numMealsPerDay = parseInt(formData.eatingOccasions, 10) || 3;
+        const targetsPerMeal = {
+            calories: nutritionalTargets.calories / numMealsPerDay,
+            protein: nutritionalTargets.protein / numMealsPerDay,
+            fat: nutritionalTargets.fat / numMealsPerDay,
+            carbs: nutritionalTargets.carbs / numMealsPerDay,
+        };
+        const macroDebugDaysData = [];
+
         /**
          * Calculates the macros for a single item using the master nutrition map.
-         * This is the "Solver V1" / Deterministic Calculator.
+         * This function returns a detailed object including debug information required for the macroDebug payload.
          */
-        const computeItemMacros = (item, mealItems) => {
+        const computeDetailedItemMacros = (item, mealItems) => { // Relies on closure 'log' and 'nutritionDataMap'
              const normalizedKey = item.normalizedKey; 
              
-             // 1. Get user-facing quantity (e.g., 2 slices, 200g)
+             // 1. Get user-facing quantity
              const { value: gramsOrMl } = normalizeToGramsOrMl(item, log);
-             if (!Number.isFinite(gramsOrMl) || gramsOrMl < 0) {
-                 log(`[Solver] Invalid quantity for item '${item.key}'.`, 'ERROR', 'CALC', { item, gramsOrMl });
-                 return { p: 0, f: 0, c: 0, kcal: 0, key: item.key };
+             const gramsInput = gramsOrMl; // Normalized grams/ml before transforms
+
+             // Initialize debug item structure
+             const debugItem = {
+                key: item.key,
+                displayName: item.key, // Using key as fallback
+                qtyValue: item.qty_value || null,
+                qtyUnit: item.qty_unit || null,
+                stateHint: item.stateHint || null,
+                methodHint: item.methodHint || null,
+                gramsInput: gramsInput,
+                gramsAsSold: null,
+                nutritionKey: normalizedKey,
+                per100: { kcal: null, protein: null, fat: null, carbs: null },
+                computedMacros: { calories: 0, protein: 0, fat: 0, carbs: 0 },
+                source: 'missing',
+                notes: null
+             };
+             
+             if (!Number.isFinite(gramsInput) || gramsInput < 0 || gramsInput === 0) {
+                 if (gramsInput !== 0) {
+                    log(`[MACRO_DEBUG] Invalid quantity for item '${item.key}'.`, 'ERROR', 'CALC', { item, gramsInput });
+                 }
+                 return { p: 0, f: 0, c: 0, kcal: 0, key: item.key, debugItem };
              }
-             if (gramsOrMl === 0) { return { p: 0, f: 0, c: 0, kcal: 0, key: item.key }; }
              
              // 2. Convert to 'as_sold' (e.g., 200g cooked rice -> 67g dry rice)
-             const { grams_as_sold, inferredMethod } = toAsSold(item, gramsOrMl, log);
+             const { grams_as_sold, inferredMethod } = toAsSold(item, gramsInput, log);
+             
+             debugItem.gramsAsSold = grams_as_sold;
+             debugItem.methodHint = item.methodHint || inferredMethod || null;
              
              // 3. Get nutrition data (per 100g)
              const nutritionData = nutritionDataMap.get(normalizedKey);
              let grams = grams_as_sold;
              let p = 0, f = 0, c = 0, kcal = 0;
+             
+             let source = 'missing';
 
              if (nutritionData && nutritionData.status === 'found') {
                  // Use real data
                  const proteinPer100 = Number(nutritionData.protein || nutritionData.protein_g_per_100g) || 0;
                  const fatPer100 = Number(nutritionData.fat || nutritionData.fat_g_per_100g) || 0;
                  const carbsPer100 = Number(nutritionData.carbs || nutritionData.carb_g_per_100g) || 0;
+                 const kcalPer100 = Number(nutritionData.kcal || nutritionData.kcal_per_100g) || 0;
+
+                 // Populate debug per100
+                 debugItem.per100.kcal = kcalPer100;
+                 debugItem.per100.protein = proteinPer100;
+                 debugItem.per100.fat = fatPer100;
+                 debugItem.per100.carbs = carbsPer100;
+                 
                  p = (proteinPer100 / 100) * grams;
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
+                 
+                 source = nutritionData.source === 'CANON' ? 'canonical' : 'external';
              } else { 
-                log(`[Solver] No nutrition for '${item.key}'. Macros set to 0.`, 'WARN', 'CALC', { normalizedKey }); 
+                if (gramsInput > 0) {
+                   log(`[MACRO_DEBUG] No nutrition found for '${item.key}'. Macros set to 0.`, 'WARN', 'CALC', { normalizedKey }); 
+                }
+                debugItem.notes = 'Nutrition data missing or not found.';
              }
              
              // 4. Add extras (e.g., oil absorption)
-             const { absorbed_oil_g } = getAbsorbedOil(item, inferredMethod, mealItems, log);
-             if (absorbed_oil_g > 0) { f += absorbed_oil_g; }
+             const { absorbed_oil_g } = getAbsorbedOil(item, debugItem.methodHint, mealItems, log);
+             if (absorbed_oil_g > 0) { 
+                 f += absorbed_oil_g; 
+                 debugItem.notes = (debugItem.notes ? debugItem.notes + '; ' : '') + `Added ${absorbed_oil_g.toFixed(1)}g fat from absorbed oil.`;
+             }
              
              // 5. Calculate final kcal
              kcal = (p * 4) + (f * 9) + (c * 4);
+
+             // Populate debug computed macros
+             debugItem.computedMacros.calories = kcal;
+             debugItem.computedMacros.protein = p;
+             debugItem.computedMacros.fat = f;
+             debugItem.computedMacros.carbs = c;
              
-             // 6. Sanity Check
+             // 6. Set Final Source and Log Anomalies
+             debugItem.source = source;
+             
+             if (kcal === 0 && gramsInput > 0) {
+                 // Log anomaly: Zero-calorie item with non-zero quantity (Rule 4)
+                 log(`[MACRO_DEBUG] Zero-calorie item with non-zero qty: '${item.key}' (${gramsInput.toFixed(0)}g). Source: ${source}`, 'WARN', 'CALC');
+             }
+             
+             if (source === 'canonical' && gramsInput > 0) {
+                 // Log anomaly: Canonical fallback used (Rule 4)
+                 log(`[MACRO_DEBUG] Canonical fallback used for '${item.key}'.`, 'INFO', 'CALC');
+             }
+
              if (kcal > MAX_CALORIES_PER_ITEM && !item.key.toLowerCase().includes('oil')) {
                 log(`CRITICAL: Item '${item.key}' calculated to ${kcal.toFixed(0)} kcal, exceeding sanity limit.`, 'CRITICAL', 'CALC', { item, grams, p, f, c });
                 // Nullify macros to prevent breaking the plan
                 kcal = 0; p = 0; f = 0; c = 0;
+                debugItem.computedMacros = { calories: 0, protein: 0, fat: 0, carbs: 0 };
+                debugItem.notes = (debugItem.notes ? debugItem.notes + '; ' : '') + 'Macros nullified due to sanity check failure.';
              }
-             return { p, f, c, kcal, key: item.key }; 
-         };
+
+             return { p, f, c, kcal, key: item.key, debugItem };
+        };
+
+
+        // Redefine the simple helper that calculateTotals and reconcilerGetItemMacros expects.
+        // This function replaces the original `computeItemMacros` but maintains the simple return structure.
+        const computeItemMacros = (item, mealItems) => {
+             const result = computeDetailedItemMacros(item, mealItems);
+             return { p: result.p, f: result.f, c: result.c, kcal: result.kcal, key: result.key };
+        };
+
+
+        // Helper to calculate totals for a list of meals
+        const calculateTotals = (mealList, dayNum) => {
+            let totalKcal = 0, totalP = 0, totalF = 0, totalC = 0;
+            let planHasInvalidItems = false;
+            for (const meal of mealList) {
+                 let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
+                 for (const item of meal.items) {
+                     // Attach normalizedKey again as it was lost in deep copy
+                     item.normalizedKey = normalizeKey(item.key); 
+                     
+                     // Ensure stateHint is normalized before macro calculation
+                     normalizeStateHintForItem(item, log);
+                     
+                     // This is the call to the macro calculator (the getMacros function for validation)
+                     const macros = computeItemMacros(item, meal.items);
+                     mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
+                 }
+                 meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC;
+                 if (meal.subtotal_kcal <= 0 && meal.items.length > 0) { // Only log if not an empty meal
+                     log(`[Solver] Meal "${meal.name}" (Day ${dayNum}) has zero/negative kcal.`, 'WARN', 'CALC', { items: meal.items.map(i => i.key) });
+                     planHasInvalidItems = true;
+                 }
+                 totalKcal += mealKcal; totalP += mealP; totalF += mealF; totalC += mealC;
+            }
+            // Return total object, which serves as the dayTotals input for validation
+            return { totalKcal, totalP, totalF, totalC, planHasInvalidItems };
+        };
+
 
         // --- Run Solver V1 (Shadow) vs Reconciler V0 (Live) ---
         for (const day of fullMealPlan) {
@@ -1502,33 +1639,6 @@ module.exports = async (request, response) => {
             // nutritionalTargets is the targets object for the current day
             const targetCalories = nutritionalTargets.calories;
             
-            // Helper to calculate totals for a list of meals
-            const calculateTotals = (mealList, dayNum) => {
-                let totalKcal = 0, totalP = 0, totalF = 0, totalC = 0;
-                let planHasInvalidItems = false;
-                for (const meal of mealList) {
-                     let mealKcal = 0, mealP = 0, mealF = 0, mealC = 0;
-                     for (const item of meal.items) {
-                         // Attach normalizedKey again as it was lost in deep copy
-                         item.normalizedKey = normalizeKey(item.key); 
-                         
-                         // Ensure stateHint is normalized before macro calculation
-                         normalizeStateHintForItem(item, log);
-                         
-                         // This is the call to the macro calculator (the getMacros function for validation)
-                         const macros = computeItemMacros(item, meal.items);
-                         mealKcal += macros.kcal; mealP += macros.p; mealF += macros.f; mealC += macros.c;
-                     }
-                     meal.subtotal_kcal = mealKcal; meal.subtotal_protein = mealP; meal.subtotal_fat = mealF; meal.subtotal_carbs = mealC;
-                     if (meal.subtotal_kcal <= 0 && meal.items.length > 0) { // Only log if not an empty meal
-                         log(`[Solver] Meal "${meal.name}" (Day ${dayNum}) has zero/negative kcal.`, 'WARN', 'CALC', { items: meal.items.map(i => i.key) });
-                         planHasInvalidItems = true;
-                     }
-                     totalKcal += mealKcal; totalP += mealP; totalF += mealF; totalC += mealC;
-                }
-                // Return total object, which serves as the dayTotals input for validation
-                return { totalKcal, totalP, totalF, totalC, planHasInvalidItems };
-            };
 
             // --- 1. Run Solver V1 (Shadow Path) ---
             const solverV1Meals = JSON.parse(JSON.stringify(mealsForThisDay)); // Fresh deep copy
@@ -1557,7 +1667,8 @@ module.exports = async (request, response) => {
             
             // --- Determine which meal/total set to use ---
             let selectedMeals = USE_SOLVER_V1 ? solverV1Meals : reconcilerV0Meals;
-            let selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Totals;
+            let selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Meals; // Should be reconcilerV0Totals
+            selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Totals; // Fixed bug here.
 
             // --- 3. Log Comparison ---
             log(`[Solver] Day ${day.dayNumber} Shadow Mode Comparison:`, 'INFO', 'SOLVER', {
@@ -1596,6 +1707,57 @@ module.exports = async (request, response) => {
 
             // --- 6. Select Path and Finalize Day Object (Task 4) ---
             log(`[Solver] Using ${USE_SOLVER_V1 ? 'SOLVER_V1' : 'RECONCILER_V0'} for Day ${day.dayNumber}`, 'INFO', 'SOLVER');
+
+            // --- [NEW] Collect Macro Debug Data for this Day ---
+            const dayDebug = {
+                dayIndex: day.dayNumber - 1, // 0-based
+                dayLabel: `Day ${day.dayNumber}`,
+                meals: []
+            };
+            
+            for (const meal of selectedMeals) {
+                // Use a simple average target per meal, or null if the LLM didn't define one
+                const targetMacros = (meal.type || meal.name) ? targetsPerMeal : { calories: null, protein: null, fat: null, carbs: null };
+
+                const mealDebug = {
+                    mealName: meal.name,
+                    mealId: null, // Not available
+                    targetMacros: {
+                        calories: targetMacros.calories ? Math.round(targetMacros.calories) : null,
+                        protein: targetMacros.protein ? Math.round(targetMacros.protein) : null,
+                        fat: targetMacros.fat ? Math.round(targetMacros.fat) : null,
+                        carbs: targetMacros.carbs ? Math.round(targetMacros.carbs) : null
+                    },
+                    computedTotals: {
+                        calories: Math.round(meal.subtotal_kcal || 0),
+                        protein: Math.round(meal.subtotal_protein || 0),
+                        fat: Math.round(meal.subtotal_fat || 0),
+                        carbs: Math.round(meal.subtotal_carbs || 0)
+                    },
+                    deviation: {
+                        caloriesDiff: targetMacros.calories ? Math.round((meal.subtotal_kcal || 0) - targetMacros.calories) : null,
+                        proteinDiff: targetMacros.protein ? Math.round((meal.subtotal_protein || 0) - targetMacros.protein) : null,
+                        fatDiff: targetMacros.fat ? Math.round((meal.subtotal_fat || 0) - targetMacros.fat) : null,
+                        carbsDiff: targetMacros.carbs ? Math.round((meal.subtotal_carbs || 0) - targetMacros.carbs) : null
+                    },
+                    items: []
+                };
+
+                for (const item of meal.items) {
+                    // Recalculate item macros using the detailed function to get the debug object
+                    const { debugItem } = computeDetailedItemMacros(item, meal.items);
+                    // Round the final computed macros in the debug item
+                    debugItem.computedMacros.calories = Math.round(debugItem.computedMacros.calories);
+                    debugItem.computedMacros.protein = Math.round(debugItem.computedMacros.protein);
+                    debugItem.computedMacros.fat = Math.round(debugItem.computedMacros.fat);
+                    debugItem.computedMacros.carbs = Math.round(debugItem.computedMacros.carbs);
+                    
+                    mealDebug.items.push(debugItem);
+                }
+                dayDebug.meals.push(mealDebug);
+            }
+            macroDebugDaysData.push(dayDebug);
+            
             
             finalMealPlan.push({ 
                 dayNumber: day.dayNumber, 
@@ -1649,6 +1811,8 @@ module.exports = async (request, response) => {
         sendEvent('phase:start', { name: 'finalize', description: 'Assembling final plan...' });
         
         // Clean up meal objects for the frontend
+        let totalCalories = 0, totalProtein = 0, totalFat = 0, totalCarbs = 0;
+
         finalMealPlan.forEach(day => {
             // Store rounded totals separately for frontend consumption
             const dayTotals = day.totals;
@@ -1658,6 +1822,12 @@ module.exports = async (request, response) => {
                 fat: Math.round(dayTotals.fat || 0),
                 carbs: Math.round(dayTotals.carbs || 0),
             }
+            // Aggregate totals for the summary (Rule 3)
+            totalCalories += dayTotals.calories;
+            totalProtein += dayTotals.protein;
+            totalFat += dayTotals.fat;
+            totalCarbs += dayTotals.carbs;
+
 
             day.meals.forEach(meal => {
                 // Round meal macros
@@ -1676,6 +1846,17 @@ module.exports = async (request, response) => {
             });
         });
 
+        // [NEW] Calculate Summary Debug Data (Rule 3)
+        const macroDebugSummary = {
+            totalDays: numDays,
+            totalCalories: Math.round(totalCalories),
+            totalProtein: Math.round(totalProtein),
+            totalFat: Math.round(totalFat),
+            totalCarbs: Math.round(totalCarbs),
+            avgCaloriesPerDay: numDays > 0 ? Math.round(totalCalories / numDays) : null,
+            avgProteinPerDay: numDays > 0 ? Math.round(totalProtein / numDays) : null,
+        };
+        
         // Prepare the final payload
         const responseData = {
             message: `Successfully generated full ${numDays}-day plan.`,
@@ -1685,6 +1866,11 @@ module.exports = async (request, response) => {
                 ...rest,
                 dayRefs: Array.from(dayRefs) // Convert Set to Array
             })),
+            // [NEW] Macro Debug Payload (Rule 1)
+            macroDebug: {
+                days: macroDebugDaysData,
+                summary: macroDebugSummary
+            }
         };
 
         const plan_total_ms = Date.now() - planStartTime;
