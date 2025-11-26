@@ -1,13 +1,13 @@
 /// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\\\
 // File: api/nutrition-search.js
-// Version: 3.0.0 - Optimized Pipeline with Hot-Path
-// Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → RAPIDAPI → OFF → USDA
-// Target: Sub-second lookups, 95%+ hit rate on tiers 1-2
+// Version: 3.1.0 - Phase 2 Update: Added Fallback Tier & Telemetry
+// Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → RAPIDAPI → OFF → USDA → FALLBACK
+// Target: Sub-second lookups, 95%+ hit rate on tiers 1-2, ZERO silent 0-macro items
 
 const fetch = require('node-fetch');
 const { createClient } = require('@vercel/kv');
 
-// --- Hot-Path Module (Ultra-fast, top 50 ingredients) ---
+// --- Hot-Path Module (Ultra-fast, top 50+ ingredients) ---
 const { getHotPath, isHotPath, getHotPathStats } = require('./nutrition-hotpath.js');
 
 // --- Canonical Database ---
@@ -46,13 +46,190 @@ const KV_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
 const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 
 // --- Cache version includes both hot-path and canon version ---
-const CACHE_PREFIX = `nutri:v9:hot:cv:${CANON_VERSION}`; // Bumped to v9 for hot-path
+const CACHE_PREFIX = `nutri:v10:hot:cv:${CANON_VERSION}`; // Bumped to v10 for Phase 2
 const TTL_FINAL_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_AVO_Q_MS = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_AVO_U_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 const TTL_NAME_MS  = 1000 * 60 * 60 * 24 * 7;  // 7 days
 const TTL_BAR_MS   = 1000 * 60 * 60 * 24 * 30; // 30 days
 const KJ_TO_KCAL   = 4.184;
+
+// ---------- PHASE 2: Fallback Nutrition Data ----------
+/**
+ * Generic category-based nutrition estimates for when all tiers fail.
+ * These are conservative estimates per 100g/ml.
+ * Confidence is marked as 'low' or 'very_low' to indicate uncertainty.
+ */
+const FALLBACK_NUTRITION = {
+  grain: { kcal: 350, protein: 10, fat: 2, carbs: 70, fiber: 3, confidence: 'low', description: 'Generic grain/cereal' },
+  protein: { kcal: 180, protein: 25, fat: 8, carbs: 0, fiber: 0, confidence: 'low', description: 'Generic meat/fish' },
+  vegetable: { kcal: 35, protein: 2, fat: 0.5, carbs: 6, fiber: 2, confidence: 'low', description: 'Generic vegetable' },
+  fruit: { kcal: 55, protein: 0.8, fat: 0.3, carbs: 13, fiber: 2, confidence: 'low', description: 'Generic fruit' },
+  dairy: { kcal: 65, protein: 3.5, fat: 3.5, carbs: 5, fiber: 0, confidence: 'low', description: 'Generic dairy' },
+  fat: { kcal: 800, protein: 0, fat: 90, carbs: 0, fiber: 0, confidence: 'low', description: 'Generic oil/fat' },
+  legume: { kcal: 340, protein: 22, fat: 2, carbs: 58, fiber: 15, confidence: 'low', description: 'Generic legume/pulse' },
+  nut: { kcal: 600, protein: 18, fat: 52, carbs: 18, fiber: 8, confidence: 'low', description: 'Generic nut/seed' },
+  supplement: { kcal: 370, protein: 80, fat: 2, carbs: 5, fiber: 0, confidence: 'low', description: 'Generic protein supplement' },
+  sweetener: { kcal: 350, protein: 0, fat: 0, carbs: 90, fiber: 0, confidence: 'low', description: 'Generic sweetener' },
+  condiment: { kcal: 100, protein: 2, fat: 5, carbs: 10, fiber: 0, confidence: 'low', description: 'Generic sauce/condiment' },
+  unknown: { kcal: 150, protein: 5, fat: 5, carbs: 20, fiber: 1, confidence: 'very_low', description: 'Unknown category - conservative estimate' },
+};
+
+/**
+ * Infers the food category from a normalized key using regex patterns.
+ * Used to select appropriate fallback nutrition data.
+ * 
+ * @param {string} normalizedKey - The normalized ingredient key
+ * @returns {string} Category name matching FALLBACK_NUTRITION keys
+ */
+function inferCategoryFromKey(normalizedKey) {
+  const key = (normalizedKey || '').toLowerCase();
+  
+  // Grains/Cereals (check before protein due to 'oat' overlap)
+  if (/rice|pasta|oat|quinoa|couscous|barley|bulgur|farro|bread|cereal|wheat|corn_flake|granola|muesli|noodle|freekeh|spelt|teff|amaranth|millet|buckwheat/.test(key)) {
+    return 'grain';
+  }
+  
+  // Proteins (meat, fish, eggs, tofu)
+  if (/chicken|beef|pork|lamb|turkey|fish|salmon|tuna|prawn|shrimp|egg|tofu|tempeh|duck|goat|veal|venison|mince|steak|fillet|breast|thigh|drumstick|bacon|sausage/.test(key)) {
+    return 'protein';
+  }
+  
+  // Legumes (check before vegetables due to 'bean' overlap)
+  if (/lentil|chickpea|bean(?!_sprout)|pea(?!nut)|dal|dhal/.test(key)) {
+    return 'legume';
+  }
+  
+  // Vegetables
+  if (/broccoli|spinach|carrot|potato(?!_chip)|tomato|onion|pepper|capsicum|zucchini|mushroom|lettuce|cabbage|celery|asparagus|cucumber|corn(?!_flake)|kale|cauliflower|eggplant|aubergine|pumpkin|squash|beetroot|beet/.test(key)) {
+    return 'vegetable';
+  }
+  
+  // Fruits
+  if (/banana|apple|orange|strawberry|blueberry|mango|grape|watermelon|pear|peach|plum|cherry|raspberry|blackberry|kiwi|pineapple|melon|avocado/.test(key)) {
+    return 'fruit';
+  }
+  
+  // Dairy
+  if (/milk|yogurt|yoghurt|cheese|cream(?!_of)|butter|ricotta|feta|mozzarella|cheddar|parmesan|cottage/.test(key)) {
+    return 'dairy';
+  }
+  
+  // Fats/Oils
+  if (/oil|lard|ghee|dripping|tallow|shortening/.test(key)) {
+    return 'fat';
+  }
+  
+  // Nuts/Seeds
+  if (/almond|walnut|cashew|peanut|nut|seed|pecan|pistachio|macadamia|hazelnut|chestnut/.test(key)) {
+    return 'nut';
+  }
+  
+  // Supplements
+  if (/whey|protein_powder|protein_isolate|creatine|maltodextrin|dextrose|bcaa|casein/.test(key)) {
+    return 'supplement';
+  }
+  
+  // Sweeteners
+  if (/sugar|honey|syrup|maple|agave|stevia|sweetener/.test(key)) {
+    return 'sweetener';
+  }
+  
+  // Condiments/Sauces
+  if (/sauce|ketchup|mustard|mayo|dressing|vinegar|soy_sauce|sriracha|salsa/.test(key)) {
+    return 'condiment';
+  }
+  
+  return 'unknown';
+}
+
+/**
+ * Returns fallback nutrition data when all lookup tiers fail.
+ * This ensures we never return 0 macros for an ingredient.
+ * 
+ * @param {string} query - Original query string
+ * @param {function} log - Logger function
+ * @returns {object} Nutrition data object with fallback values
+ */
+function getFallbackNutrition(query, log = console.log) {
+  const normalizedKey = normalizeKey(query);
+  const category = inferCategoryFromKey(normalizedKey);
+  const fallback = FALLBACK_NUTRITION[category] || FALLBACK_NUTRITION.unknown;
+  
+  log(`[NUTRI] FALLBACK USED for '${query}' (category: ${category}, key: ${normalizedKey})`, 'WARN', 'FALLBACK');
+  
+  // Increment stats
+  pipelineStats.fallbackHits++;
+  
+  return {
+    status: 'found',
+    source: 'FALLBACK',
+    servingUnit: '100g',
+    usda_link: null,
+    calories: fallback.kcal,
+    protein: fallback.protein,
+    fat: fallback.fat,
+    carbs: fallback.carbs,
+    fiber: fallback.fiber,
+    confidence: fallback.confidence,
+    inferredCategory: category,
+    matchedKey: normalizedKey,
+    notes: `${fallback.description} - actual values may vary significantly`,
+    isFallback: true,
+  };
+}
+
+// ---------- PHASE 2: Pipeline Telemetry ----------
+/**
+ * Tracks hit rates across pipeline tiers for monitoring and optimization.
+ */
+const pipelineStats = {
+  hotPathHits: 0,
+  canonicalHits: 0,
+  externalHits: 0,
+  cacheHits: 0,
+  fallbackHits: 0,
+  totalQueries: 0,
+  errors: 0,
+  startTime: Date.now(),
+};
+
+/**
+ * Returns current pipeline statistics.
+ * Useful for monitoring tier effectiveness and identifying optimization opportunities.
+ * 
+ * @returns {object} Pipeline statistics
+ */
+function getPipelineStats() {
+  const uptime = (Date.now() - pipelineStats.startTime) / 1000;
+  const total = pipelineStats.totalQueries || 1; // Avoid division by zero
+  
+  return {
+    ...pipelineStats,
+    uptimeSeconds: uptime,
+    hitRates: {
+      hotPath: ((pipelineStats.hotPathHits / total) * 100).toFixed(1) + '%',
+      canonical: ((pipelineStats.canonicalHits / total) * 100).toFixed(1) + '%',
+      external: ((pipelineStats.externalHits / total) * 100).toFixed(1) + '%',
+      cache: ((pipelineStats.cacheHits / total) * 100).toFixed(1) + '%',
+      fallback: ((pipelineStats.fallbackHits / total) * 100).toFixed(1) + '%',
+    },
+  };
+}
+
+/**
+ * Resets pipeline statistics. Useful for testing or periodic resets.
+ */
+function resetPipelineStats() {
+  pipelineStats.hotPathHits = 0;
+  pipelineStats.canonicalHits = 0;
+  pipelineStats.externalHits = 0;
+  pipelineStats.cacheHits = 0;
+  pipelineStats.fallbackHits = 0;
+  pipelineStats.totalQueries = 0;
+  pipelineStats.errors = 0;
+  pipelineStats.startTime = Date.now();
+}
 
 // ---------- KV + Memory cache ----------
 const kv = createClient({ url: KV_URL, token: KV_TOKEN });
@@ -102,6 +279,7 @@ function lookupHotPath(query, log = console.log) {
   
   if (result) {
     log(`[NUTRI] HOT-PATH HIT for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'HOT_PATH');
+    pipelineStats.hotPathHits++;
     return result;
   }
   
@@ -129,6 +307,7 @@ function lookupCanonical(query, log = console.log) {
   if (canonData) {
     const latency = Date.now() - startTime;
     log(`[NUTRI] CANONICAL HIT (exact) for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'CANON');
+    pipelineStats.canonicalHits++;
     return transformCanonToOutput(canonData, normalizedKey);
   }
   
@@ -140,6 +319,7 @@ function lookupCanonical(query, log = console.log) {
     if (canonData) {
       const latency = Date.now() - startTime;
       log(`[NUTRI] CANONICAL HIT (fuzzy: ${normalizedKey} → ${candidate}) for: ${query} [${latency}ms]`, 'INFO', 'CANON');
+      pipelineStats.canonicalHits++;
       return transformCanonToOutput(canonData, candidate);
     }
   }
@@ -152,6 +332,7 @@ function lookupCanonical(query, log = console.log) {
       if (canonData) {
         const latency = Date.now() - startTime;
         log(`[NUTRI] CANONICAL HIT (Levenshtein: ${normalizedKey} → ${fuzzyMatch.key}, distance: ${fuzzyMatch.distance}) for: ${query} [${latency}ms]`, 'INFO', 'CANON');
+        pipelineStats.canonicalHits++;
         return transformCanonToOutput(canonData, fuzzyMatch.key);
       }
     }
@@ -354,9 +535,23 @@ async function usdaByQuery(q) {
 }
 
 // ---------- MAIN FETCH FUNCTION with Optimized Pipeline ----------
+/**
+ * Main nutrition lookup function with tiered pipeline.
+ * Pipeline order: HOT-PATH → Canonical → Cache → External APIs → FALLBACK
+ * 
+ * PHASE 2 UPDATE: Now includes fallback tier to prevent 0-macro items.
+ * 
+ * @param {string} barcode - Optional barcode for lookup
+ * @param {string} query - Ingredient name query
+ * @param {function} log - Logger function
+ * @returns {object} Nutrition data (guaranteed to have non-zero values)
+ */
 async function fetchNutritionData(barcode, query, log = console.log) {
   const overallStart = Date.now();
   query = normFood(query);
+  
+  // Increment total queries
+  pipelineStats.totalQueries++;
   
   // --- TIER 1: HOT-PATH (Target: <5ms) ---
   if (query) {
@@ -384,6 +579,7 @@ async function fetchNutritionData(barcode, query, log = console.log) {
   if (cached) {
     const totalLatency = Date.now() - overallStart;
     log(`[NUTRI] Pipeline complete (CACHE) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
+    pipelineStats.cacheHits++;
     return cached;
   }
   
@@ -403,20 +599,19 @@ async function fetchNutritionData(barcode, query, log = console.log) {
   if (!out && barcode) out = await offByBarcode(barcode);
   if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
   
+  // --- PHASE 2: TIER 6 - FALLBACK (Never return 0 macros) ---
   if (!out) {
-    out = { 
-      status: 'not_found', 
-      source: 'error', 
-      reason: 'no_source_succeeded',
-      searchedKey: query ? normalizeKey(query) : null,
-      usda_link: null 
-    };
+    log(`[NUTRI] All external tiers failed for '${query || barcode}', using FALLBACK`, 'WARN', 'PIPELINE');
+    out = getFallbackNutrition(query || barcode, log);
+  } else {
+    // External API succeeded
+    pipelineStats.externalHits++;
   }
 
   await cacheSet(finalKey, out, TTL_FINAL_MS);
   
   const totalLatency = Date.now() - overallStart;
-  log(`[NUTRI] Pipeline complete (EXTERNAL) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
+  log(`[NUTRI] Pipeline complete (${out.source}) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
   
   return out;
 }
@@ -435,10 +630,16 @@ module.exports = async (req, res) => {
     return res.status(404).json(data);
   } catch (e) {
     console.error('nutrition-search handler error', e);
+    pipelineStats.errors++;
     return res.status(500).json({ status: 'error', message: e.message });
   }
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
 module.exports.getHotPathStats = getHotPathStats;
+module.exports.getPipelineStats = getPipelineStats;
+module.exports.resetPipelineStats = resetPipelineStats;
+module.exports.inferCategoryFromKey = inferCategoryFromKey;
+module.exports.getFallbackNutrition = getFallbackNutrition;
+module.exports.FALLBACK_NUTRITION = FALLBACK_NUTRITION;
 /// ========= NUTRITION-SEARCH-OPTIMIZED-END ========= \\\\
