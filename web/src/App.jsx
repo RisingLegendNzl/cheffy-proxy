@@ -259,6 +259,12 @@ const App = () => {
                     setIsLogOpen={logic.isLogOpen} 
                     latestLog={logic.latestLog}
                     
+                    // NEW: Macro Debug Log props (with defensive defaults)
+                    macroDebug={logic.macroDebug || {}}
+                    showMacroDebugLog={logic.showMacroDebugLog ?? false}
+                    setShowMacroDebugLog={logic.setShowMacroDebugLog || (() => {})}
+                    handleDownloadMacroDebugLogs={logic.handleDownloadMacroDebugLogs || (() => {})}
+                    
                     // Generation State
                     generationStepKey={logic.generationStepKey}
                     generationStatus={logic.generationStatus}
