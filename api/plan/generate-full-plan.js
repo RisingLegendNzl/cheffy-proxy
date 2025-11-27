@@ -508,11 +508,12 @@ function runSmarterChecklist(product, ingredientData, log) {
         return { pass: false, score: 0 };
     }
 
-    // 4. Category (Not yet implemented in API response)
-    // if (!passCategory(product, allowedCategories)) {
-    //      log(`${checkLogPrefix}: FAIL (Category Mismatch: "${product.product_category}" not in [${(allowedCategories || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
-    //      return { pass: false, score: 0 };
-    // }
+    // 4. Category (Not yet implemented in API response - keeping day.js logic for now)
+    // In day.js, the LLM provides allowedCategories which we use here.
+    if (!passCategory(product, allowedCategories)) {
+         log(`${checkLogPrefix}: FAIL (Category Mismatch: "${product.product_category}" not in [${(allowedCategories || []).join(', ')}])`, 'DEBUG', 'CHECKLIST');
+         return { pass: false, score: 0 };
+    }
     
     // 5. Size Check (skip for produce/fruit/veg)
     const isProduceOrFruit = (allowedCategories || []).some(c => c === 'fruit' || c === 'produce' || c === 'veg');
@@ -1056,6 +1057,148 @@ async function generateChefInstructions(meal, store, log) {
 
 /// ===== API-CALLERS-END ===== ////
 
+
+// --- Market Run Logic (Copied from day.js) ---
+const processSingleIngredientOptimized = async (ingredient) => {
+    // Note: 'store' is available in the outer scope of the main handler.
+    // Note: 'log' is available in the outer scope of the main handler.
+    let telemetry = { name: ingredient.originalIngredient, used: 'none', score: 0, page: 1 };
+    try {
+        if (!ingredient || !ingredient.originalIngredient) {
+            log(`Market Run: Skipping invalid ingredient data`, 'WARN', 'MARKET_RUN', { ingredient });
+            return { _error: true, itemKey: 'unknown_invalid', message: 'Invalid ingredient data' };
+        }
+        const ingredientKey = ingredient.originalIngredient;
+        
+        if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories) || ingredient.allowedCategories.length === 0) {
+            log(`[${ingredientKey}] Skipping: Missing critical fields (normalQuery/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
+            return { [ingredientKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
+        }
+        
+        const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
+        const qn = ingredient.normalQuery;
+        const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, ingredient.store); // Use ingredient.store (passed from LLM) or infer from outer scope
+        const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, ingredient.store);
+        
+        const queriesToTry = [ { type: 'tight', query: qt }, { type: 'normal', query: qn }, { type: 'wide', query: qw } ].filter(q => q.query && q.query.trim());
+        
+        log(`[${ingredientKey}] Queries: Tight (${qt ? (ingredient.tightQuery ? 'AI' : 'Synth') : 'N/A'}), Normal (AI), Wide (${qw ? (ingredient.wideQuery ? 'AI' : 'Synth') : 'N/A'})`, 'DEBUG', 'MARKET_RUN');
+        
+        let acceptedQueryType = 'none';
+        let bestScore = 0;
+
+        for (const [index, { type, query }] of queriesToTry.entries()) {
+            if (type === 'normal' && acceptedQueryType !== 'none') {
+                continue; 
+            }
+            if (type === 'wide') {
+                if (acceptedQueryType !== 'none') continue;
+                const isFailFastCategory = ingredient.allowedCategories.some(c => FAIL_FAST_CATEGORIES.includes(c));
+                if (isFailFastCategory) {
+                    log(`[${ingredientKey}] Skipping "wide" query due to fail-fast category.`, 'DEBUG', 'MARKET_RUN');
+                    continue;
+                }
+            }
+
+            log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
+            result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
+            const currentAttemptLog = result.searchAttempts.at(-1);
+
+            // NOTE: The store variable from the outer scope is captured here.
+            const { data: priceData } = await fetchPriceData(store, query, 1, log);
+
+            if (priceData.error) {
+                log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
+                currentAttemptLog.status = 'fetch_error'; 
+                continue;
+            }
+            
+            const rawProducts = priceData.results || [];
+            currentAttemptLog.rawCount = rawProducts.length;
+            const validProductsOnPage = [];
+            
+            for (const rawProduct of rawProducts) {
+                if (!rawProduct || !rawProduct.product_name) continue;
+                const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
+                if (checklistResult.pass) {
+                    validProductsOnPage.push({ 
+                        product: { 
+                            name: rawProduct.product_name, 
+                            brand: rawProduct.product_brand, 
+                            price: rawProduct.current_price, 
+                            size: rawProduct.product_size, 
+                            url: rawProduct.url, 
+                            barcode: rawProduct.barcode, 
+                            unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) 
+                        }, 
+                        score: checklistResult.score
+                    });
+                }
+            }
+            
+            const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
+            currentAttemptLog.foundCount = filteredProducts.length;
+            const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
+            currentAttemptLog.bestScore = currentBestScore;
+
+            if (filteredProducts.length > 0) {
+                log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
+                const currentUrls = new Set(result.allProducts.map(p => p.url));
+                filteredProducts.forEach(vp => { 
+                    if (!currentUrls.has(vp.product.url)) { 
+                        result.allProducts.push(vp.product); 
+                    } 
+                });
+
+                if (result.allProducts.length > 0) {
+                    const foundProduct = result.allProducts.reduce((best, current) => (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best, result.allProducts[0]);
+                    result.currentSelectionURL = foundProduct.url;
+                    result.source = 'discovery';
+                    currentAttemptLog.status = 'success';
+                    
+                    if (acceptedQueryType === 'none') {
+                        acceptedQueryType = type;
+                        bestScore = currentBestScore;
+                    }
+
+                    if (type === 'tight' && currentBestScore >= SKIP_STRONG_MATCH_THRESHOLD) {
+                        log(`[${ingredientKey}] Skip heuristic hit (Strong tight match).`, 'INFO', 'MARKET_RUN');
+                        break; 
+                    }
+                    if (type === 'normal') {
+                        log(`[${ingredientKey}] Found valid 'normal' match. Stopping search.`, 'DEBUG', 'MARKET_RUN');
+                        break;
+                    }
+                } else { 
+                    currentAttemptLog.status = 'no_match_post_filter'; 
+                }
+            } else { 
+                log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA'); 
+                currentAttemptLog.status = 'no_match'; 
+            }
+        }
+        
+        if (result.source === 'failed') { 
+            log(`[${ingredientKey}] Market Run failed after trying all queries.`, 'WARN', 'MARKET_RUN'); 
+        } else { 
+            log(`[${ingredientKey}] Market Run success via '${acceptedQueryType}' query.`, 'DEBUG', 'MARKET_RUN'); 
+        }
+
+        telemetry.used = acceptedQueryType;
+        telemetry.score = bestScore;
+        log(`[${ingredientKey}] Market Run Telemetry`, 'INFO', 'MARKET_RUN', telemetry);
+
+        return { [ingredientKey]: result };
+
+    } catch(e) {
+        log(`CRITICAL Error in processSingleIngredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
+        return { _error: true, itemKey: ingredient?.originalIngredient || 'unknown_error', message: `Internal Market Run Error: ${e.message}` };
+    }
+};
+
+// --- End Market Run Logic ---
+
+
 /// ===== MAIN-HANDLER-START ===== \\
 module.exports = async (request, response) => {
     const planStartTime = Date.now();
@@ -1202,12 +1345,14 @@ module.exports = async (request, response) => {
                      allowedCategories: ['pantry', 'produce', 'meat', 'dairy', 'frozen']
                  };
             }
+            // CRITICAL: Ensure the store is included in the ingredient object for the market runner's synthTight/synthWide to work
             return {
                 ...planDetails, // Contains LLM-generated query data
                 normalizedKey: aggItem.normalizedKey,
                 totalGramsRequired: aggItem.requested_total_g, // Overwrite LLM estimate with our sum
                 dayRefs: aggItem.dayRefs,
-                stateHint: aggItem.stateHint // MOD ZONE 1.3: Pass stateHint
+                stateHint: aggItem.stateHint, // MOD ZONE 1.3: Pass stateHint
+                store: store // Pass store name explicitly
             };
         });
 
@@ -1270,7 +1415,6 @@ module.exports = async (request, response) => {
                 });
             }
         }
-        // FIX: Replaced corrupted code with correct syntax
         sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.now() - priceExtractStartTime });
 
 
