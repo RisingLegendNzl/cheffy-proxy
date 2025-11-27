@@ -1,7 +1,7 @@
 /**
  * Cheffy Orchestrator
  * Enhanced Key Normalization Utility (CommonJS)
- * Version: 2.2.0 - Phase 3 Update: Expanded Synonym Coverage (RFC-003)
+ * Version: 2.3.0 - Phase 4 Update: Massive Synonym Coverage (Rice, Asian, Baking)
  * * PHASE 1 UPDATE (2025): Expanded SYNONYM_MAP to eliminate orphan keys
  * - Added comprehensive oats/grain mappings
  * - Added milk variations (including plant milks)
@@ -41,19 +41,22 @@ const SYNONYM_MAP = {
   'overnight_oats': 'rolled_oats',        // PHASE 1: Same base ingredient
 
   // =====================================================================
-  // RICE - Comprehensive coverage (PHASE 1 EXPANSION)
+  // RICE - Comprehensive coverage (PHASE 1/4 EXPANSION)
   // =====================================================================
   'rice': 'white_rice',                   // PHASE 1: Generic defaults to white
   'white_rice': 'white_rice',
   'brown_rice': 'brown_rice',
-  'jasmine_rice': 'jasmine_rice',          // RFC-003: Identity - has own hot-path entry
-  'basmati_rice': 'white_rice',            // RFC-003: Maps to white rice
-  'sushi_rice': 'white_rice',
-  'short_grain_rice': 'white_rice',
+  'jasmine_rice': 'jasmine_rice',          // MOD ZONE 2: Identity
+  'thai_jasmine_rice': 'jasmine_rice',     // MOD ZONE 2: Alias
+  'basmati_rice': 'basmati_rice',          // MOD ZONE 2: Identity
+  'basmati': 'basmati_rice',               // MOD ZONE 2: Alias
+  'sushi_rice': 'sushi_rice',              // MOD ZONE 2: Identity
+  'japanese_rice': 'sushi_rice',           // MOD ZONE 2: Alias
+  'short_grain_rice': 'sushi_rice',        // MOD ZONE 2: Alias
   'long_grain_rice': 'white_rice',
-  'cooked_rice': 'cooked_rice',            // RFC-003: Identity - has own hot-path entry
-  'cooked_white_rice': 'cooked_white_rice', // RFC-003: Identity - has own hot-path entry
-  'steamed_rice': 'cooked_rice',           // RFC-003: Alias
+  'cooked_rice': 'cooked_rice',            // MOD ZONE 2: Identity
+  'steamed_rice': 'cooked_rice',           // MOD ZONE 2: Alias
+  'cooked_white_rice': 'cooked_white_rice',// MOD ZONE 2: Identity
   'arborio_rice': 'white_rice',           // PHASE 1: Risotto rice
   'arborio': 'white_rice',                // PHASE 1
   'wild_rice': 'wild_rice',               // PHASE 1: Different nutrition profile
@@ -460,7 +463,7 @@ const SYNONYM_MAP = {
   'water': 'water',
 
   // =====================================================================
-  // ASIAN INGREDIENTS (RFC-003)
+  // ASIAN INGREDIENTS (MOD ZONE 1)
   // =====================================================================
   'dashi': 'dashi',
   'dashi_stock': 'dashi',
@@ -469,31 +472,54 @@ const SYNONYM_MAP = {
   'fish_stock': 'dashi',
   'nori': 'nori',
   'nori_seaweed': 'nori',
-  'nori_sheet': 'nori',
+  'nori_sheet': 'nori',                    // MOD ZONE 1: Alias
+  'nori_sheets': 'nori',                   // MOD ZONE 1: Alias (Plural)
   'seaweed_sheet': 'nori',
   'dried_seaweed': 'nori',
   'teriyaki_sauce': 'teriyaki_sauce',
   'teriyaki': 'teriyaki_sauce',
+  'mirin': 'mirin',
+  'sake': 'sake',
+  'miso': 'miso_paste',
+  'miso_paste': 'miso_paste',
+  'white_miso': 'miso_paste',
+  'red_miso': 'miso_paste',
+  'wakame': 'wakame',
+
 
   // =====================================================================
-  // COATINGS & BREADCRUMBS (RFC-003)
+  // COATINGS & BREADCRUMBS (MOD ZONE 3)
   // =====================================================================
   'panko': 'panko_breadcrumbs',
+  'panko_crumbs': 'panko_breadcrumbs',
   'panko_breadcrumbs': 'panko_breadcrumbs',
   'panko_breadcrumb': 'panko_breadcrumbs',
   'japanese_breadcrumbs': 'panko_breadcrumbs',
   'breadcrumbs': 'breadcrumbs',
-  'breadcrumb': 'breadcrumbs',
   'bread_crumbs': 'breadcrumbs',
+  'breadcrumb': 'breadcrumbs',
+  'flour': 'flour',
+  'plain_flour': 'flour',
+  'all_purpose_flour': 'flour',
+  'ap_flour': 'flour',
+  'cornstarch': 'cornstarch',
+  'corn_starch': 'cornstarch',
+  'corn_flour': 'cornstarch',
+  'potato_starch': 'potato_starch',
 
   // =====================================================================
-  // SPICES & CURRY (RFC-003)
+  // SPICES & CURRY (MOD ZONE 4)
   // =====================================================================
   'curry_powder': 'curry_powder',
   'curry': 'curry_powder',
+  'curry_spice': 'curry_powder',
   'japanese_curry': 'japanese_curry_roux',
   'curry_roux': 'japanese_curry_roux',
   'curry_block': 'japanese_curry_roux',
+  'goldencurry': 'japanese_curry_roux',
+  'garam_masala': 'garam_masala',
+  'curry_paste': 'curry_paste',
+
 
   // =====================================================================
   // SUPPLEMENTS / PERFORMANCE (PHASE 1)
@@ -631,8 +657,8 @@ function normalizeKey(name) {
     key !== 'baked_beans' &&              // PHASE 1: Preserve baked_beans
     key !== 'corn_flakes' &&              // PHASE 1: Preserve corn_flakes
     key !== 'egg_noodles' &&              // PHASE 1: Preserve egg_noodles
-    key !== 'panko_breadcrumbs' &&        // RFC-003: Preserve panko_breadcrumbs
-    key !== 'breadcrumbs' &&              // RFC-003: Preserve breadcrumbs
+    key !== 'panko_breadcrumbs' &&        // MOD ZONE 5.1: Preserve panko_breadcrumbs
+    key !== 'breadcrumbs' &&              // MOD ZONE 5.2: Preserve breadcrumbs
     key.length > 2
   ) {
     key = key.slice(0, -1); // e.g., apples -> apple
