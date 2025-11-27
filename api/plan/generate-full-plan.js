@@ -1,13 +1,13 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
-// [NEW] Hybrid Batched Orchestrator (V13.3 - Sequential Meal Gen)
+// [NEW] Hybrid Batched Orchestrator (V14.0 - Ingredient-Centric Architecture)
 // Implements the "full plan" architecture:
 // 1. Compute Targets (passed in)
-// 2. [MODIFIED] Generate ALL meals (sequentially, 1 day at a time)
+// 2. Generate ALL meals
 // 3. Aggregate/Dedupe ALL ingredients
 // 4. Run ONE Market Run
-// 5. Run ONE Nutrition Fetch
-// 6. Run Solver (V1) in SHADOW mode
-// 7. Run Reconciler (V0) as LIVE path
+// 5. [NEW] Separate Price Extraction (Mod Zone 3)
+// 6. [NEW] Run ONE Ingredient-Centric Nutrition Fetch (Mod Zone 1 & 2)
+// 7. Run Solver (V1) in SHADOW mode / Reconciler (V0) as LIVE path
 // 8. Assemble and return
 
 /// ===== IMPORTS-START ===== \\
@@ -17,7 +17,8 @@ const { createClient } = require('@vercel/kv');
 
 // Import cache-wrapped microservices
 const { fetchPriceData } = require('../price-search.js');
-const { fetchNutritionData } = require('../nutrition-search.js');
+// IMPORT MODIFICATION: Now importing the ingredient-centric lookup function
+const { fetchNutritionData, lookupIngredientNutrition } = require('../nutrition-search.js'); 
 
 // Import utils
 // Note: Vercel bundles these relative to the project root, hence the `../`
@@ -1178,149 +1179,12 @@ module.exports = async (request, response) => {
         sendEvent('plan:progress', { pct: 35, message: `Running market search...` });
         const marketStartTime = Date.now();
 
-        // 3a. Generate Queries
+        // 3a. Generate Queries (LLM call)
         const groceryQueryData = await generateGroceryQueries_Batched(aggregatedIngredients, store, log);
         const { ingredients: ingredientPlan } = groceryQueryData;
         if (!ingredientPlan || ingredientPlan.length === 0) {
              throw new Error(`Grocery Optimizer AI returned empty ingredients.`);
         }
-        
-        // 3b. Run Market
-        const processSingleIngredientOptimized = async (ingredient) => {
-            let telemetry = { name: ingredient.originalIngredient, used: 'none', score: 0, page: 1 };
-             try {
-                 if (!ingredient || !ingredient.originalIngredient) {
-                     log(`Market Run: Skipping invalid ingredient data`, 'WARN', 'MARKET_RUN', { ingredient });
-                     return { _error: true, itemKey: 'unknown_invalid', message: 'Invalid ingredient data' };
-                 }
-                const ingredientKey = ingredient.originalIngredient;
-                 if (!ingredient.normalQuery || !Array.isArray(ingredient.requiredWords) || !Array.isArray(ingredient.negativeKeywords) || !Array.isArray(ingredient.allowedCategories)) { // Note: allowedCategories can be empty
-                     log(`[${ingredientKey}] Skipping: Missing critical fields (normalQuery/validation)`, 'ERROR', 'MARKET_RUN', ingredient);
-                     return { [ingredient.normalizedKey]: { ...ingredient, source: 'error', error: 'Missing critical query/validation fields', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url } };
-                 }
-                const result = { ...ingredient, allProducts: [], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url, source: 'failed', searchAttempts: [] };
-                
-                // Synthesize queries if LLM didn't provide them
-                const qn = ingredient.normalQuery;
-                const qt = (ingredient.tightQuery && ingredient.tightQuery.trim()) ? ingredient.tightQuery : synthTight(ingredient, store);
-                const qw = (ingredient.wideQuery && ingredient.wideQuery.trim()) ? ingredient.wideQuery : synthWide(ingredient, store);
-                
-                const queriesToTry = [ { type: 'tight', query: qt }, { type: 'normal', query: qn }, { type: 'wide', query: qw } ].filter(q => q.query && q.query.trim());
-                log(`[${ingredientKey}] Queries: Tight (${qt ? (ingredient.tightQuery ? 'AI' : 'Synth') : 'N/A'}), Normal (AI), Wide (${qw ? (ingredient.wideQuery ? 'AI' : 'Synth') : 'N/A'})`, 'DEBUG', 'MARKET_RUN');
-                
-                let acceptedQueryType = 'none';
-                let bestScore = 0;
-
-                for (const [index, { type, query }] of queriesToTry.entries()) {
-                    // --- Ladder Logic ---
-                    if (type === 'normal' && acceptedQueryType !== 'none') continue; // Already found a tight match
-                    if (type === 'wide') {
-                        if (acceptedQueryType !== 'none') continue; // Already found a tight or normal match
-                        // Fail-fast for categories that shouldn't use wide search
-                        const isFailFastCategory = ingredient.allowedCategories.some(c => FAIL_FAST_CATEGORIES.includes(c));
-                        if (isFailFastCategory) {
-                            log(`[${ingredientKey}] Skipping "wide" query due to fail-fast category.`, 'DEBUG', 'MARKET_RUN');
-                            continue;
-                        }
-                    }
-                    // --- End Ladder Logic ---
-
-                    log(`[${ingredientKey}] Attempting "${type}" query: "${query}"`, 'DEBUG', 'HTTP');
-                    result.searchAttempts.push({ queryType: type, query: query, status: 'pending', foundCount: 0});
-                    const currentAttemptLog = result.searchAttempts.at(-1);
-
-                    const { data: priceData } = await fetchPriceData(store, query, 1, log); // Hardcoded page=1
-
-                    if (priceData.error) {
-                        log(`[${ingredientKey}] Fetch failed (${type}): ${priceData.error.message}`, 'WARN', 'HTTP', { status: priceData.error.status });
-                        currentAttemptLog.status = 'fetch_error'; continue;
-                    }
-                    
-                    const rawProducts = priceData.results || [];
-                    currentAttemptLog.rawCount = rawProducts.length;
-                    const validProductsOnPage = [];
-                    
-                    for (const rawProduct of rawProducts) {
-                        if (!rawProduct || !rawProduct.product_name) continue;
-                        const checklistResult = runSmarterChecklist(rawProduct, ingredient, log);
-                        if (checklistResult.pass) {
-                            validProductsOnPage.push({ 
-                                product: { 
-                                    name: rawProduct.product_name, brand: rawProduct.product_brand, price: rawProduct.current_price, 
-                                    size: rawProduct.product_size, url: rawProduct.url, barcode: rawProduct.barcode, 
-                                    unit_price_per_100: calculateUnitPrice(rawProduct.current_price, rawProduct.product_size) 
-                                }, 
-                                score: checklistResult.score
-                            });
-                        }
-                    }
-                    
-                    const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey);
-                    currentAttemptLog.foundCount = filteredProducts.length;
-                    const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
-                    currentAttemptLog.bestScore = currentBestScore;
-
-                    if (filteredProducts.length > 0) {
-                        log(`[${ingredientKey}] Found ${filteredProducts.length} valid (${type}).`, 'INFO', 'DATA');
-                        // Add new, unique products to the list
-                        const currentUrls = new Set(result.allProducts.map(p => p.product.url));
-                        filteredProducts.forEach(vp => { 
-                             // Make sure product URLs are unique before pushing
-                             if (!currentUrls.has(vp.product.url)) { 
-                                result.allProducts.push(vp.product); 
-                             } 
-                        });
-
-                        if (result.allProducts.length > 0) {
-                             // Select the best (cheapest) product from ALL found so far
-                             const foundProduct = result.allProducts.reduce((best, current) => (current.unit_price_per_100 ?? Infinity) < (best.unit_price_per_100 ?? Infinity) ? current : best, result.allProducts[0]);
-                             result.currentSelectionURL = foundProduct.url;
-                             result.source = 'discovery';
-                             currentAttemptLog.status = 'success';
-                             
-                             if (acceptedQueryType === 'none') {
-                                 acceptedQueryType = type;
-                                 bestScore = currentBestScore;
-                             }
-                             
-                             // --- Ladder Logic ---
-                             // If it's a strong tight match, stop searching
-                             if (type === 'tight' && currentBestScore >= SKIP_STRONG_MATCH_THRESHOLD) {
-                                 log(`[${ingredientKey}] Skip heuristic hit (Strong tight match).`, 'INFO', 'MARKET_RUN');
-                                 break; 
-                             }
-                             // If it's a normal match, stop searching
-                             if (type === 'normal') {
-                                 log(`[${ingredientKey}] Found valid 'normal' match. Stopping search.`, 'DEBUG', 'MARKET_RUN');
-                                 break;
-                             }
-                             // --- End Ladder Logic ---
-                        } else { currentAttemptLog.status = 'no_match_post_filter'; }
-                    } else { log(`[${ingredientKey}] No valid products (${type}).`, 'WARN', 'DATA'); currentAttemptLog.status = 'no_match'; }
-                } // end query loop
-                
-                // Final status update
-                if (result.source === 'failed') { 
-                    log(`[${ingredientKey}] Market Run failed after trying all queries.`, 'WARN', 'MARKET_RUN');
-                    sendEvent('ingredient:failed', { key: ingredient.normalizedKey, reason: 'No product match found.' });
-                } else { 
-                    log(`[${ingredientKey}] Market Run success via '${acceptedQueryType}' query.`, 'DEBUG', 'MARKET_RUN');
-                    sendEvent('ingredient:found', { key: ingredient.normalizedKey, data: { ...ingredient, ...result } });
-                }
-
-                // Log telemetry
-                telemetry.used = acceptedQueryType;
-                telemetry.score = bestScore;
-                log(`[${ingredientKey}] Market Run Telemetry`, 'INFO', 'MARKET_RUN_TELEMETRY', telemetry);
-
-                return { [ingredient.normalizedKey]: result };
-
-            } catch(e) {
-                log(`CRITICAL Error in processSingleIngredient "${ingredient?.originalIngredient}": ${e.message}`, 'CRITICAL', 'MARKET_RUN', { stack: e.stack?.substring(0, 300) });
-                 sendEvent('ingredient:failed', { key: ingredient.normalizedKey, reason: e.message });
-                 return { _error: true, itemKey: ingredient?.originalIngredient || 'unknown_error', message: `Internal Market Run Error: ${e.message}` };
-            }
-        };
         
         // Map aggregated plan to full plan details
         const fullIngredientPlan = aggregatedIngredients.map(aggItem => {
@@ -1334,7 +1198,6 @@ module.exports = async (request, response) => {
                      requiredWords: aggItem.originalIngredient.split(' ').slice(0,1),
                      negativeKeywords: [],
                      allowedCategories: ['pantry', 'produce', 'meat', 'dairy', 'frozen']
-                     // targetSize will be null, which is fine
                  };
             }
             return {
@@ -1344,18 +1207,17 @@ module.exports = async (request, response) => {
                 dayRefs: aggItem.dayRefs
             };
         });
-        
-        // Execute market run in parallel
+
+        // 3b. Execute market run in parallel
         const parallelResultsArray = await concurrentlyMap(fullIngredientPlan, MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
-        sendEvent('plan:progress', { pct: 60, message: `Market search complete...` });
+        sendEvent('plan:progress', { pct: 50, message: `Market search complete...` });
         
-        // Collate market results
+        // Collate market results (fullResultsMap still needed to map key to selected product)
         const fullResultsMap = new Map(); // Map<normalizedKey, result>
         parallelResultsArray.forEach(currentResult => {
              if (currentResult._error) {
                  log(`Market Run Item Error for "${currentResult.itemKey}": ${currentResult.message}`, 'WARN', 'MARKET_RUN');
                  const planItem = fullIngredientPlan.find(i => i.originalIngredient === currentResult.itemKey);
-                 // Ensure we have a base item even if the plan was bad
                  const baseData = planItem || { originalIngredient: currentResult.itemKey, normalizedKey: normalizeKey(currentResult.itemKey) };
                  fullResultsMap.set(baseData.normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
                  return;
@@ -1376,43 +1238,65 @@ module.exports = async (request, response) => {
         sendEvent('phase:end', { name: 'market', duration_ms: market_run_ms, itemsFound: Array.from(fullResultsMap.values()).filter(v => v.source === 'discovery').length });
 
 
-        // --- Phase 4: Nutrition Fetch ---
-        sendEvent('phase:start', { name: 'nutrition', description: 'Fetching nutrition data...' });
-        sendEvent('plan:progress', { pct: 75, message: `Fetching nutrition data...` });
-        const nutritionStartTime = Date.now();
-        const itemsToFetchNutrition = [];
-        const nutritionDataMap = new Map(); // Map<normalizedKey, nutritionData>
+        // --- Phase 3.5: Price Extraction (Mod Zone 3) ---
+        sendEvent('phase:start', { name: 'price_extract', description: 'Extracting price data...' });
+        const priceExtractStartTime = Date.now();
+        const priceDataMap = new Map(); 
 
-        // 4a. Gather items that need nutrition fetching
         for (const [normalizedKey, result] of fullResultsMap.entries()) {
-            if (result.source === 'discovery' && result.currentSelectionURL && Array.isArray(result.allProducts)) {
-                const selected = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
-                if (selected) {
-                    // Step 4 & 6: Fix the query field to use the ingredient name (RFC-006) and log
-                    itemsToFetchNutrition.push({ 
-                        ingredientKey: result.originalIngredient, 
-                        normalizedKey: normalizedKey, 
-                        barcode: selected.barcode, 
-                        // RFC-006: Use ingredient name, not supermarket product name
-                        // This ensures hot-path and canonical lookups match correctly
-                        query: result.originalIngredient
-                    });
-                    log(`[NUTRI_FETCH] Queuing: key=${normalizedKey}, query="${result.originalIngredient}", barcode=${selected.barcode || 'none'}`, 'DEBUG', 'NUTRITION');
-                }
+            const selected = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
+            
+            if (selected) {
+                priceDataMap.set(normalizedKey, {
+                    price: selected.price || 0,
+                    url: selected.url,
+                    store: store,
+                    packSize: selected.size, 
+                    unitPrice: selected.unit_price_per_100 || 0,
+                    productName: selected.name || result.originalIngredient
+                });
+            } else {
+                 // Even if no product was found, create an entry with zero price data
+                 priceDataMap.set(normalizedKey, {
+                    price: 0,
+                    url: MOCK_PRODUCT_TEMPLATE.url,
+                    store: store,
+                    packSize: 'N/A', 
+                    unitPrice: 0,
+                    productName: result.originalIngredient
+                });
             }
         }
+        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.now() - priceExtractStartTime });
+
+
+        // --- Phase 4: Nutrition Fetch (Mod Zone 1 & 2: Ingredient-Centric) ---
+        sendEvent('phase:start', { name: 'nutrition', description: 'Fetching ingredient nutrition data...' });
+        sendEvent('plan:progress', { pct: 75, message: `Fetching nutrition data...` });
+        const nutritionStartTime = Date.now();
+        const nutritionDataMap = new Map(); // Map<normalizedKey, nutritionData>
+        let canonicalHitsToday = 0; // Keep tracking canonical fallbacks
+
+        // 4a. Gather items that need nutrition fetching (ALL aggregated items)
+        const itemNutritionRequests = aggregatedIngredients.map(item => ({
+            normalizedKey: item.normalizedKey,
+            query: item.originalIngredient,
+        }));
         
-        // 4b. Fetch in parallel
-        let canonicalHitsToday = 0; // Move outside the loop for global tracking
-        if (itemsToFetchNutrition.length > 0) {
-            log(`Fetching nutrition for ${itemsToFetchNutrition.length} items...`, 'INFO', 'HTTP');
-            const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, NUTRITION_CONCURRENCY, async (item) => {
+        // 4b. Fetch in parallel using the ingredient-centric lookup
+        if (itemNutritionRequests.length > 0) {
+            log(`Fetching nutrition for ${itemNutritionRequests.length} unique ingredients...`, 'INFO', 'HTTP');
+            const nutritionResults = await concurrentlyMap(itemNutritionRequests, NUTRITION_CONCURRENCY, async (item) => {
                  try {
-                     // Step 5: Verify the fetch call uses query correctly (it does: item.query now contains the ingredient name)
-                     const nut = (item.barcode || item.query) ? await fetchNutritionData(item.barcode, item.query, log) : { status: 'not_found', source: 'no_query' };
+                     // MOD ZONE 2: Call Ingredient-Centric Lookup
+                     const nut = await lookupIngredientNutrition(item.query, log); 
+                     
+                     // Check if it's a Canonical hit for telemetry
+                     if (nut?.source === 'canonical') canonicalHitsToday++;
+                     
                      return { ...item, nut };
                  } catch (err) {
-                     log(`Nutrition fetch error for ${item.ingredientKey}: ${err.message}`, 'WARN', 'HTTP');
+                     log(`Nutrition fetch error for ${item.query}: ${err.message}`, 'WARN', 'HTTP');
                      return { ...item, nut: { status: 'not_found', source: 'error', error: `Nutrition fetch failed: ${err.message}` } };
                  }
              });
@@ -1420,34 +1304,14 @@ module.exports = async (request, response) => {
             nutritionResults.forEach(item => {
                  if (item && item.normalizedKey && item.nut) {
                     nutritionDataMap.set(item.normalizedKey, item.nut);
-                     // Attach nutrition data back to the *product* in the main results map
-                     const result = fullResultsMap.get(item.normalizedKey);
-                     if (result && result.source === 'discovery' && Array.isArray(result.allProducts)) {
-                         let productToAttach = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
-                         if (productToAttach) productToAttach.nutrition = item.nut;
-                     }
+                     
+                    // IMPORTANT: We NO LONGER ATTACH NUTRITION TO THE PRODUCT (fullResultsMap)
+                    // The macro calculation (Phase 5) now reads directly from nutritionDataMap.
                  }
             });
         }
         
-        // 4d. Nutrition Fallback (Canonical)
-        // For any item that failed the market run OR its nutrition fetch, try the canonical DB
-        for (const [normalizedKey, result] of fullResultsMap.entries()) {
-             const hasNutri = nutritionDataMap.has(normalizedKey) && nutritionDataMap.get(normalizedKey).status === 'found';
-             if (!hasNutri) {
-                 // Try to get canonical data using the *original* ingredient name
-                 const canonicalNutrition = await fetchNutritionData(null, result.originalIngredient, log);
-                 if (canonicalNutrition?.status === 'found' && canonicalNutrition.source === 'CANON') {
-                     log(`[${result.originalIngredient}] Using CANONICAL fallback.`, 'DEBUG', 'CALC');
-                     nutritionDataMap.set(normalizedKey, canonicalNutrition); 
-                     canonicalHitsToday++;
-                     // If the item failed the market run, update its source
-                     if (result.source !== 'discovery') {
-                         result.source = 'canonical_fallback';
-                     }
-                 }
-             }
-         }
+        // 4d. Canonical Fallback count is now tracked inside the lookup, so we log the total here
         if (canonicalHitsToday > 0) log(`Used ${canonicalHitsToday} canonical fallbacks.`, 'INFO', 'CALC');
         
         nutrition_ms = Date.now() - nutritionStartTime;
@@ -1495,9 +1359,11 @@ module.exports = async (request, response) => {
                 per100: { kcal: null, protein: null, fat: null, carbs: null },
                 computedMacros: { calories: 0, protein: 0, fat: 0, carbs: 0 },
                 source: 'missing',
-                notes: null
+                notes: null,
+                lookupMethod: 'ingredient-centric' // MOD ZONE 4.1: Flag new method
              };
              
+             // ... (rest of initial checks) ...
              if (!Number.isFinite(gramsInput) || gramsInput < 0 || gramsInput === 0) {
                  if (gramsInput !== 0) {
                     log(`[MACRO_DEBUG] Invalid quantity for item '${item.key}'.`, 'ERROR', 'CALC', { item, gramsInput });
@@ -1524,7 +1390,6 @@ module.exports = async (request, response) => {
                  const fatPer100 = Number(nutritionData.fat || nutritionData.fat_g_per_100g) || 0;
                  const carbsPer100 = Number(nutritionData.carbs || nutritionData.carb_g_per_100g) || 0;
 
-                 // Step 2: Fix kcal field extraction (RFC-001)
                  // RFC-001: calories is the primary field from nutrition-search.js
                  // Fallback chain: calories → kcal → kcal_per_100g → reconstruct from macros
                  const kcalPer100 = 
@@ -1544,7 +1409,13 @@ module.exports = async (request, response) => {
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
                  
-                 source = nutritionData.source === 'CANON' ? 'canonical' : 'external';
+                 source = nutritionData.source.toLowerCase().includes('canon') ? 'canonical' : nutritionData.source.toLowerCase().includes('fall') ? 'fallback' : 'external';
+                 debugItem.source = source;
+                 
+                 // MOD ZONE 4.2: Log warning if an external API was used
+                 if (source === 'external' && gramsInput > 0) {
+                     log(`[MACRO_DEBUG] WARNING: External API used for '${item.key}'. Potential for macro drift. Source: ${nutritionData.source}`, 'WARN', 'CALC');
+                 }
              } else { 
                 if (gramsInput > 0) {
                    log(`[MACRO_DEBUG] No nutrition found for '${item.key}'. Macros set to 0.`, 'WARN', 'CALC', { normalizedKey }); 
@@ -1560,8 +1431,6 @@ module.exports = async (request, response) => {
              }
              
              // 5. Calculate final kcal
-             // Use the calculated macros (p, f, c) derived from Per100 values to calculate the final kcal
-             // Note: If kcalPer100 was reconstructed, this should match it, but this is the calculation for the final portion.
              kcal = (p * 4) + (f * 9) + (c * 4);
 
              // Populate debug computed macros
@@ -1571,7 +1440,6 @@ module.exports = async (request, response) => {
              debugItem.computedMacros.carbs = c;
              
              // 6. Set Final Source and Log Anomalies
-             debugItem.source = source;
              
              if (kcal === 0 && gramsInput > 0) {
                  // Log anomaly: Zero-calorie item with non-zero quantity (Rule 4)
@@ -1810,6 +1678,17 @@ module.exports = async (request, response) => {
         
         // Clean up meal objects for the frontend
         let totalCalories = 0, totalProtein = 0, totalFat = 0, totalCarbs = 0;
+        
+        // MOD ZONE 3 Finalize: Attach price data to final unique ingredient list
+        const finalUniqueIngredients = aggregatedIngredients.map(({ normalizedKey, dayRefs, ...rest }) => {
+             const priceData = priceDataMap.get(normalizedKey);
+             return {
+                 ...rest,
+                 dayRefs: Array.from(dayRefs), // Convert Set to Array
+                 market: priceData || { price: 0, url: MOCK_PRODUCT_TEMPLATE.url, productName: rest.originalIngredient, unitPrice: 0 }
+             };
+        });
+
 
         finalMealPlan.forEach(day => {
             // Store rounded totals separately for frontend consumption
@@ -1859,11 +1738,10 @@ module.exports = async (request, response) => {
         const responseData = {
             message: `Successfully generated full ${numDays}-day plan.`,
             mealPlan: finalMealPlan,
-            results: Object.fromEntries(fullResultsMap.entries()),
-            uniqueIngredients: aggregatedIngredients.map(({ normalizedKey, dayRefs, ...rest }) => ({
-                ...rest,
-                dayRefs: Array.from(dayRefs) // Convert Set to Array
-            })),
+            // REMOVED fullResultsMap (product-centric market run data)
+            // Replaced with finalUniqueIngredients which includes price data
+            results: finalUniqueIngredients, // MOD ZONE 3 Finalize: Attach price data
+            uniqueIngredients: finalUniqueIngredients,
             // [NEW] Macro Debug Payload (Rule 1)
             macroDebug: {
                 days: macroDebugDaysData,
