@@ -1,5 +1,5 @@
 /**
- * Cheffy Orchestrator (V12.2)
+ * Cheffy Orchestrator (V14.0)
  * Cooking Transforms & Nutrition Calculation Logic
  *
  * This module contains the canonical logic for:
@@ -9,15 +9,13 @@
  * 4. Functions to convert "cooked" user-facing quantities back to "as_sold" (dry/raw) equivalents
  * for accurate calorie calculation.
  *
- * PHASE 1 UPDATE (2025): Fixed inferHints() defaults to align with new prompt semantics.
- * - Grains now default to "dry" (not "cooked")
- * - Expanded protein detection
- * - Expanded YIELDS table with additional grains/legumes
+ * ARCHITECTURAL VERIFICATION (Phase 4): Confirmed logic relies ONLY on generic ingredient key/state
+ * and is entirely independent of market run product data (barcode, product name).
  *
  * This file is in CommonJS format.
  */
 
-const TRANSFORM_VERSION = "2025-11-26.2"; // Phase 2 update version
+const TRANSFORM_VERSION = "2025-11-27.3"; // Phase 4 update: Ingredient-centric architecture verified.
 
 // --- Moved from day.js: Unit Normalization Dependencies ---
 // PHASE 2: Expanded to support size hints (small/medium/large)
@@ -78,8 +76,7 @@ const UNIT_WEIGHTS = {
 
 /**
  * Extracts a size hint from an ingredient key.
- * 
- * @param {string} key - The ingredient key
+ * * @param {string} key - The ingredient key
  * @returns {string|null} Size hint or null
  */
 function extractSizeHint(key) {
@@ -104,8 +101,7 @@ function extractSizeHint(key) {
 
 /**
  * Gets the weight for a unit-based item, considering size hints.
- * 
- * @param {string} key - The ingredient key
+ * * @param {string} key - The ingredient key
  * @param {string} unit - The unit (e.g., 'egg', 'slice')
  * @param {string|null} sizeHint - Optional size hint
  * @returns {number} Weight in grams
@@ -422,13 +418,11 @@ function getOilAbsorptionRate(methodHint) {
 
 /**
  * Infers stateHint and methodHint if the LLM fails to provide them.
- * 
- * PHASE 1 UPDATE (2025): Aligned defaults with new prompt semantics.
+ * * PHASE 1 UPDATE (2025): Aligned defaults with new prompt semantics.
  * - Grains now default to "dry" (was incorrectly "cooked")
  * - Expanded detection for proteins and packaged items
  * - Added telemetry logging when fallback is triggered
- * 
- * @param {object} item - The meal item object.
+ * * @param {object} item - The meal item object.
  * @param {function} log - The logger function.
  * @returns {{stateHint: string, methodHint: string | null}}
  */
@@ -660,3 +654,4 @@ module.exports = {
     getUnitWeight,             // PHASE 2: Export new function
     extractSizeHint,           // PHASE 2: Export new function
 };
+
