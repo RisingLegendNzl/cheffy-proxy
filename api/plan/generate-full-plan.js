@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // [NEW] Hybrid Batched Orchestrator (V14.0 - Ingredient-Centric Architecture)
-// Implements the "full plan" architecture:
+// Implements the \"full plan\" architecture:
 // 1. Compute Targets (passed in)
 // 2. Generate ALL meals
 // 3. Aggregate/Dedupe ALL ingredients
@@ -1378,22 +1378,28 @@ module.exports = async (request, response) => {
         // Collate market results (fullResultsMap still needed to map key to selected product)
         const fullResultsMap = new Map(); // Map<normalizedKey, result>
         parallelResultsArray.forEach(currentResult => {
+             // FIX 1 & 2: Derive normalized key and look up plan item
+             const ingredientKey = Object.keys(currentResult)[0];
+             const normalizedKey = normalizeKey(ingredientKey);
+             const resultData = currentResult[ingredientKey];
+             
+             // Look up the enriched plan item using the normalized key
+             const planItem = fullIngredientPlan.find(i => i.normalizedKey === normalizedKey);
+
              if (currentResult._error) {
                  log(`Market Run Item Error for "${currentResult.itemKey}": ${currentResult.message}`, 'WARN', 'MARKET_RUN');
-                 const planItem = fullIngredientPlan.find(i => i.originalIngredient === currentResult.itemKey);
                  const baseData = planItem || { originalIngredient: currentResult.itemKey, normalizedKey: normalizeKey(currentResult.itemKey) };
-                 fullResultsMap.set(baseData.normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
+                 fullResultsMap.set(normalizedKey, { ...baseData, source: 'error', error: currentResult.message, allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
                  return;
              }
-             const normalizedKey = Object.keys(currentResult)[0];
-             const resultData = currentResult[normalizedKey];
              
-             if (resultData && typeof resultData === 'object') {
-                 fullResultsMap.set(normalizedKey, { ...resultData });
+             if (resultData && typeof resultData === 'object' && planItem) {
+                 // FIX 3: Merge resultData with the enriched planItem to carry over fields like 'category'
+                 fullResultsMap.set(normalizedKey, { ...planItem, ...resultData, normalizedKey: planItem.normalizedKey });
              } else {
-                  log(`Invalid market result structure for "${normalizedKey}"`, 'ERROR', 'SYSTEM', { resultData });
-                  const planItem = fullIngredientPlan.find(i => i.normalizedKey === normalizedKey);
-                  fullResultsMap.set(normalizedKey, { ...planItem, source: 'error', error: 'Invalid market result structure', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
+                  log(`Invalid market result structure or missing plan item for "${normalizedKey}"`, 'ERROR', 'SYSTEM', { resultData, planItemExists: !!planItem });
+                  const baseData = planItem || { originalIngredient: ingredientKey, normalizedKey: normalizedKey };
+                  fullResultsMap.set(normalizedKey, { ...baseData, source: 'error', error: 'Invalid market result structure', allProducts:[], currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url });
              }
         });
         
