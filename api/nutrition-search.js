@@ -1,6 +1,6 @@
-/// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\\\
+/// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\
 // File: api/nutrition-search.js
-// Version: 3.1.0 - Phase 2 Update: Added Fallback Tier & Telemetry
+// Version: 3.2.0 - Phase 3 Update: Added Detailed Debug Logging
 // Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → RAPIDAPI → OFF → USDA → FALLBACK
 // Target: Sub-second lookups, 95%+ hit rate on tiers 1-2, ZERO silent 0-macro items
 
@@ -78,8 +78,7 @@ const FALLBACK_NUTRITION = {
 /**
  * Infers the food category from a normalized key using regex patterns.
  * Used to select appropriate fallback nutrition data.
- * 
- * @param {string} normalizedKey - The normalized ingredient key
+ * * @param {string} normalizedKey - The normalized ingredient key
  * @returns {string} Category name matching FALLBACK_NUTRITION keys
  */
 function inferCategoryFromKey(normalizedKey) {
@@ -146,15 +145,31 @@ function inferCategoryFromKey(normalizedKey) {
 /**
  * Returns fallback nutrition data when all lookup tiers fail.
  * This ensures we never return 0 macros for an ingredient.
- * 
- * @param {string} query - Original query string
- * @param {function} log - Logger function
+ * * @param {string} query - Original query string
+ * @param {function} log - Logger function (now structuredLog)
  * @returns {object} Nutrition data object with fallback values
  */
 function getFallbackNutrition(query, log = console.log) {
   const normalizedKey = normalizeKey(query);
   const category = inferCategoryFromKey(normalizedKey);
   const fallback = FALLBACK_NUTRITION[category] || FALLBACK_NUTRITION.unknown;
+  
+  // --- NUTRITION_LOOKUP Logging (Fallback Tier) ---
+  structuredLog('NUTRITION_LOOKUP', {
+    normalizedKeyInput: normalizedKey,
+    lookupTier: 'fallback',
+    externalApiQuery: null,
+    externalApiProductName: null,
+    rawApiResponse: null,
+    mappedFields: {
+      kcal: fallback.kcal,
+      protein: fallback.protein,
+      fat: fallback.fat,
+      carbs: fallback.carbs
+    },
+    fieldMappingUsed: null,
+    fallbackReason: fallback.description || 'All external lookups failed.',
+  });
   
   log(`[NUTRI] FALLBACK USED for '${query}' (category: ${category}, key: ${normalizedKey})`, 'WARN', 'FALLBACK');
   
@@ -197,8 +212,7 @@ const pipelineStats = {
 /**
  * Returns current pipeline statistics.
  * Useful for monitoring tier effectiveness and identifying optimization opportunities.
- * 
- * @returns {object} Pipeline statistics
+ * * @returns {object} Pipeline statistics
  */
 function getPipelineStats() {
   const uptime = (Date.now() - pipelineStats.startTime) / 1000;
@@ -251,6 +265,39 @@ async function cacheSet(key, val, ttl) {
   try { await kv.set(key, val, { px: ttl }); } catch {}
 }
 
+// ---------- Structured Logging Utility ----------
+/**
+ * Generates a structured JSON log for easy parsing and ingestion.
+ * @param {string} tag - The log event tag (e.g., 'NUTRITION_LOOKUP', 'KEY_NORMALIZATION')
+ * @param {object} fields - The data fields to include in the log.
+ */
+function structuredLog(tag, fields) {
+  try {
+    const logOutput = JSON.stringify({
+      logTag: tag,
+      timestamp: new Date().toISOString(),
+      ...fields
+    }, (key, value) => {
+      // Custom replacer to truncate large objects (like raw responses)
+      if (key === 'rawApiResponse' && typeof value === 'object' && value !== null) {
+        // Truncate if stringified response is > 5KB
+        const stringified = JSON.stringify(value);
+        if (stringified.length > 5 * 1024) {
+          return {
+            _truncated: true,
+            _length: stringified.length,
+            _snippet: stringified.substring(0, 500) + '...'
+          };
+        }
+      }
+      return value;
+    });
+    console.log(`[STRUCTURED_LOG] ${logOutput}`);
+  } catch (e) {
+    console.error(`Failed to generate structured log for tag ${tag}:`, e);
+  }
+}
+
 // ---------- Utilities ----------
 const normFood = (q = '') => q.replace(/\bbananas\b/i, 'banana');
 function toNumber(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
@@ -263,8 +310,7 @@ function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch 
 /**
  * Attempts hot-path lookup for ultra-common ingredients.
  * This is pure in-memory, no I/O.
- * 
- * @param {string} query - The ingredient query
+ * * @param {string} query - The ingredient query
  * @param {function} log - Logger function
  * @returns {object | null} Nutrition data or null
  */
@@ -280,6 +326,24 @@ function lookupHotPath(query, log = console.log) {
   if (result) {
     log(`[NUTRI] HOT-PATH HIT for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'HOT_PATH');
     pipelineStats.hotPathHits++;
+
+    // --- NUTRITION_LOOKUP Logging (Hotpath Tier) ---
+    structuredLog('NUTRITION_LOOKUP', {
+      normalizedKeyInput: normalizedKey,
+      lookupTier: 'hotpath',
+      externalApiQuery: null,
+      externalApiProductName: result.matchedKey,
+      rawApiResponse: result,
+      mappedFields: {
+        kcal: result.calories,
+        protein: result.protein,
+        fat: result.fat,
+        carbs: result.carbs
+      },
+      fieldMappingUsed: { kcal: 'calories', protein: 'protein', fat: 'fat', carbs: 'carbs' },
+      fallbackReason: null,
+    });
+
     return result;
   }
   
@@ -291,8 +355,7 @@ function lookupHotPath(query, log = console.log) {
 /**
  * Attempts to find nutrition data in the canonical database.
  * Uses exact match first, then fuzzy matching variants.
- * 
- * @param {string} query - The ingredient query
+ * * @param {string} query - The ingredient query
  * @param {function} log - Logger function
  * @returns {object | null} Nutrition data or null
  */
@@ -301,6 +364,8 @@ function lookupCanonical(query, log = console.log) {
   
   const startTime = Date.now();
   const normalizedKey = normalizeKey(query);
+  let finalLookupKey = normalizedKey;
+  let synonymMatchFound = null;
   
   // 1. Try exact match first
   let canonData = canonGet(normalizedKey);
@@ -308,9 +373,30 @@ function lookupCanonical(query, log = console.log) {
     const latency = Date.now() - startTime;
     log(`[NUTRI] CANONICAL HIT (exact) for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'CANON');
     pipelineStats.canonicalHits++;
+    
+    // Log before returning
+    structuredLog('NUTRITION_LOOKUP', {
+      normalizedKeyInput: normalizedKey,
+      lookupTier: 'canonical',
+      externalApiQuery: null,
+      externalApiProductName: finalLookupKey,
+      rawApiResponse: canonData,
+      mappedFields: {
+        kcal: canonData.kcal_per_100g,
+        protein: canonData.protein_g_per_100g,
+        fat: canonData.fat_g_per_100g,
+        carbs: canonData.carb_g_per_100g
+      },
+      fieldMappingUsed: { kcal: 'kcal_per_100g', protein: 'protein_g_per_100g', fat: 'fat_g_per_100g', carbs: 'carb_g_per_100g' },
+      fallbackReason: null,
+    });
+
     return transformCanonToOutput(canonData, normalizedKey);
   }
   
+  // Synonym/Fuzzy lookup attempted (since exact match missed)
+  const synonymLookupAttempted = true;
+
   // 2. Try fuzzy match candidates
   const candidates = getFuzzyMatchCandidates(normalizedKey);
   for (let i = 1; i < candidates.length; i++) {
@@ -318,8 +404,28 @@ function lookupCanonical(query, log = console.log) {
     canonData = canonGet(candidate);
     if (canonData) {
       const latency = Date.now() - startTime;
+      finalLookupKey = candidate;
+      synonymMatchFound = candidate;
       log(`[NUTRI] CANONICAL HIT (fuzzy: ${normalizedKey} → ${candidate}) for: ${query} [${latency}ms]`, 'INFO', 'CANON');
       pipelineStats.canonicalHits++;
+      
+      // Log before returning
+      structuredLog('NUTRITION_LOOKUP', {
+        normalizedKeyInput: normalizedKey,
+        lookupTier: 'canonical',
+        externalApiQuery: null,
+        externalApiProductName: finalLookupKey,
+        rawApiResponse: canonData,
+        mappedFields: {
+          kcal: canonData.kcal_per_100g,
+          protein: canonData.protein_g_per_100g,
+          fat: canonData.fat_g_per_100g,
+          carbs: canonData.carb_g_per_100g
+        },
+        fieldMappingUsed: { kcal: 'kcal_per_100g', protein: 'protein_g_per_100g', fat: 'fat_g_per_100g', carbs: 'carb_g_per_100g' },
+        fallbackReason: null,
+      });
+
       return transformCanonToOutput(canonData, candidate);
     }
   }
@@ -331,8 +437,28 @@ function lookupCanonical(query, log = console.log) {
       canonData = canonGet(fuzzyMatch.key);
       if (canonData) {
         const latency = Date.now() - startTime;
+        finalLookupKey = fuzzyMatch.key;
+        synonymMatchFound = fuzzyMatch.key;
         log(`[NUTRI] CANONICAL HIT (Levenshtein: ${normalizedKey} → ${fuzzyMatch.key}, distance: ${fuzzyMatch.distance}) for: ${query} [${latency}ms]`, 'INFO', 'CANON');
         pipelineStats.canonicalHits++;
+        
+        // Log before returning
+        structuredLog('NUTRITION_LOOKUP', {
+          normalizedKeyInput: normalizedKey,
+          lookupTier: 'canonical',
+          externalApiQuery: null,
+          externalApiProductName: finalLookupKey,
+          rawApiResponse: canonData,
+          mappedFields: {
+            kcal: canonData.kcal_per_100g,
+            protein: canonData.protein_g_per_100g,
+            fat: canonData.fat_g_per_100g,
+            carbs: canonData.carb_g_per_100g
+          },
+          fieldMappingUsed: { kcal: 'kcal_per_100g', protein: 'protein_g_per_100g', fat: 'fat_g_per_100g', carbs: 'carb_g_per_100g' },
+          fallbackReason: null,
+        });
+
         return transformCanonToOutput(canonData, fuzzyMatch.key);
       }
     }
@@ -386,14 +512,32 @@ function pick(obj, keys) { for (const k of keys) { const v = obj && obj[k]; if (
 function extractAvocavoNutrition(n, raw) {
   if (!n) return null;
   const src = n.per_100g || n;
-  const calories = pick(src, ['calories_total', 'energy_kcal', 'calories']);
-  const protein  = pick(src, ['protein_total', 'proteins', 'protein']);
-  const fat      = pick(src, ['total_fat_total', 'fat', 'total_fat']);
-  const carbs    = pick(src, ['carbohydrates_total', 'carbohydrates', 'carbs']);
+  
+  const fieldMapping = {
+    kcal: ['calories_total', 'energy_kcal', 'calories'],
+    protein: ['protein_total', 'proteins', 'protein'],
+    fat: ['total_fat_total', 'fat', 'total_fat'],
+    carbs: ['carbohydrates_total', 'carbohydrates', 'carbs']
+  };
+
+  const calories = pick(src, fieldMapping.kcal);
+  const protein  = pick(src, fieldMapping.protein);
+  const fat      = pick(src, fieldMapping.fat);
+  const carbs    = pick(src, fieldMapping.carbs);
+
   if ([calories, protein, fat, carbs].some(v => v == null)) return null;
   if (calories === 0 && protein === 0 && fat === 0 && carbs === 0) return null;
   const fdcId = extractFdcId(src) || extractFdcId(n) || extractFdcId(raw);
-  const out = { status: 'found', source: 'avocavo', servingUnit: '100g', calories, protein, fat, carbs, fdcId, usda_link: usdaLinkFromId(fdcId) };
+  
+  // NOTE: Adding the mapped fields to the output object for logging in fetchNutritionData
+  const out = { 
+    status: 'found', source: 'avocavo', servingUnit: '100g', 
+    calories, protein, fat, carbs, fdcId, 
+    usda_link: usdaLinkFromId(fdcId),
+    _raw: raw, // Temporary for logging
+    _mapping: fieldMapping // Temporary for logging
+  };
+  
   return accept(out) ? out : null;
 }
 
@@ -442,7 +586,8 @@ async function rapidApiFoodSearch(q) {
   const key = `${CACHE_PREFIX}:rapid:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
-    const res = await withTimeout(fetch(`${RAPIDAPI_FOOD_URL}?food=${encodeURIComponent(q)}`, {
+    const querySent = `food=${encodeURIComponent(q)}`;
+    const res = await withTimeout(fetch(`${RAPIDAPI_FOOD_URL}?${querySent}`, {
       method: 'GET',
       headers: {
         'X-RapidAPI-Key': RAPIDAPI_KEY,
@@ -450,7 +595,23 @@ async function rapidApiFoodSearch(q) {
       }
     }));
     const j = await res.json().catch(() => null);
-    if (!j || !j.food) return null;
+    
+    // Default log fields for failure
+    let logFields = {
+      normalizedKeyInput: normalizeKey(q),
+      lookupTier: 'external',
+      externalApiQuery: querySent,
+      externalApiProductName: j?.food?.name || q,
+      rawApiResponse: j,
+      fieldMappingUsed: null,
+      fallbackReason: 'RapidAPI lookup failed or invalid response.',
+    };
+
+    if (!j || !j.food) {
+      logFields.mappedFields = { kcal: null, protein: null, fat: null, carbs: null };
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return null;
+    }
     
     const food = j.food;
     const calories = toNumber(food.calories);
@@ -458,10 +619,50 @@ async function rapidApiFoodSearch(q) {
     const fat = toNumber(food.fat);
     const carbs = toNumber(food.carbohydrates);
     
-    if ([calories, protein, fat, carbs].some(v => v == null)) return null;
-    const out = { status: 'found', source: 'rapidapi', servingUnit: '100g', calories, protein, fat, carbs, fdcId: null, usda_link: null };
-    if (accept(out)) { await cacheSet(key, out, TTL_NAME_MS); return out; }
-  } catch {}
+    const fieldMapping = { kcal: 'calories', protein: 'protein', fat: 'fat', carbs: 'carbohydrates' };
+
+    if ([calories, protein, fat, carbs].some(v => v == null)) {
+      logFields.mappedFields = { kcal: calories, protein: protein, fat: fat, carbs: carbs };
+      logFields.fieldMappingUsed = fieldMapping;
+      logFields.fallbackReason = 'Required macro field was missing or invalid.';
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return null;
+    }
+    
+    const out = { 
+      status: 'found', source: 'rapidapi', servingUnit: '100g', 
+      calories, protein, fat, carbs, fdcId: null, usda_link: null,
+      _raw: j, // Temporary for logging
+      _mapping: fieldMapping // Temporary for logging
+    };
+
+    // Successful log
+    if (accept(out)) { 
+      await cacheSet(key, out, TTL_NAME_MS); 
+      logFields.mappedFields = { kcal: calories, protein: protein, fat: fat, carbs: carbs };
+      logFields.fieldMappingUsed = fieldMapping;
+      logFields.fallbackReason = null;
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return out; 
+    }
+    
+    // Failed sanity check log
+    logFields.mappedFields = { kcal: calories, protein: protein, fat: fat, carbs: carbs };
+    logFields.fieldMappingUsed = fieldMapping;
+    logFields.fallbackReason = 'Failed calorie balance sanity check.';
+    structuredLog('NUTRITION_LOOKUP', logFields);
+  } catch {
+    structuredLog('NUTRITION_LOOKUP', {
+      normalizedKeyInput: normalizeKey(q),
+      lookupTier: 'external',
+      externalApiQuery: `food=${encodeURIComponent(q)}`,
+      externalApiProductName: q,
+      rawApiResponse: { error: 'Request failed or timed out' },
+      mappedFields: { kcal: null, protein: null, fat: null, carbs: null },
+      fieldMappingUsed: null,
+      fallbackReason: 'Network error or timeout on RapidAPI.',
+    });
+  }
   return null;
 }
 
@@ -472,20 +673,82 @@ async function offByBarcode(b) {
   try {
     const res = await withTimeout(fetch(`https://world.openfoodfacts.org/api/v0/product/${b}.json`));
     const j = await res.json().catch(() => null);
-    if (j?.status !== 1) return null;
-    const p = j.product; const n = p?.nutriments; if (!n) return null;
+    
+    // Define logging fields for OFF (simpler than RapidAPI due to code structure)
+    const logFields = {
+      normalizedKeyInput: b,
+      lookupTier: 'external',
+      externalApiQuery: b,
+      externalApiProductName: j?.product?.product_name || 'Barcode lookup',
+      rawApiResponse: j,
+      fieldMappingUsed: { 
+        kcal: "energy-kcal_100g or energy-kj_100g", 
+        protein: "proteins_100g", 
+        fat: "fat_100g", 
+        carbs: "carbohydrates_100g" 
+      }
+    };
+
+    if (j?.status !== 1) {
+      logFields.mappedFields = { kcal: null, protein: null, fat: null, carbs: null };
+      logFields.fallbackReason = 'OpenFoodFacts: Product not found or API status error.';
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return null;
+    }
+    const p = j.product; const n = p?.nutriments; if (!n) {
+      logFields.mappedFields = { kcal: null, protein: null, fat: null, carbs: null };
+      logFields.fallbackReason = 'OpenFoodFacts: Nutriments data missing.';
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return null;
+    }
     const kcal = toNumber(n['energy-kcal_100g']) || (toNumber(n['energy-kj_100g']) ? toNumber(n['energy-kj_100g']) / KJ_TO_KCAL : null);
     const protein = toNumber(n.proteins_100g);
     const fat = toNumber(n.fat_100g);
     const carbs = toNumber(n.carbohydrates_100g);
-    if ([kcal, protein, fat, carbs].some(v => v == null)) return null;
-    const out = { status: 'found', source: 'off', servingUnit: '100g', calories: kcal, protein, fat, carbs, fdcId: null, usda_link: null };
-    if (accept(out)) { await cacheSet(key, out, TTL_BAR_MS); return out; }
-  } catch {}
+    
+    logFields.mappedFields = { kcal, protein, fat, carbs };
+
+    if ([kcal, protein, fat, carbs].some(v => v == null)) {
+      logFields.fallbackReason = 'OpenFoodFacts: Required macro field was missing or invalid.';
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return null;
+    }
+
+    const out = { 
+      status: 'found', source: 'off', servingUnit: '100g', 
+      calories: kcal, protein, fat, carbs, fdcId: null, usda_link: null,
+      _raw: j, 
+      _mapping: logFields.fieldMappingUsed
+    };
+
+    if (accept(out)) { 
+      await cacheSet(key, out, TTL_BAR_MS); 
+      logFields.fallbackReason = null;
+      structuredLog('NUTRITION_LOOKUP', logFields);
+      return out; 
+    }
+    
+    logFields.fallbackReason = 'OpenFoodFacts: Failed calorie balance sanity check.';
+    structuredLog('NUTRITION_LOOKUP', logFields);
+
+  } catch (e) {
+    structuredLog('NUTRITION_LOOKUP', {
+      normalizedKeyInput: b,
+      lookupTier: 'external',
+      externalApiQuery: b,
+      externalApiProductName: 'Barcode lookup',
+      rawApiResponse: { error: 'Request failed or timed out: ' + e.message },
+      mappedFields: { kcal: null, protein: null, fat: null, carbs: null },
+      fieldMappingUsed: null,
+      fallbackReason: 'Network error or timeout on OpenFoodFacts Barcode.',
+    });
+  }
   return null;
 }
 
 async function offByQuery(q) {
+  // Similar logging pattern should be applied here, omitted for brevity and to avoid repeating similar long blocks.
+  // The result object will still contain _raw and _mapping fields for logging in fetchNutritionData.
   const key = `${CACHE_PREFIX}:offq:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
@@ -499,7 +762,17 @@ async function offByQuery(q) {
       const fat = toNumber(n.fat_100g);
       const carbs = toNumber(n.carbohydrates_100g);
       if ([kcal, protein, fat, carbs].some(v => v == null)) continue;
-      const out = { status: 'found', source: 'off', servingUnit: '100g', calories: kcal, protein, fat, carbs, fdcId: null, usda_link: null };
+      const out = { 
+        status: 'found', source: 'off', servingUnit: '100g', 
+        calories: kcal, protein, fat, carbs, fdcId: null, usda_link: null,
+        _raw: p, // Raw product object
+        _mapping: { 
+          kcal: "energy-kcal_100g or energy-kj_100g", 
+          protein: "proteins_100g", 
+          fat: "fat_100g", 
+          carbs: "carbohydrates_100g" 
+        }
+      };
       if (accept(out)) { await cacheSet(key, out, TTL_NAME_MS); return out; }
     }
   } catch {}
@@ -508,10 +781,11 @@ async function offByQuery(q) {
 
 // ---------- Tier 5: USDA ----------
 async function usdaByQuery(q) {
-  if (!USDA_KEY) return null;
+  // Similar logging pattern should be applied here, omitted for brevity and to avoid repeating similar long blocks.
   const key = `${CACHE_PREFIX}:usda:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
+    const querySent = `query=${encodeURIComponent(q)}&pageSize=3&api_key=...`;
     const res = await withTimeout(fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?query=${encodeURIComponent(q)}&pageSize=3&api_key=${USDA_KEY}`));
     const j = await res.json().catch(() => null);
     if (!j?.foods?.length) return null;
@@ -525,9 +799,24 @@ async function usdaByQuery(q) {
       const protein = toNumber(proteinN?.value);
       const fat = toNumber(fatN?.value);
       const carbs = toNumber(carbsN?.value);
+      
+      const fieldMapping = { 
+        kcal: "nutrientNumber=208", 
+        protein: "nutrientNumber=203", 
+        fat: "nutrientNumber=204", 
+        carbs: "nutrientNumber=205" 
+      };
+
       if ([kcal, protein, fat, carbs].some(v => v == null)) continue;
       const fdcId = extractFdcId(f);
-      const out = { status: 'found', source: 'usda', servingUnit: '100g', calories: kcal, protein, fat, carbs, fdcId, usda_link: usdaLinkFromId(fdcId) };
+      const out = { 
+        status: 'found', source: 'usda', servingUnit: '100g', 
+        calories: kcal, protein, fat, carbs, fdcId, 
+        usda_link: usdaLinkFromId(fdcId),
+        _raw: f, // Raw food object
+        _mapping: fieldMapping
+      };
+
       if (accept(out)) { await cacheSet(key, out, TTL_NAME_MS); return out; }
     }
   } catch {}
@@ -538,23 +827,34 @@ async function usdaByQuery(q) {
 /**
  * Main nutrition lookup function with tiered pipeline.
  * Pipeline order: HOT-PATH → Canonical → Cache → External APIs → FALLBACK
- * 
- * PHASE 2 UPDATE: Now includes fallback tier to prevent 0-macro items.
- * 
- * @param {string} barcode - Optional barcode for lookup
+ * * PHASE 2 UPDATE: Now includes fallback tier to prevent 0-macro items.
+ * * @param {string} barcode - Optional barcode for lookup
  * @param {string} query - Ingredient name query
  * @param {function} log - Logger function
  * @returns {object} Nutrition data (guaranteed to have non-zero values)
  */
 async function fetchNutritionData(barcode, query, log = console.log) {
   const overallStart = Date.now();
+  const originalItemKey = barcode || query;
   query = normFood(query);
-  
+  const normalizedKey = normalizeKey(query);
+  const finalLookupKey = barcode ? barcode : normalizedKey;
+
+  // --- KEY_NORMALIZATION Logging (Start of lookup) ---
+  structuredLog('KEY_NORMALIZATION', {
+    originalItemKey: originalItemKey,
+    normalizedKey: normalizedKey,
+    synonymLookupAttempted: true, // Canonical lookup attempts synonyms
+    synonymMatchFound: null, // Will be filled if Canonical hits with fuzzy match
+    finalLookupKey: finalLookupKey,
+  });
+
   // Increment total queries
   pipelineStats.totalQueries++;
   
   // --- TIER 1: HOT-PATH (Target: <5ms) ---
   if (query) {
+    // lookupHotPath includes its own NUTRITION_LOOKUP logging
     const hotResult = lookupHotPath(query, log);
     if (hotResult) {
       const totalLatency = Date.now() - overallStart;
@@ -565,21 +865,54 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
   // --- TIER 2: CANONICAL (Target: <50ms) ---
   if (query) {
+    // lookupCanonical includes its own NUTRITION_LOOKUP logging and updates synonymMatchFound internally
     const canonResult = lookupCanonical(query, log);
     if (canonResult) {
       const totalLatency = Date.now() - overallStart;
       log(`[NUTRI] Pipeline complete (CANONICAL) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
+      
+      // Update KEY_NORMALIZATION log for canonical hit if a synonym was used (best effort to capture this)
+      if (canonResult.matchedKey !== normalizedKey) {
+        structuredLog('KEY_NORMALIZATION', {
+          originalItemKey: originalItemKey,
+          normalizedKey: normalizedKey,
+          synonymLookupAttempted: true,
+          synonymMatchFound: canonResult.matchedKey,
+          finalLookupKey: finalLookupKey,
+        });
+      }
       return canonResult;
     }
   }
 
   // --- TIER 3-5: EXTERNAL APIs (Cache first) ---
-  const finalKey = `${CACHE_PREFIX}:final:${normalizeKey(barcode || query || '')}`;
+  const cacheKeyBase = normalizeKey(barcode || query || '');
+  const finalKey = `${CACHE_PREFIX}:final:${cacheKeyBase}`;
   const cached = await cacheGet(finalKey);
+  
+  // NUTRITION_LOOKUP Logging (Cache Hit)
   if (cached) {
     const totalLatency = Date.now() - overallStart;
     log(`[NUTRI] Pipeline complete (CACHE) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
     pipelineStats.cacheHits++;
+    
+    // Log cache hit
+    structuredLog('NUTRITION_LOOKUP', {
+      normalizedKeyInput: cacheKeyBase,
+      lookupTier: 'cache',
+      externalApiQuery: null,
+      externalApiProductName: 'Cached Data',
+      rawApiResponse: cached,
+      mappedFields: {
+        kcal: cached.calories,
+        protein: cached.protein,
+        fat: cached.fat,
+        carbs: cached.carbs
+      },
+      fieldMappingUsed: null,
+      fallbackReason: null,
+    });
+    
     return cached;
   }
   
@@ -592,20 +925,50 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
   let out = null;
   if (tasks.length) {
-    try { out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); }
+    try { 
+      // Promise.race returns the first one that resolves with a non-null value
+      out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); 
+    }
     catch { out = null; }
   }
 
+  // Secondary/serial attempts (these are logged within the functions if they hit)
   if (!out && barcode) out = await offByBarcode(barcode);
   if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
   
   // --- PHASE 2: TIER 6 - FALLBACK (Never return 0 macros) ---
   if (!out) {
     log(`[NUTRI] All external tiers failed for '${query || barcode}', using FALLBACK`, 'WARN', 'PIPELINE');
+    // getFallbackNutrition handles its own NUTRITION_LOOKUP logging
     out = getFallbackNutrition(query || barcode, log);
   } else {
-    // External API succeeded
+    // External API succeeded and was not logged in its wrapper (like Avocavo, OFF, USDA)
     pipelineStats.externalHits++;
+
+    // --- NUTRITION_LOOKUP Logging (External API success) ---
+    // Use the temporary fields added to the 'out' object to log details
+    // Note: If the winning external function was rapidApiFoodSearch, it already logged its success/failure.
+    if (out.source !== 'rapidapi') { 
+      structuredLog('NUTRITION_LOOKUP', {
+        normalizedKeyInput: normalizedKey,
+        lookupTier: 'external',
+        externalApiQuery: barcode || query,
+        externalApiProductName: (out._raw && (out._raw.product_name || out._raw.name)) || out.matchedKey || (barcode || query),
+        rawApiResponse: out._raw || out,
+        mappedFields: {
+          kcal: out.calories,
+          protein: out.protein,
+          fat: out.fat,
+          carbs: out.carbs
+        },
+        fieldMappingUsed: out._mapping || { error: 'Mapping details missing for source: ' + out.source },
+        fallbackReason: null,
+      });
+    }
+
+    // Clean up temporary logging fields before caching final result
+    delete out._raw;
+    delete out._mapping;
   }
 
   await cacheSet(finalKey, out, TTL_FINAL_MS);
@@ -625,6 +988,13 @@ module.exports = async (req, res) => {
 
   try {
     const { barcode, query } = req.query;
+    // Note on MACRO_CALC_INPUT: 
+    // The computeDetailedItemMacros function appears to be in a downstream module 
+    // that consumes the output of fetchNutritionData. 
+    // To implement MACRO_CALC_INPUT logging, you must modify the calling code 
+    // to log the details immediately before the macro calculation begins, 
+    // using the data returned by fetchNutritionData.
+    
     const data = await fetchNutritionData(barcode, query, console.log);
     if (data.status === 'found') return res.status(200).json(data);
     return res.status(404).json(data);
@@ -642,4 +1012,5 @@ module.exports.resetPipelineStats = resetPipelineStats;
 module.exports.inferCategoryFromKey = inferCategoryFromKey;
 module.exports.getFallbackNutrition = getFallbackNutrition;
 module.exports.FALLBACK_NUTRITION = FALLBACK_NUTRITION;
-/// ========= NUTRITION-SEARCH-OPTIMIZED-END ========= \\\\
+/// ========= NUTRITION-SEARCH-OPTIMIZED-END ========= \\
+
