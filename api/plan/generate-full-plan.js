@@ -1310,8 +1310,8 @@ module.exports = async (request, response) => {
                     
                     // log is correctly scoped here
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey); 
-                    currentAttemptLog.foundCount = filteredProducts.length;
-                    const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p => Math.max(max, p.score), 0) : 0;
+                    // FIX SYNTAX ERROR HERE
+                    const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
                     currentAttemptLog.bestScore = currentBestScore;
 
                     if (filteredProducts.length > 0) {
