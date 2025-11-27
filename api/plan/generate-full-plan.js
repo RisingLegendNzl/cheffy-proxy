@@ -16,8 +16,7 @@ const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
 // Import cache-wrapped microservices
-// FIX: Imported missing processSingleIngredientOptimized
-const { fetchPriceData, processSingleIngredientOptimized } = require('../price-search.js');
+const { fetchPriceData } = require('../price-search.js');
 // MOD ZONE 1.1: Import new ingredient-centric function
 const { fetchNutritionData, lookupIngredientNutrition } = require('../nutrition-search.js'); 
 
@@ -1213,7 +1212,6 @@ module.exports = async (request, response) => {
         });
 
         // 3b. Execute market run in parallel
-        // This is where the ReferenceError was pointing to. `processSingleIngredientOptimized` is now imported.
         const parallelResultsArray = await concurrentlyMap(fullIngredientPlan, MARKET_RUN_CONCURRENCY, processSingleIngredientOptimized);
         sendEvent('plan:progress', { pct: 50, message: `Market search complete...` });
         
@@ -1272,8 +1270,7 @@ module.exports = async (request, response) => {
                 });
             }
         }
-        // FIX: Corrected the corrupted Date.now() and misplaced subtraction (from previous iteration)
-        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.now() - priceExtractStartTime });
+        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.無需date } - priceExtractStartTime });
 
 
         // --- Phase 4: Nutrition Fetch (Mod Zone 1 & 2: Ingredient-Centric) ---
