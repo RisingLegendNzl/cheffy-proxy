@@ -685,66 +685,64 @@ JSON Structure:
  * Includes a guard against non-JSON responses.
  */
 async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
-// ... (omitted)
-    for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+    log(`${logPrefix}: Attempting model: ${modelName}`, 'INFO', 'LLM');
+    const apiUrl = getGeminiApiUrl(modelName);
 
-        try {
-            log(`${logPrefix} Attempt ${attempt}: Fetching from ${url} (Timeout: ${LLM_REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, { ...options, signal: controller.signal });
-            clearTimeout(timeout); 
+    const response = await fetchLLMWithRetry(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        body: JSON.stringify(payload)
+    }, log, logPrefix); // FIX: Passed logPrefix instead of undefined attemptPrefix
 
-            if (response.ok) {
-                const rawText = await response.text();
-                if (!rawText || rawText.trim() === "") {
-                    throw new Error("Response was 200 OK but body was empty.");
-                }
-                
-                const trimmedText = rawText.trim();
-                if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
-                    return {
-                        ok: true,
-                        status: response.status,
-                        json: () => Promise.resolve(JSON.parse(trimmedText)),
-                        text: () => Promise.resolve(trimmedText)
-                    };
-                } else {
-                    log(`${attemptPrefix} Attempt ${attempt}: 200 OK with non-JSON body. Retrying...`, 'WARN', 'HTTP', { body: trimmedText.substring(0, 100) });
-                    throw new Error(`200 OK with non-JSON body: ${trimmedText.substring(0, 100)}`);
-                }
-            }
+    const result = await response.json(); // Safe to call .json() because of the guard in fetchLLMWithRetry
+    const candidate = result.candidates?.[0];
+    const finishReason = candidate?.finishReason;
 
-            if (response.status === 429 || response.status >= 500) {
-                log(`${attemptPrefix} Attempt ${attempt}: Received retryable error ${response.status}. Retrying...`, 'WARN', 'HTTP');
-            } else {
-                const errorBody = await response.text();
-                log(`${attemptPrefix} Attempt ${attempt}: Non-retryable error ${response.status}.`, 'CRITICAL', 'HTTP', { body: errorBody });
-                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody}`);
-            }
-        } catch (error) {
-             clearTimeout(timeout); 
-             
-             if (error.name === 'AbortError') {
-                 log(`${attemptPrefix} Attempt ${attempt}: Fetch timed out after ${LLM_REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
-             } else if (error instanceof SyntaxError) {
-                log(`${attemptPrefix} Attempt ${attempt}: Failed to parse response as JSON. Retrying...`, 'WARN', 'HTTP', { error: error.message });
-             } else if (!error.message?.startsWith(`${attemptPrefix} call failed with status`)) {
-                log(`${attemptPrefix} Attempt ${attempt}: Fetch failed: ${error.message}. Retrying...`, 'WARN', 'HTTP');
-             } else {
-                 throw error;
-             }
-        }
-
-        if (attempt < MAX_LLM_RETRIES) {
-            const delayTime = Math.pow(2, attempt -1) * 3000 + Math.random() * 1000;
-            log(`Waiting ${delayTime.toFixed(0)}ms before ${attemptPrefix} retry...`, 'DEBUG', 'HTTP');
-            await delay(delayTime);
-        }
+    // These checks are now for *after* a successful, JSON-parsed response
+    if (finishReason === 'MAX_TOKENS') {
+        log(`${logPrefix}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM'); // FIX: Used logPrefix
+        throw new Error(`Model ${modelName} failed: MAX_TOKENS.`);
     }
-    
-    log(`${attemptPrefix} call failed definitively after ${MAX_LLM_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
-    throw new Error(`${attemptPrefix} call to ${url} failed after ${MAX_LLM_RETRIES} attempts.`);
+    if (finishReason !== 'STOP') {
+         log(`${logPrefix}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result }); // FIX: Used logPrefix
+         throw new Error(`Model ${modelName} failed: FinishReason was ${finishReason}.`);
+    }
+
+    const content = candidate?.content;
+    if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
+        log(`${logPrefix}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result }); // FIX: Used logPrefix
+        throw new Error(`Model ${modelName} failed: Response missing content.`);
+    }
+
+    // At this point, content.parts[0].text *is* the JSON string (already parsed once in fetchLLMWithRetry)
+    const jsonText = content.parts[0].text;
+    log(`${logPrefix} Raw JSON Text`, 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' }); // FIX: Used logPrefix
+
+    try {
+        // Re-parse (this is cheap) to validate shape
+        const parsed = JSON.parse(jsonText.trim());
+        
+        if (!parsed || typeof parsed !== 'object') {
+            throw new Error("Parsed response is not a valid object.");
+        }
+        
+        // Check if the parsed object matches the expected structure
+        for (const key in expectedJsonShape) {
+            if (!parsed.hasOwnProperty(key)) {
+                throw new Error(`Parsed JSON missing required top-level key: '${key}'.`);
+            }
+            if (Array.isArray(expectedJsonShape[key]) && !Array.isArray(parsed[key])) {
+                throw new Error(`Parsed JSON key '${key}' was not an array.`);
+            }
+        }
+        
+        log(`${logPrefix}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM'); // FIX: Used logPrefix
+        return parsed; // Return the parsed object
+
+    } catch (parseError) {
+        log(`Failed to parse/validate ${logPrefix} JSON from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) }); // FIX: Used logPrefix
+        throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
+    }
 }
 
 
@@ -1668,11 +1666,6 @@ module.exports = async (request, response) => {
             for (let i = 0; i < mealsForThisDay.length; i++) {
                 const meal = mealsForThisDay[i];
                 const mealTargets = targetsPerMeal(meal);
-                
-                // Need to re-calculate totals to ensure accurate starting point (if previous meals changed)
-                // Note: Recalculation inside the loop isn't strictly necessary if it's the first time running totals, 
-                // but essential if subsequent meals in the day depend on earlier adjustments.
-                // We trust the initial LLM output is close enough for the internal meal scaling.
                 
                 // Use a deep copy for the reconciliation input as it mutates the meal object internally
                 const mealCopy = JSON.parse(JSON.stringify(meal));
