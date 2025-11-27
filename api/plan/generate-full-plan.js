@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // [NEW] Hybrid Batched Orchestrator (V14.0 - Ingredient-Centric Architecture)
-// Implements the \"full plan\" architecture:
+// Implements the "full plan" architecture:
 // 1. Compute Targets (passed in)
 // 2. Generate ALL meals
 // 3. Aggregate/Dedupe ALL ingredients
@@ -25,19 +25,19 @@ const { fetchNutritionData, lookupIngredientNutrition } = require('../nutrition-
 try {
     var { normalizeKey } = require('../scripts/normalize.js');
     var { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../utils/transforms.js');
-    var { reconcileNonProtein } = require('../utils/reconcileNonProtein.js');
+    var { reconcileNonProtein, reconcileMealLevel } = require('../utils/reconcileNonProtein.js'); // FIX: Import reconcileMealLevel
 } catch (e) {
     console.error("CRITICAL: Failed to import utils. Using local fallbacks.", e.message);
     var { normalizeKey } = require('../../scripts/normalize.js');
     var { toAsSold, getAbsorbedOil, TRANSFORM_VERSION, normalizeToGramsOrMl } = require('../../utils/transforms.js');
-    var { reconcileNonProtein } = require('../../utils/reconcileNonProtein.js');
+    var { reconcileNonProtein, reconcileMealLevel } = require('../../utils/reconcileNonProtein.js'); // FIX: Import reconcileMealLevel
 }
 
 // --- [NEW] Import validation helper (Task 1) ---
 const { validateDayPlan } = require('../../utils/validation');
 
 /// ===== IMPORTS-END ===== ////
-
+// ... (omitted: CONFIG-START, MOCK-START, HELPERS-START/END, API-CALLERS-START/END)
 // --- CONFIGURATION ---
 /// ===== CONFIG-START ===== \\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -603,9 +603,7 @@ function normalizeStateHintForItem(item, log) {
 
   return item;
 }
-// --- End State Hint Normalizer ---
 
-// --- Synthesis functions ---
 function synthTight(ing, store) {
   if (!ing || !store) return null;
   const size = ing.targetSize?.value && ing.targetSize?.unit ? ` ${ing.targetSize.value}${ing.targetSize.unit}` : "";
@@ -614,7 +612,6 @@ function synthTight(ing, store) {
 }
 function synthWide(ing, store) {
   if (!ing || !store) return null;
-  // Use the first required word as the noun, or fallback to first word of original name
   const noun = (Array.isArray(ing.requiredWords) && ing.requiredWords.length > 0 && typeof ing.requiredWords[0] === 'string')
     ? ing.requiredWords[0]
     : (typeof ing.originalIngredient === 'string' ? ing.originalIngredient.split(" ")[0] : '');
@@ -626,8 +623,8 @@ function synthWide(ing, store) {
 
 /// ===== API-CALLERS-START ===== \\
 
-// --- LLM System Prompt (Step 3: State Hint Rules Added) ---
-const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
+// --- LLM System Prompt (Step A1, A2, A3) ---
+const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day, perMealTargets) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
 RULES:
 1.  Generate meals ('meals') & items ('items') used TODAY.
@@ -639,10 +636,12 @@ RULES:
     d) 'stateHint': (string) MANDATORY. The state of the ingredient. Must be one of: "dry", "raw", "cooked", "as_pack".
     e) 'methodHint': (string | null) MANDATORY. Cooking method if state is "cooked". Must be one of: "boiled", "pan_fried", "grilled", "baked", "steamed", or null.
 4.  **CRITICAL UNIT RULE:** You MUST provide quantities in **'g'** (grams), **'ml'** (milliliters), or a specific single unit like **'egg'** or **'slice'**. You **MUST NOT** use ambiguous units like 'medium', 'large', or 'piece' for any item.
-5.  TARGETS: Aim for the protein target. The code will calculate calories based on your plan; you do NOT need to estimate them.
-6.  Adhere to all user constraints.
-7.  'meals' array is MANDATORY. Do NOT include 'ingredients' array.
-8.  Do NOT include calorie estimates in your response.
+5.  **PER-MEAL TARGETS (A2):** Each MAIN meal (Breakfast, Lunch, Dinner) should aim for ~${perMealTargets.main.calories} kcal, ~${perMealTargets.main.protein}g protein. Each SNACK should aim for ~${perMealTargets.snack.calories} kcal, ~${perMealTargets.snack.protein}g protein.
+6.  **PORTION SCALING (A3):** CRITICAL: Scale protein portions to match per-meal targets. Example: If per-meal protein target is 40g, use ~120-130g chicken breast (not 200g).
+7.  The code will calculate total calories based on your plan; you do NOT need to estimate them.
+8.  Adhere to all user constraints.
+9.  'meals' array is MANDATORY. Do NOT include 'ingredients' array.
+10. Do NOT include calorie estimates in your response.
 
 CRITICAL STATE HINT RULES:
 - "dry": Quantity refers to dry or uncooked weight (oats, rice, pasta, noodles, lentils, quinoa, other grains).
@@ -680,139 +679,89 @@ JSON Structure:
 }
 `;
 
-const GROCERY_OPTIMIZER_SYSTEM_PROMPT = (store, australianTermNote) => `
-You are an expert grocery query optimizer for store: ${store}.
-Your SOLE task is to take a JSON array of ingredient names and generate the full query/validation JSON for each.
-RULES:
-1.  'originalIngredient' MUST match the input ingredient name exactly.
-2.  'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote}
-3.  'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient.
-4.  'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient.
-5.  'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names.
-6.  'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise.
-7.  'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes.
-8.  'totalGramsRequired' (REQUIRED): This is the TOTAL grams/ml requested for the FULL plan. Use the value from the \`requested_total_g\` input.
-9.  'quantityUnits' (REQUIRED): A string describing the common purchase unit (e.g., "1kg Bag", "250g Punnet", "500ml Bottle").
-10. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"].
-
-Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
-
-JSON Structure:
-{
-  "ingredients": [
-    {
-      "originalIngredient": "string",
-      "category": "string",
-      "tightQuery": "string|null",
-      "normalQuery": "string",
-      "wideQuery": "string|null",
-      "requiredWords": ["string"],
-      "negativeKeywords": ["string"],
-      "targetSize": { "value": number, "unit": "g"|"ml" }|null,
-      "totalGramsRequired": number,
-      "quantityUnits": "string",
-      "allowedCategories": ["string"]
-    }
-  ]
-}
-`;
-
-const CHEF_SYSTEM_PROMPT = (store) => `
-You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
-RULES:
-1.  You will be given a meal name and a list of ingredients with quantities.
-2.  Your job is to generate an appetizing 1-sentence 'description' for the meal.
-3.  You MUST also generate a 'instructions' array, with each element being one step.
-4.  Instructions MUST be safe, clear, and logical.
-5.  **FOOD SAFETY IS CRITICAL:**
-    * ALWAYS include a step to "cook chicken/pork thoroughly until no longer pink and juices run clear."
-    * ALWAYS include a step to "wash all produce (vegetables/fruit) thoroughly."
-6.  Be concise. Aim for 4-7 steps.
-7.  Do NOT add any ingredients not in the provided list, except for "salt, pepper, and water" which are assumed.
-
-Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
-
-JSON Structure:
-{
-  "description": "string",
-  "instructions": ["string"]
-}
-`;
-
 /**
  * Tries to generate a plan from an LLM, retrying on failure.
  * Includes a guard against non-JSON responses.
  */
 async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
-    log(`${logPrefix}: Attempting model: ${modelName}`, 'INFO', 'LLM');
-    const apiUrl = getGeminiApiUrl(modelName);
+// ... (omitted)
+    for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
 
-    const response = await fetchLLMWithRetry(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
-        body: JSON.stringify(payload)
-    }, log, logPrefix);
+        try {
+            log(`${logPrefix} Attempt ${attempt}: Fetching from ${url} (Timeout: ${LLM_REQUEST_TIMEOUT_MS}ms)`, 'DEBUG', 'HTTP');
+            const response = await fetch(url, { ...options, signal: controller.signal });
+            clearTimeout(timeout); 
 
-    const result = await response.json(); // Safe to call .json() because of the guard in fetchLLMWithRetry
-    const candidate = result.candidates?.[0];
-    const finishReason = candidate?.finishReason;
-
-    // These checks are now for *after* a successful, JSON-parsed response
-    if (finishReason === 'MAX_TOKENS') {
-        log(`${logPrefix}: Model ${modelName} failed with finishReason: MAX_TOKENS.`, 'WARN', 'LLM');
-        throw new Error(`Model ${modelName} failed: MAX_TOKENS.`);
-    }
-    if (finishReason !== 'STOP') {
-         log(`${logPrefix}: Model ${modelName} failed with non-STOP finishReason: ${finishReason}`, 'WARN', 'LLM', { result });
-         throw new Error(`Model ${modelName} failed: FinishReason was ${finishReason}.`);
-    }
-
-    const content = candidate?.content;
-    if (!content || !content.parts || content.parts.length === 0 || !content.parts[0].text) {
-        log(`${logPrefix}: Model ${modelName} response missing content or text part.`, 'CRITICAL', 'LLM', { result });
-        throw new Error(`Model ${modelName} failed: Response missing content.`);
-    }
-
-    // At this point, content.parts[0].text *is* the JSON string (already parsed once in fetchLLMWithRetry)
-    const jsonText = content.parts[0].text;
-    log(`${logPrefix} Raw JSON Text`, 'DEBUG', 'LLM', { raw: jsonText.substring(0, 300) + '...' });
-
-    try {
-        // Re-parse (this is cheap) to validate shape
-        const parsed = JSON.parse(jsonText.trim());
-        
-        if (!parsed || typeof parsed !== 'object') {
-            throw new Error("Parsed response is not a valid object.");
-        }
-        
-        // Check if the parsed object matches the expected structure
-        for (const key in expectedJsonShape) {
-            if (!parsed.hasOwnProperty(key)) {
-                throw new Error(`Parsed JSON missing required top-level key: '${key}'.`);
+            if (response.ok) {
+                const rawText = await response.text();
+                if (!rawText || rawText.trim() === "") {
+                    throw new Error("Response was 200 OK but body was empty.");
+                }
+                
+                const trimmedText = rawText.trim();
+                if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+                    return {
+                        ok: true,
+                        status: response.status,
+                        json: () => Promise.resolve(JSON.parse(trimmedText)),
+                        text: () => Promise.resolve(trimmedText)
+                    };
+                } else {
+                    log(`${attemptPrefix} Attempt ${attempt}: 200 OK with non-JSON body. Retrying...`, 'WARN', 'HTTP', { body: trimmedText.substring(0, 100) });
+                    throw new Error(`200 OK with non-JSON body: ${trimmedText.substring(0, 100)}`);
+                }
             }
-            if (Array.isArray(expectedJsonShape[key]) && !Array.isArray(parsed[key])) {
-                throw new Error(`Parsed JSON key '${key}' was not an array.`);
-            }
-        }
-        
-        log(`${logPrefix}: Model ${modelName} succeeded.`, 'SUCCESS', 'LLM');
-        return parsed; // Return the parsed object
 
-    } catch (parseError) {
-        log(`Failed to parse/validate ${logPrefix} JSON from ${modelName}: ${parseError.message}`, 'CRITICAL', 'LLM', { jsonText: jsonText.substring(0, 300) });
-        throw new Error(`Model ${modelName} failed: Invalid JSON response. ${parseError.message}`);
+            if (response.status === 429 || response.status >= 500) {
+                log(`${attemptPrefix} Attempt ${attempt}: Received retryable error ${response.status}. Retrying...`, 'WARN', 'HTTP');
+            } else {
+                const errorBody = await response.text();
+                log(`${attemptPrefix} Attempt ${attempt}: Non-retryable error ${response.status}.`, 'CRITICAL', 'HTTP', { body: errorBody });
+                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody}`);
+            }
+        } catch (error) {
+             clearTimeout(timeout); 
+             
+             if (error.name === 'AbortError') {
+                 log(`${attemptPrefix} Attempt ${attempt}: Fetch timed out after ${LLM_REQUEST_TIMEOUT_MS}ms. Retrying...`, 'WARN', 'HTTP');
+             } else if (error instanceof SyntaxError) {
+                log(`${attemptPrefix} Attempt ${attempt}: Failed to parse response as JSON. Retrying...`, 'WARN', 'HTTP', { error: error.message });
+             } else if (!error.message?.startsWith(`${attemptPrefix} call failed with status`)) {
+                log(`${attemptPrefix} Attempt ${attempt}: Fetch failed: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+             } else {
+                 throw error;
+             }
+        }
+
+        if (attempt < MAX_LLM_RETRIES) {
+            const delayTime = Math.pow(2, attempt -1) * 3000 + Math.random() * 1000;
+            log(`Waiting ${delayTime.toFixed(0)}ms before ${attemptPrefix} retry...`, 'DEBUG', 'HTTP');
+            await delay(delayTime);
+        }
     }
+    
+    log(`${attemptPrefix} call failed definitively after ${MAX_LLM_RETRIES} attempts.`, 'CRITICAL', 'HTTP');
+    throw new Error(`${attemptPrefix} call to ${url} failed after ${MAX_LLM_RETRIES} attempts.`);
 }
+
 
 /**
  * Generates a meal plan for a *single* day.
+ * (Step A1, A4: Update signature and user query)
  */
-async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
+async function generateMealPlan_Single(day, formData, nutritionalTargets, log, perMealTargets) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
     const { calories, protein, fat, carbs } = nutritionalTargets;
+    
+    const mainMealCal = Math.round(perMealTargets.main.calories);
+    const mainMealP = Math.round(perMealTargets.main.protein);
+    const snackCal = Math.round(perMealTargets.snack.calories);
+    const snackP = Math.round(perMealTargets.snack.protein);
 
     // 1. Check Cache
-    const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
+    const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets, perMealTargets })); // Include targets in cache key
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     const cached = await cacheGet(cacheKey, log);
     if (cached) {
@@ -825,12 +774,10 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
     const requiredMeals = mealTypesMap[eatingOccasions]||mealTypesMap['3'];
     const cuisineInstruction = cuisine && cuisine.trim() ? `Focus: ${cuisine}.` : 'Neutral.';
 
-    const numMeals = parseInt(eatingOccasions, 10) || 3;
-    const mealAvg = Math.round(calories / numMeals);
-    const mealMax = Math.round(mealAvg * 1.5);
+    // Removed outdated mealAvg/mealMax calculation
 
-    const systemPrompt = MEAL_PLANNER_SYSTEM_PROMPT(weight, calories, mealMax, day);
-    let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Target: ~${calories} kcal (P ~${protein}g, F ~${fat}g, C ~${carbs}g). Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
+    const systemPrompt = MEAL_PLANNER_SYSTEM_PROMPT(weight, calories, 0, day, perMealTargets); // mealMax parameter is now obsolete, passed 0
+    let userQuery = `Gen plan Day ${day} for ${name||'Guest'}. Profile: ${age}yo ${gender}, ${height}cm, ${weight}kg. Act: ${formData.activityLevel}. Goal: ${goal}. Store: ${store}. Day ${day} Targets: DAILY ~${calories} kcal. PER MAIN MEAL: ~${mainMealCal} kcal, ~${mainMealP}g protein. PER SNACK: ~${snackCal} kcal, ~${snackP}g protein. Dietary: ${dietary}. Meals: ${eatingOccasions} (${Array.isArray(requiredMeals) ? requiredMeals.join(', ') : '3 meals'}). Spend: ${costPriority}. Cuisine: ${cuisineInstruction}.`;
 
     const logPrefix = `MealPlannerDay${day}`;
     log(`Meal Planner AI Prompt for Day ${day}`, 'INFO', 'LLM_PROMPT', {
@@ -874,6 +821,7 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
  * Generates grocery query details for the *entire* aggregated list.
  */
 async function generateGroceryQueries_Batched(aggregatedIngredients, store, log) {
+// ... (omitted)
     if (!aggregatedIngredients || aggregatedIngredients.length === 0) {
         log("generateGroceryQueries_Batched called with no ingredients. Returning empty.", 'WARN', 'LLM');
         return { ingredients: [] };
@@ -949,10 +897,7 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
     return parsedResult;
 }
 
-/**
- * Tries to generate a recipe from an LLM, retrying on failure.
- * Includes a guard against non-JSON responses.
- */
+// ... (tryGenerateChefRecipe, generateChefInstructions functions omitted for brevity)
 async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
     log(`Chef AI [${mealName}]: Attempting model: ${modelName}`, 'INFO', 'LLM_CHEF');
     const apiUrl = getGeminiApiUrl(modelName);
@@ -998,9 +943,6 @@ async function tryGenerateChefRecipe(modelName, payload, mealName, log) {
     }
 }
 
-/**
- * Generates recipe instructions for a single meal.
- */
 async function generateChefInstructions(meal, store, log) {
     const mealName = meal.name || 'Unnamed Meal';
     try {
@@ -1054,6 +996,7 @@ async function generateChefInstructions(meal, store, log) {
         return { ...meal, ...MOCK_RECIPE_FALLBACK };
     }
 }
+
 
 /// ===== API-CALLERS-END ===== ////
 
@@ -1119,6 +1062,48 @@ module.exports = async (request, response) => {
         store = formData.store;
         if (!store) throw new Error("'store' missing in formData.");
 
+        // --- Phase B: Implement Realistic Meal-Type Target Distribution (B2, B3, B4) ---
+        const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
+        const mainMealCount = Math.min(eatingOccasions, 3); // B, L, D
+        const snackCount = Math.max(0, eatingOccasions - mainMealCount);
+
+        let mainRatio, snackRatio;
+
+        if (eatingOccasions === 4) {
+            // B=28%, L=28%, D=28%, S1=16%. Total Main: 84%, Total Snack: 16%
+            mainRatio = 0.84;
+            snackRatio = 0.16;
+        } else if (eatingOccasions >= 5) {
+            // B=25%, L=25%, D=25%, S1=12.5%, S2=12.5%. Total Main: 75%, Total Snack: 25%
+            mainRatio = 0.75;
+            snackRatio = 0.25;
+        } else {
+            // 3 meals: B=33.3%, L=33.3%, D=33.3%. Total Main: 100%, Total Snack: 0%
+            mainRatio = 1.0;
+            snackRatio = 0.0;
+        }
+        
+        const mainMealSplit = mainMealCount > 0 ? mainRatio / mainMealCount : 0;
+        const snackSplit = snackCount > 0 ? snackRatio / snackCount : 0;
+
+        const targetsPerMealType = {
+            main: {
+                calories: nutritionalTargets.calories * mainMealSplit,
+                protein: nutritionalTargets.protein * mainMealSplit,
+                fat: nutritionalTargets.fat * mainMealSplit,
+                carbs: nutritionalTargets.carbs * mainMealSplit,
+            },
+            snack: {
+                calories: nutritionalTargets.calories * snackSplit,
+                protein: nutritionalTargets.protein * snackSplit,
+                fat: nutritionalTargets.fat * snackSplit,
+                carbs: nutritionalTargets.carbs * snackSplit,
+            },
+            // Used for solver macro logging (Phase 5)
+            mainCount: mainMealCount,
+            snackCount: snackCount
+        };
+
 
         // --- Phase 1: Generate ALL Meals (Sequentially) ---
         sendEvent('phase:start', { name: 'meals', description: `Generating ${numDays}-day meal plan...` });
@@ -1129,7 +1114,8 @@ module.exports = async (request, response) => {
             try {
                 // Send progress *before* starting the call
                 sendEvent('plan:progress', { pct: (day / numDays) * 25, message: `Generating meal plan for Day ${day}...` });
-                const dayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log);
+                // Step A1: Pass the new meal targets
+                const dayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log, targetsPerMealType);
                 if (!dayPlan || !dayPlan.meals || dayPlan.meals.length === 0) {
                     throw new Error(`Meal Planner AI returned no meals for Day ${day}.`);
                 }
@@ -1492,13 +1478,8 @@ module.exports = async (request, response) => {
         finalMealPlan = []; // Reset final plan, will be rebuilt here
 
         // [NEW] Macro Debug Data Initialization
-        const numMealsPerDay = parseInt(formData.eatingOccasions, 10) || 3;
-        const targetsPerMeal = {
-            calories: nutritionalTargets.calories / numMealsPerDay,
-            protein: nutritionalTargets.protein / numMealsPerDay,
-            fat: nutritionalTargets.fat / numMealsPerDay,
-            carbs: nutritionalTargets.carbs / numMealsPerDay,
-        };
+        // Removed outdated targetsPerMeal calculation (B1)
+        
         const macroDebugDaysData = [];
 
         /**
@@ -1674,9 +1655,43 @@ module.exports = async (request, response) => {
             // nutritionalTargets is the targets object for the current day
             const targetCalories = nutritionalTargets.calories;
             
+            // Determine per meal targets for logging (Phase 5)
+            const targetsPerMeal = (meal) => {
+                const isSnack = meal.type && meal.type.toLowerCase().includes('snack');
+                return isSnack ? targetsPerMealType.snack : targetsPerMealType.main;
+            };
+
+            // Phase C5 & C6: Per-meal reconciliation loop
+            let reconciliationHappened = false;
+            
+            for (let i = 0; i < mealsForThisDay.length; i++) {
+                const meal = mealsForThisDay[i];
+                const mealTargets = targetsPerMeal(meal);
+                
+                // Need to re-calculate totals to ensure accurate starting point (if previous meals changed)
+                const { totalKcal: currentKcal, totalP: currentProtein } = calculateTotals([meal], day.dayNumber);
+                
+                const { adjusted, factor, meal: reconciledMeal } = reconcileMealLevel({
+                    meal: meal,
+                    targetKcal: mealTargets.calories,
+                    targetProtein: mealTargets.protein,
+                    getItemMacros: computeItemMacros,
+                    log: log,
+                    tolPct: 15 // Use 15% tolerance for individual meal adjustment
+                });
+                
+                if (adjusted) {
+                    reconciliationHappened = true;
+                    mealsForThisDay[i] = reconciledMeal;
+                }
+            }
+
+            if (reconciliationHappened) {
+                 log(`[MEAL_RECON] Per-meal reconciliation applied on Day ${day.dayNumber}. Recalculating day totals.`, 'INFO', 'SOLVER');
+            }
 
             // --- 1. Run Solver V1 (Shadow Path) ---
-            const solverV1Meals = JSON.parse(JSON.stringify(mealsForThisDay)); // Fresh deep copy
+            const solverV1Meals = JSON.parse(JSON.stringify(mealsForThisDay)); // Fresh deep copy (start from possibly reconciled state)
             const solverV1Totals = calculateTotals(solverV1Meals, day.dayNumber);
 
             // --- 2. Run Reconciler V0 (Live Path by default) ---
@@ -1750,8 +1765,8 @@ module.exports = async (request, response) => {
             };
             
             for (const meal of selectedMeals) {
-                // Use a simple average target per meal, or null if the LLM didn't define one
-                const targetMacros = (meal.type || meal.name) ? targetsPerMeal : { calories: null, protein: null, fat: null, carbs: null };
+                // Use per-meal target function for logging (Phase 5)
+                const targetMacros = targetsPerMeal(meal); 
 
                 const mealDebug = {
                     mealName: meal.name,
