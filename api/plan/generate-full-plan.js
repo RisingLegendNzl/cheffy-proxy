@@ -10,7 +10,7 @@
 // 7. Run Reconciler (V0) as LIVE path
 // 8. Assemble and return
 
-/// ===== IMPORTS-START ===== \\\\
+/// ===== IMPORTS-START ===== \\
 const fetch = require('node-fetch');
 const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
@@ -38,7 +38,7 @@ const { validateDayPlan } = require('../../utils/validation');
 /// ===== IMPORTS-END ===== ////
 
 // --- CONFIGURATION ---
-/// ===== CONFIG-START ===== \\\\
+/// ===== CONFIG-START ===== \\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TRANSFORM_CONFIG_VERSION = TRANSFORM_VERSION || 'v13.3-hybrid';
 
@@ -83,7 +83,7 @@ const MAX_CALORIES_PER_ITEM = 1200; // Sanity check
 
 /// ===== CONFIG-END ===== ////
 
-/// ===== MOCK-START ===== \\\\
+/// ===== MOCK-START ===== \\
 const MOCK_PRODUCT_TEMPLATE = { name: "Placeholder (Not Found)", brand: "MOCK DATA", price: 0, size: "N/A", url: "#", unit_price_per_100: 0, barcode: null };
 const MOCK_RECIPE_FALLBACK = {
     description: "Meal description could not be generated.",
@@ -92,7 +92,7 @@ const MOCK_RECIPE_FALLBACK = {
 /// ===== MOCK-END ===== ////
 
 
-/// ===== HELPERS-START ===== \\\\
+/// ===== HELPERS-START ===== \\
 
 // --- Cache Helpers ---
 async function cacheGet(key, log) {
@@ -622,7 +622,7 @@ function synthWide(ing, store) {
 /// ===== HELPERS-END ===== ////
 
 
-/// ===== API-CALLERS-START ===== \\\\
+/// ===== API-CALLERS-START ===== \\
 
 // --- LLM System Prompt (Step 3: State Hint Rules Added) ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, mealMax, day) => `
@@ -1056,7 +1056,7 @@ async function generateChefInstructions(meal, store, log) {
 
 /// ===== API-CALLERS-END ===== ////
 
-/// ===== MAIN-HANDLER-START ===== \\\\
+/// ===== MAIN-HANDLER-START ===== \\
 module.exports = async (request, response) => {
     const planStartTime = Date.now();
     let dietitian_ms = 0, market_run_ms = 0, nutrition_ms = 0, solver_ms = 0, writer_ms = 0; // Telemetry timers
@@ -1388,7 +1388,16 @@ module.exports = async (request, response) => {
             if (result.source === 'discovery' && result.currentSelectionURL && Array.isArray(result.allProducts)) {
                 const selected = result.allProducts.find(p => p && p.url === result.currentSelectionURL);
                 if (selected) {
-                    itemsToFetchNutrition.push({ ingredientKey: result.originalIngredient, normalizedKey: normalizedKey, barcode: selected.barcode, query: selected.name });
+                    // Step 4 & 6: Fix the query field to use the ingredient name (RFC-006) and log
+                    itemsToFetchNutrition.push({ 
+                        ingredientKey: result.originalIngredient, 
+                        normalizedKey: normalizedKey, 
+                        barcode: selected.barcode, 
+                        // RFC-006: Use ingredient name, not supermarket product name
+                        // This ensures hot-path and canonical lookups match correctly
+                        query: result.originalIngredient
+                    });
+                    log(`[NUTRI_FETCH] Queuing: key=${normalizedKey}, query="${result.originalIngredient}", barcode=${selected.barcode || 'none'}`, 'DEBUG', 'NUTRITION');
                 }
             }
         }
@@ -1399,6 +1408,7 @@ module.exports = async (request, response) => {
             log(`Fetching nutrition for ${itemsToFetchNutrition.length} items...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemsToFetchNutrition, NUTRITION_CONCURRENCY, async (item) => {
                  try {
+                     // Step 5: Verify the fetch call uses query correctly (it does: item.query now contains the ingredient name)
                      const nut = (item.barcode || item.query) ? await fetchNutritionData(item.barcode, item.query, log) : { status: 'not_found', source: 'no_query' };
                      return { ...item, nut };
                  } catch (err) {
@@ -1513,7 +1523,16 @@ module.exports = async (request, response) => {
                  const proteinPer100 = Number(nutritionData.protein || nutritionData.protein_g_per_100g) || 0;
                  const fatPer100 = Number(nutritionData.fat || nutritionData.fat_g_per_100g) || 0;
                  const carbsPer100 = Number(nutritionData.carbs || nutritionData.carb_g_per_100g) || 0;
-                 const kcalPer100 = Number(nutritionData.kcal || nutritionData.kcal_per_100g) || 0;
+
+                 // Step 2: Fix kcal field extraction (RFC-001)
+                 // RFC-001: calories is the primary field from nutrition-search.js
+                 // Fallback chain: calories → kcal → kcal_per_100g → reconstruct from macros
+                 const kcalPer100 = 
+                     Number(nutritionData.calories) ||
+                     Number(nutritionData.kcal) || 
+                     Number(nutritionData.kcal_per_100g) || 
+                     ((proteinPer100 * 4) + (fatPer100 * 9) + (carbsPer100 * 4));
+
 
                  // Populate debug per100
                  debugItem.per100.kcal = kcalPer100;
@@ -1541,6 +1560,8 @@ module.exports = async (request, response) => {
              }
              
              // 5. Calculate final kcal
+             // Use the calculated macros (p, f, c) derived from Per100 values to calculate the final kcal
+             // Note: If kcalPer100 was reconstructed, this should match it, but this is the calculation for the final portion.
              kcal = (p * 4) + (f * 9) + (c * 4);
 
              // Populate debug computed macros
