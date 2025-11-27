@@ -1270,7 +1270,8 @@ module.exports = async (request, response) => {
                 });
             }
         }
-        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.無需date } - priceExtractStartTime });
+        // FIX: Corrected the corrupted Date.now() and misplaced subtraction
+        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.now() - priceExtractStartTime });
 
 
         // --- Phase 4: Nutrition Fetch (Mod Zone 1 & 2: Ingredient-Centric) ---
