@@ -1222,7 +1222,8 @@ module.exports = async (request, response) => {
                 totalGramsRequired: aggItem.requested_total_g, // Overwrite LLM estimate with our sum
                 dayRefs: aggItem.dayRefs,
                 stateHint: aggItem.stateHint, // MOD ZONE 1.3: Pass stateHint
-                store: store // Pass store name explicitly
+                store: store, // Pass store name explicitly
+                category: planDetails.category || 'Uncategorized' // FIX: Ensure category always exists for FE grouping
             };
         });
         
