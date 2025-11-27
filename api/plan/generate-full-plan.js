@@ -37,13 +37,14 @@ try {
 const { validateDayPlan } = require('../../utils/validation');
 
 /// ===== IMPORTS-END ===== ////
-// ... (omitted: CONFIG-START, MOCK-START, HELPERS-START/END, API-CALLERS-START/END)
+
 // --- CONFIGURATION ---
 /// ===== CONFIG-START ===== \\
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TRANSFORM_CONFIG_VERSION = TRANSFORM_VERSION || 'v13.3-hybrid';
 
 const USE_SOLVER_V1 = process.env.CHEFFY_USE_SOLVER === '1'; // Default to false (use legacy reconcile)
+const ALLOW_PROTEIN_SCALING = process.env.CHEFFY_SCALE_PROTEIN === '1'; // D3: New feature flag for protein scaling
 
 const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.0-flash';
 const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-flash';
@@ -1669,10 +1670,15 @@ module.exports = async (request, response) => {
                 const mealTargets = targetsPerMeal(meal);
                 
                 // Need to re-calculate totals to ensure accurate starting point (if previous meals changed)
-                const { totalKcal: currentKcal, totalP: currentProtein } = calculateTotals([meal], day.dayNumber);
+                // Note: Recalculation inside the loop isn't strictly necessary if it's the first time running totals, 
+                // but essential if subsequent meals in the day depend on earlier adjustments.
+                // We trust the initial LLM output is close enough for the internal meal scaling.
                 
+                // Use a deep copy for the reconciliation input as it mutates the meal object internally
+                const mealCopy = JSON.parse(JSON.stringify(meal));
+
                 const { adjusted, factor, meal: reconciledMeal } = reconcileMealLevel({
-                    meal: meal,
+                    meal: mealCopy,
                     targetKcal: mealTargets.calories,
                     targetProtein: mealTargets.protein,
                     getItemMacros: computeItemMacros,
@@ -1682,7 +1688,8 @@ module.exports = async (request, response) => {
                 
                 if (adjusted) {
                     reconciliationHappened = true;
-                    mealsForThisDay[i] = reconciledMeal;
+                    // Replace the original meal with the reconciled one
+                    mealsForThisDay[i] = reconciledMeal; 
                 }
             }
 
@@ -1708,7 +1715,11 @@ module.exports = async (request, response) => {
                 meals: mealsForThisDay.map(m => ({ ...m, items: m.items.map(i => ({ ...i, qty: i.qty_value, unit: i.qty_unit })) })),
                 targetKcal: targetCalories,
                 getItemMacros: reconcilerGetItemMacros, // Use our master calculator
-                tolPct: 5
+                tolPct: 5,
+                // D1, D2, D3: Pass parameters for protein scaling logic
+                allowProteinScaling: ALLOW_PROTEIN_SCALING,
+                targetProtein: nutritionalTargets.protein,
+                log: log
             });
 
             // Re-format scaled meals and calculate their *final* totals
