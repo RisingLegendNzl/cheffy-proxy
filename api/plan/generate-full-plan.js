@@ -1311,7 +1311,7 @@ module.exports = async (request, response) => {
                     // log is correctly scoped here
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey); 
                     currentAttemptLog.foundCount = filteredProducts.length;
-                    const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
+                    const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p => Math.max(max, p.score), 0) : 0;
                     currentAttemptLog.bestScore = currentBestScore;
 
                     if (filteredProducts.length > 0) {
@@ -1840,7 +1840,7 @@ module.exports = async (request, response) => {
         // Clean up meal objects for the frontend
         let totalCalories = 0, totalProtein = 0, totalFat = 0, totalCarbs = 0;
         
-        // MOD ZONE 3 Finalize: Attach FULL market result data (including products) AND price data
+        // 1. Create the final unique ingredient ARRAY (for uniqueIngredients field)
         const finalUniqueIngredients = aggregatedIngredients.map(({ normalizedKey, dayRefs, ...rest }) => {
              const priceData = priceDataMap.get(normalizedKey) || {};
              const marketResult = fullResultsMap.get(normalizedKey) || {}; // GET THE FULL RESULT
@@ -1865,6 +1865,14 @@ module.exports = async (request, response) => {
                  currentSelectionURL: marketResult.currentSelectionURL || MOCK_PRODUCT_TEMPLATE.url,
                  source: marketResult.source || 'error'
              };
+        });
+
+        // 2. Convert the array to an OBJECT keyed by normalizedKey (for the 'results' field)
+        const resultsObject = {};
+        finalUniqueIngredients.forEach(item => {
+            if (item.normalizedKey) {
+                resultsObject[item.normalizedKey] = item;
+            }
         });
 
 
@@ -1916,8 +1924,9 @@ module.exports = async (request, response) => {
         const responseData = {
             message: `Successfully generated full ${numDays}-day plan.`,
             mealPlan: finalMealPlan,
-            // FIX: Restore 'results' field for the frontend shopping list component
-            results: finalUniqueIngredients,           
+            // FIX: Use the OBJECT structure for 'results' expected by the ShoppingList component
+            results: resultsObject,           
+            // Keep the ARRAY structure for 'uniqueIngredients' (used by list views)
             uniqueIngredients: finalUniqueIngredients,
             // [NEW] Macro Debug Payload (Rule 1)
             macroDebug: {
