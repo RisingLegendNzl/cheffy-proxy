@@ -1,25 +1,22 @@
 /**
  * Cheffy Orchestrator
  * Enhanced Key Normalization Utility (CommonJS)
- * Version: 2.1.0 - Phase 1 Update: Expanded Synonym Coverage
- * 
- * PHASE 1 UPDATE (2025): Expanded SYNONYM_MAP to eliminate orphan keys
+ * Version: 2.2.0 - Phase 3 Update: Expanded Synonym Coverage (RFC-003)
+ * * PHASE 1 UPDATE (2025): Expanded SYNONYM_MAP to eliminate orphan keys
  * - Added comprehensive oats/grain mappings
  * - Added milk variations (including plant milks)
  * - Added protein powder variations
  * - Added mince/ground meat variations
  * - Added Australian/British terminology
  * - Fixed plural handling for critical items
- * 
- * Provides a single, consistent function for turning human-readable
+ * * Provides a single, consistent function for turning human-readable
  * ingredient names into standardized database keys with better matching.
  */
 
 /**
  * Comprehensive synonym map for ingredient normalization.
  * Maps variations to canonical forms.
- * 
- * PHASE 1 NOTE: Identity mappings (e.g., 'rolled_oats': 'rolled_oats') are intentional.
+ * * PHASE 1 NOTE: Identity mappings (e.g., 'rolled_oats': 'rolled_oats') are intentional.
  * They ensure canonical forms are not accidentally modified by subsequent processing steps.
  */
 const SYNONYM_MAP = {
@@ -49,13 +46,16 @@ const SYNONYM_MAP = {
   'rice': 'white_rice',                   // PHASE 1: Generic defaults to white
   'white_rice': 'white_rice',
   'brown_rice': 'brown_rice',
-  'jasmine_rice': 'white_rice',
-  'basmati_rice': 'white_rice',
+  'jasmine_rice': 'jasmine_rice',          // RFC-003: Identity - has own hot-path entry
+  'basmati_rice': 'white_rice',            // RFC-003: Maps to white rice
+  'sushi_rice': 'white_rice',
+  'short_grain_rice': 'white_rice',
   'long_grain_rice': 'white_rice',
-  'short_grain_rice': 'white_rice',       // PHASE 1
+  'cooked_rice': 'cooked_rice',            // RFC-003: Identity - has own hot-path entry
+  'cooked_white_rice': 'cooked_white_rice', // RFC-003: Identity - has own hot-path entry
+  'steamed_rice': 'cooked_rice',           // RFC-003: Alias
   'arborio_rice': 'white_rice',           // PHASE 1: Risotto rice
   'arborio': 'white_rice',                // PHASE 1
-  'sushi_rice': 'white_rice',             // PHASE 1
   'wild_rice': 'wild_rice',               // PHASE 1: Different nutrition profile
   'black_rice': 'black_rice',             // PHASE 1
 
@@ -430,6 +430,11 @@ const SYNONYM_MAP = {
   'cannellini_bean': 'cannellini_beans',
   'cannellini_beans': 'cannellini_beans',
   'baked_beans': 'baked_beans',
+  // RFC-003: Edamame
+  'edamame': 'edamame',
+  'edamame_beans': 'edamame',
+  'soy_beans': 'edamame',
+
 
   // =====================================================================
   // BREAKFAST ITEMS
@@ -453,6 +458,42 @@ const SYNONYM_MAP = {
   'soda_water': 'soda_water',
   'sparkling_water': 'soda_water',
   'water': 'water',
+
+  // =====================================================================
+  // ASIAN INGREDIENTS (RFC-003)
+  // =====================================================================
+  'dashi': 'dashi',
+  'dashi_stock': 'dashi',
+  'dashi_broth': 'dashi',
+  'japanese_stock': 'dashi',
+  'fish_stock': 'dashi',
+  'nori': 'nori',
+  'nori_seaweed': 'nori',
+  'nori_sheet': 'nori',
+  'seaweed_sheet': 'nori',
+  'dried_seaweed': 'nori',
+  'teriyaki_sauce': 'teriyaki_sauce',
+  'teriyaki': 'teriyaki_sauce',
+
+  // =====================================================================
+  // COATINGS & BREADCRUMBS (RFC-003)
+  // =====================================================================
+  'panko': 'panko_breadcrumbs',
+  'panko_breadcrumbs': 'panko_breadcrumbs',
+  'panko_breadcrumb': 'panko_breadcrumbs',
+  'japanese_breadcrumbs': 'panko_breadcrumbs',
+  'breadcrumbs': 'breadcrumbs',
+  'breadcrumb': 'breadcrumbs',
+  'bread_crumbs': 'breadcrumbs',
+
+  // =====================================================================
+  // SPICES & CURRY (RFC-003)
+  // =====================================================================
+  'curry_powder': 'curry_powder',
+  'curry': 'curry_powder',
+  'japanese_curry': 'japanese_curry_roux',
+  'curry_roux': 'japanese_curry_roux',
+  'curry_block': 'japanese_curry_roux',
 
   // =====================================================================
   // SUPPLEMENTS / PERFORMANCE (PHASE 1)
@@ -590,6 +631,8 @@ function normalizeKey(name) {
     key !== 'baked_beans' &&              // PHASE 1: Preserve baked_beans
     key !== 'corn_flakes' &&              // PHASE 1: Preserve corn_flakes
     key !== 'egg_noodles' &&              // PHASE 1: Preserve egg_noodles
+    key !== 'panko_breadcrumbs' &&        // RFC-003: Preserve panko_breadcrumbs
+    key !== 'breadcrumbs' &&              // RFC-003: Preserve breadcrumbs
     key.length > 2
   ) {
     key = key.slice(0, -1); // e.g., apples -> apple
@@ -716,3 +759,4 @@ module.exports = {
   levenshteinDistance,
   SYNONYM_MAP,
 };
+
