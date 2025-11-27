@@ -1,8 +1,8 @@
 /// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\
 // File: api/nutrition-search.js
-// Version: 3.3.0 - Phase 4 Update: Ingredient-Centric Lookup Export
-// Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → RAPIDAPI → OFF → USDA → FALLBACK
-// Target: Sub-second lookups, 95%+ hit rate on tiers 1-2, ZERO silent 0-macro items
+// Version: 4.0.0 - Phase 4 Update: Ingredient-Centric Core (TARGET FLOW)
+// Pipeline: HOT-PATH → Canonical (fuzzy) → EXTERNAL (Last Resort) → FALLBACK
+// Target: Decouple macro accuracy from market run product selection.
 
 const fetch = require('node-fetch');
 const { createClient } = require('@vercel/kv');
@@ -386,7 +386,7 @@ function validateCategoryMatch(normalizedKey, nutritionData) {
  * This is pure in-memory, no I/O.
  * * @param {string} normalizedKey - The ingredient key, already normalized
  * @param {function} log - Logger function
- * @returns {object | null} Nutrition data or null
+ * @returns {object|null} Nutrition data or null
  */
 function lookupHotPath(normalizedKey, log = console.log) {
   if (!normalizedKey) return null;
@@ -430,7 +430,7 @@ function lookupHotPath(normalizedKey, log = console.log) {
  * Uses exact match first, then fuzzy matching variants.
  * * @param {string} query - The ingredient query
  * @param {function} log - Logger function
- * @returns {object | null} Nutrition data or null
+ * @returns {object|null} Nutrition data or null
  */
 function lookupCanonical(query, log = console.log) {
   if (!query) return null;
@@ -438,7 +438,6 @@ function lookupCanonical(query, log = console.log) {
   const startTime = Date.now();
   const normalizedKey = normalizeKey(query);
   let finalLookupKey = normalizedKey;
-  let synonymMatchFound = null;
   
   // 1. Try exact match first
   let canonData = canonGet(normalizedKey);
@@ -467,9 +466,6 @@ function lookupCanonical(query, log = console.log) {
     return transformCanonToOutput(canonData, normalizedKey);
   }
   
-  // Synonym/Fuzzy lookup attempted (since exact match missed)
-  const synonymLookupAttempted = true;
-
   // 2. Try fuzzy match candidates
   const candidates = getFuzzyMatchCandidates(normalizedKey);
   for (let i = 1; i < candidates.length; i++) {
@@ -478,7 +474,6 @@ function lookupCanonical(query, log = console.log) {
     if (canonData) {
       const latency = Date.now() - startTime;
       finalLookupKey = candidate;
-      synonymMatchFound = candidate;
       log(`[NUTRI] CANONICAL HIT (fuzzy: ${normalizedKey} → ${candidate}) for: ${query} [${latency}ms]`, 'INFO', 'CANON');
       pipelineStats.canonicalHits++;
       
@@ -499,7 +494,7 @@ function lookupCanonical(query, log = console.log) {
         fallbackReason: null,
       });
 
-      return transformCanonToOutput(canonData, fuzzyMatch.key);
+      return transformCanonToOutput(canonData, candidate);
     }
   }
   
@@ -511,7 +506,6 @@ function lookupCanonical(query, log = console.log) {
       if (canonData) {
         const latency = Date.now() - startTime;
         finalLookupKey = fuzzyMatch.key;
-        synonymMatchFound = fuzzyMatch.key;
         log(`[NUTRI] CANONICAL HIT (Levenshtein: ${normalizedKey} → ${fuzzyMatch.key}, distance: ${fuzzyMatch.distance}) for: ${query} [${latency}ms]`, 'INFO', 'CANON');
         pipelineStats.canonicalHits++;
         
@@ -559,7 +553,7 @@ function transformCanonToOutput(canonData, key) {
   };
 }
 
-// ---------- Tier 3-5: External API functions (unchanged) ----------
+// ---------- Tier 3-5: External API functions (unchanged for BC) ----------
 function pick(obj, keys) { for (const k of keys) { const v = obj && obj[k]; if (v != null) return Number(v); } return null; }
 function extractAvocavoNutrition(n, raw) {
   if (!n) return null;
@@ -864,32 +858,35 @@ async function usdaByQuery(q) {
 // ---------- END Tier 3-5: External API functions ----------
 
 
-// ---------- NEW: Ingredient-Centric Lookup (Tiers 1, 2, 6) ----------
+// ---------- MOD ZONE 1: NEW INGREDIENT-CENTRIC LOOKUP ----------
 /**
- * Ingredient-Centric Macro Lookup (Tier 1, 2, Fallback).
- * Guarantees a non-zero macro result based purely on the ingredient name.
- * Excludes External API lookups and caching of external results.
- * * @param {string} query - Ingredient name query (used for normalization)
+ * Ingredient-Centric Macro Lookup (TIER 1, 2, 3).
+ * Core function for macro calculation, focusing only on trusted, stable sources.
+ * Excludes external API lookups and barcode searches entirely.
+ * * @param {string} ingredientKey - The original, raw ingredient name (e.g., "Chicken Breast")
  * @param {function} log - Logger function
  * @returns {object} Nutrition data (guaranteed to be found)
  */
-async function lookupIngredientNutrition(query, log = console.log) {
+async function lookupIngredientNutrition(ingredientKey, log = console.log) {
   const overallStart = Date.now();
-  query = normFood(query);
+  const query = normFood(ingredientKey);
   const normalizedKey = normalizeKey(query);
-  
+  const finalLookupKey = normalizedKey;
+
   // --- KEY_NORMALIZATION Logging (Start of lookup) ---
   structuredLog('KEY_NORMALIZATION', {
-    originalItemKey: query,
+    originalItemKey: ingredientKey,
     normalizedKey: normalizedKey,
     synonymLookupAttempted: true, 
     synonymMatchFound: null,
-    finalLookupKey: normalizedKey,
+    finalLookupKey: finalLookupKey,
   });
 
+  // Increment total queries (counted here for ingredient-centric flow)
+  pipelineStats.totalQueries++;
+  
   // --- TIER 1: HOT-PATH (RFC-002 enforced) ---
-  const normalizedQueryForHotPath = normalizedKey; // Already normalized
-  let out = lookupHotPath(normalizedQueryForHotPath, log);
+  let out = lookupHotPath(normalizedKey, log);
 
   // --- TIER 2: CANONICAL ---
   if (!out) {
@@ -898,38 +895,35 @@ async function lookupIngredientNutrition(query, log = console.log) {
     // Update KEY_NORMALIZATION log for canonical hit if a synonym was used (best effort to capture this)
     if (out && out.source === 'CANON' && out.matchedKey !== normalizedKey) {
         structuredLog('KEY_NORMALIZATION', {
-          originalItemKey: query,
+          originalItemKey: ingredientKey,
           normalizedKey: normalizedKey,
           synonymLookupAttempted: true,
           synonymMatchFound: out.matchedKey,
           finalLookupKey: out.matchedKey,
         });
     }
+    if (out && out.source === 'CANON') out.source = 'canonical'; // Normalize source name
   }
 
-  // --- TIER 6: FALLBACK (RFC-004 enforced) ---
+  // --- TIER 3: FALLBACK ---
   if (!out) {
-    log(`[NUTRI] All internal tiers failed for '${query}', using FALLBACK`, 'WARN', 'PIPELINE');
-    out = getFallbackNutrition(query, log);
+    log(`[NUTRI] All trusted tiers failed for '${ingredientKey}', using FALLBACK`, 'WARN', 'PIPELINE');
+    out = getFallbackNutrition(ingredientKey, log);
   }
 
   const totalLatency = Date.now() - overallStart;
   log(`[NUTRI] Ingredient Pipeline complete (${out.source}) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
   
-  // Standardize source name for consumer (Canonical is 'CANON' in-file)
-  if (out.source === 'CANON') out.source = 'canonical'; 
-
   return out;
 }
 
 
-// ---------- MAIN FETCH FUNCTION with Optimized Pipeline (Remains for External Use/BC) ----------
+// ---------- MAIN FETCH FUNCTION (BACKWARD COMPATIBILITY & EXTERNAL FALLBACK) ----------
 /**
  * Main nutrition lookup function with tiered pipeline (Hotpath → Canonical → Cache → External → Fallback).
- * Note: This function remains for any consumer expecting full external lookup capabilities (e.g., recipe builder).
- * The Plan generation uses the more stable lookupIngredientNutrition function.
- * * @param {string} barcode - Optional barcode for lookup
- * @param {string} query - Ingredient name query
+ * This function remains for consumers expecting full external lookup capabilities (e.g., recipe builder).
+ * * @param {string} barcode - Optional barcode for lookup (used for cache/external API queries)
+ * @param {string} query - Ingredient name query (product name if barcode provided)
  * @param {function} log - Logger function
  * @returns {object} Nutrition data (guaranteed to have non-zero values)
  */
@@ -937,74 +931,43 @@ async function fetchNutritionData(barcode, query, log = console.log) {
   const overallStart = Date.now();
   const originalItemKey = barcode || query;
   
-  // Normalize query and original item key
+  // Normalize query
   query = normFood(query);
   const normalizedKey = normalizeKey(query);
-  const finalLookupKey = barcode ? barcode : normalizedKey;
-
-  // --- KEY_NORMALIZATION Logging (Start of lookup) ---
+  
+  // --- KEY_NORMALIZATION Logging ---
   structuredLog('KEY_NORMALIZATION', {
     originalItemKey: originalItemKey,
     normalizedKey: normalizedKey,
     synonymLookupAttempted: true,
     synonymMatchFound: null,
-    finalLookupKey: finalLookupKey,
+    finalLookupKey: barcode || normalizedKey,
   });
 
   // Increment total queries
+  // Note: Only counting in fetchNutritionData to track external calls properly.
   pipelineStats.totalQueries++;
   
-  // RFC-002: Normalize query before hot-path check to ensure ingredient names hit hot-path
-  const normalizedQueryForHotPath = normalizedKey;
+  // --- TIER 1/2: HOT-PATH / CANONICAL ---
+  let out = await lookupIngredientNutrition(query, log);
+
+  // If internal lookup hit, return it.
+  if (out.source !== 'FALLBACK') {
+    return out;
+  }
   
-
-  // --- TIER 1: HOT-PATH (Target: <5ms) ---
-  if (query) {
-    let hotResult = lookupHotPath(normalizedQueryForHotPath, log);
-    if (!hotResult && normalizedQueryForHotPath !== query) { // Only try original query if it differs from normalized one
-        hotResult = lookupHotPath(query, log);
-    }
-
-    if (hotResult) {
-      const totalLatency = Date.now() - overallStart;
-      log(`[NUTRI] Pipeline complete (HOT-PATH) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
-      // RFC-002: Return immediately if HOT-PATH hits
-      return hotResult;
-    }
-  }
-
-  // --- TIER 2: CANONICAL (Target: <50ms) ---
-  if (query) {
-    // lookupCanonical includes its own NUTRITION_LOOKUP logging and updates synonymMatchFound internally
-    const canonResult = lookupCanonical(query, log);
-    if (canonResult) {
-      const totalLatency = Date.now() - overallStart;
-      log(`[NUTRI] Pipeline complete (CANONICAL) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
-      
-      // Update KEY_NORMALIZATION log for canonical hit if a synonym was used (best effort to capture this)
-      if (canonResult.matchedKey !== normalizedKey) {
-        structuredLog('KEY_NORMALIZATION', {
-          originalItemKey: originalItemKey,
-          normalizedKey: normalizedKey,
-          synonymLookupAttempted: true,
-          synonymMatchFound: canonResult.matchedKey,
-          finalLookupKey: finalLookupKey,
-        });
-      }
-      return canonResult;
-    }
-  }
-
-  // --- TIER 3-5: EXTERNAL APIs (Cache first) ---
+  // --- TIER 3: CACHE (Using original query + barcode for external results) ---
+  // MOD ZONE 6.3: Barcode lookup for cache remains for BC with external APIs
   const cacheKeyBase = normalizeKey(barcode || query || '');
   const finalKey = `${CACHE_PREFIX}:final:${cacheKeyBase}`;
   const cached = await cacheGet(finalKey);
-  if (cached) {
+  
+  // Check if cache hit exists AND is NOT just a fallback result
+  if (cached && cached.source !== 'FALLBACK') {
     const totalLatency = Date.now() - overallStart;
-    log(`[NUTRI] Pipeline complete (CACHE) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
+    log(`[NUTRI] Pipeline complete (CACHE/BC) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
     pipelineStats.cacheHits++;
     
-    // Log cache hit
     structuredLog('NUTRITION_LOOKUP', {
       normalizedKeyInput: cacheKeyBase,
       lookupTier: 'cache',
@@ -1024,81 +987,79 @@ async function fetchNutritionData(barcode, query, log = console.log) {
     return cached;
   }
   
-  log(`[NUTRI] External API Cache MISS for: ${query || barcode}`, 'DEBUG', 'CACHE');
+  // --- TIER 4: EXTERNAL APIs (MOD ZONE 4: Demoted to last resort) ---
+  // Only proceed if internal lookup failed (out is currently the FALLBACK result)
+  if (out.source === 'FALLBACK') {
+    log(`[NUTRI] Internal lookup failed, attempting EXTERNAL API FALLBACK for '${query || barcode}'`, 'WARN', 'PIPELINE');
+    
+    const tasks = [];
+    // Barcode remains only in the external lookup functions for BC/deep search
+    if (barcode) tasks.push(tryAvocavo(barcode, true), offByBarcode(barcode)); 
+    // Query remains for ingredient-based external search
+    if (query)   tasks.push(tryAvocavo(query, false), rapidApiFoodSearch(query), offByQuery(query), usdaByQuery(query));
 
-  // Run external APIs in parallel
-  const tasks = [];
-  if (barcode) tasks.push(tryAvocavo(barcode, true));
-  if (query)   tasks.push(tryAvocavo(query, false), rapidApiFoodSearch(query), offByQuery(query), usdaByQuery(query));
+    let externalOut = null;
+    if (tasks.length) {
+      try { externalOut = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); }
+      catch { externalOut = null; }
+    }
+    
+    // --- External API Success Check and Validation ---
+    if (externalOut) {
+      // RFC-005: Validate external result matches expected category
+      if (!validateCategoryMatch(normalizedKey, externalOut)) {
+          log(`[NUTRI] External result for '${query || barcode}' (Source: ${externalOut.source}) failed category validation, retaining FALLBACK`, 'WARN', 'PIPELINE');
+          // Log failure but do NOT set 'out' to externalOut, keep the FALLBACK
+          
+          // Log failure details
+          structuredLog('NUTRITION_LOOKUP', {
+              normalizedKeyInput: normalizedKey,
+              lookupTier: 'external',
+              externalApiQuery: barcode || query,
+              externalApiProductName: (externalOut._raw && (externalOut._raw.product_name || externalOut._raw.name)) || externalOut.matchedKey || (barcode || query),
+              rawApiResponse: externalOut._raw || externalOut,
+              mappedFields: {
+                  kcal: externalOut.calories,
+                  protein: externalOut.protein,
+                  fat: externalOut.fat,
+                  carbs: externalOut.carbs
+              },
+              fieldMappingUsed: externalOut._mapping || { error: 'Mapping details missing for source: ' + externalOut.source },
+              fallbackReason: `Failed category validation for ${inferCategoryFromKey(normalizedKey)}`,
+          });
+          
+      } else {
+        // External API succeeded and passed validation
+        pipelineStats.externalHits++;
+        out = externalOut; // Use the valid external result
 
-  let out = null;
-  if (tasks.length) {
-    try { out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); }
-    catch { out = null; }
-  }
-
-  if (!out && barcode) out = await offByBarcode(barcode);
-  if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
-  
-  // --- External API Success Check and Validation ---
-  if (out) {
-    // RFC-005: Validate external result matches expected category
-    if (!validateCategoryMatch(normalizedKey, out)) {
-        log(`[NUTRI] External result for '${query || barcode}' (Source: ${out.source}) failed category validation, forcing fallback`, 'WARN', 'PIPELINE');
-        // Update NUTRITION_LOOKUP log with failure reason before nullifying 'out'
-        structuredLog('NUTRITION_LOOKUP', {
+        // Log external success
+        if (out.source !== 'rapidapi') { 
+          structuredLog('NUTRITION_LOOKUP', {
             normalizedKeyInput: normalizedKey,
             lookupTier: 'external',
             externalApiQuery: barcode || query,
             externalApiProductName: (out._raw && (out._raw.product_name || out._raw.name)) || out.matchedKey || (barcode || query),
             rawApiResponse: out._raw || out,
             mappedFields: {
-                kcal: out.calories,
-                protein: out.protein,
-                fat: out.fat,
-                carbs: out.carbs
+              kcal: out.calories,
+              protein: out.protein,
+              fat: out.fat,
+              carbs: out.carbs
             },
             fieldMappingUsed: out._mapping || { error: 'Mapping details missing for source: ' + out.source },
-            fallbackReason: `Failed category validation for ${inferCategoryFromKey(normalizedKey)}`,
-        });
-        out = null; // Force fallback
+            fallbackReason: null,
+          });
+        }
+        
+        // Clean up temporary logging fields before caching final result
+        delete out._raw;
+        delete out._mapping;
+      }
     }
   }
 
-  // --- TIER 6: FALLBACK (RFC-004: Ensure fallback is always used and returned) ---
-  if (!out) {
-    log(`[NUTRI] All external tiers failed for '${query || barcode}', using FALLBACK`, 'WARN', 'PIPELINE');
-    // getFallbackNutrition handles its own NUTRITION_LOOKUP logging and updates pipelineStats.fallbackHits
-    out = getFallbackNutrition(query || barcode, log);
-  } else {
-    // External API succeeded and passed validation
-    pipelineStats.externalHits++;
-
-    // --- NUTRITION_LOOKUP Logging (External API success) ---
-    // If the winning external function was rapidApiFoodSearch, it already logged its success/failure.
-    if (out.source !== 'rapidapi') { 
-      structuredLog('NUTRITION_LOOKUP', {
-        normalizedKeyInput: normalizedKey,
-        lookupTier: 'external',
-        externalApiQuery: barcode || query,
-        externalApiProductName: (out._raw && (out._raw.product_name || out._raw.name)) || out.matchedKey || (barcode || query),
-        rawApiResponse: out._raw || out,
-        mappedFields: {
-          kcal: out.calories,
-          protein: out.protein,
-          fat: out.fat,
-          carbs: out.carbs
-        },
-        fieldMappingUsed: out._mapping || { error: 'Mapping details missing for source: ' + out.source },
-        fallbackReason: null,
-      });
-    }
-
-    // Clean up temporary logging fields before caching final result
-    delete out._raw;
-    delete out._mapping;
-  }
-
+  // --- TIER 5: Final Cache & Return ---
   await cacheSet(finalKey, out, TTL_FINAL_MS);
   
   const totalLatency = Date.now() - overallStart;
@@ -1116,13 +1077,7 @@ module.exports = async (req, res) => {
 
   try {
     const { barcode, query } = req.query;
-    // Note on MACRO_CALC_INPUT: 
-    // The computeDetailedItemMacros function appears to be in a downstream module 
-    // that consumes the output of fetchNutritionData. 
-    // To implement MACRO_CALC_INPUT logging, you must modify the calling code 
-    // to log the details immediately before the macro calculation begins, 
-    // using the data returned by fetchNutritionData.
-    
+    // For BC: Uses barcode and product name (query) to potentially hit external APIs
     const data = await fetchNutritionData(barcode, query, console.log);
     if (data.status === 'found') return res.status(200).json(data);
     return res.status(404).json(data);
@@ -1134,7 +1089,7 @@ module.exports = async (req, res) => {
 };
 
 module.exports.fetchNutritionData = fetchNutritionData;
-module.exports.lookupIngredientNutrition = lookupIngredientNutrition; // NEW EXPORT
+module.exports.lookupIngredientNutrition = lookupIngredientNutrition; // MOD ZONE 1: NEW EXPORT
 module.exports.getHotPathStats = getHotPathStats;
 module.exports.getPipelineStats = getPipelineStats;
 module.exports.resetPipelineStats = resetPipelineStats;
