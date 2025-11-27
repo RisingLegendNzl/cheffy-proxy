@@ -948,28 +948,6 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
     return parsedResult;
 }
 
-const CHEF_SYSTEM_PROMPT = (store) => `
-You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
-RULES:
-1.  You will be given a meal name and a list of ingredients with quantities.
-2.  Your job is to generate an appetizing 1-sentence 'description' for the meal.
-3.  You MUST also generate a 'instructions' array, with each element being one step.
-4.  Instructions MUST be safe, clear, and logical.
-5.  **FOOD SAFETY IS CRITICAL:**
-    * ALWAYS include a step to "cook chicken/pork thoroughly until no longer pink and juices run clear."
-    * ALWAYS include a step to "wash all produce (vegetables/fruit) thoroughly."
-6.  Be concise. Aim for 4-7 steps.
-7.  Do NOT add any ingredients not in the provided list, except for "salt, pepper, and water" which are assumed.
-
-Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
-
-JSON Structure:
-{
-  "description": "string",
-  "instructions": ["string"]
-}
-`;
-
 /**
  * Tries to generate a recipe from an LLM, retrying on failure.
  * Includes a guard against non-JSON responses.
@@ -1667,8 +1645,7 @@ module.exports = async (request, response) => {
             
             // --- Determine which meal/total set to use ---
             let selectedMeals = USE_SOLVER_V1 ? solverV1Meals : reconcilerV0Meals;
-            let selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Meals; // Should be reconcilerV0Totals
-            selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Totals; // Fixed bug here.
+            let selectedTotals = USE_SOLVER_V1 ? solverV1Totals : reconcilerV0Totals;
 
             // --- 3. Log Comparison ---
             log(`[Solver] Day ${day.dayNumber} Shadow Mode Comparison:`, 'INFO', 'SOLVER', {
