@@ -1310,7 +1310,7 @@ module.exports = async (request, response) => {
                     
                     // log is correctly scoped here
                     const filteredProducts = applyPriceOutlierGuard(validProductsOnPage, log, ingredientKey); 
-                    // FIX SYNTAX ERROR (p =>) -> (p) =>
+                    // Syntax Fix applied previously: (max, p => Math.max...) -> (max, p) => Math.max...
                     const currentBestScore = filteredProducts.length > 0 ? filteredProducts.reduce((max, p) => Math.max(max, p.score), 0) : 0;
                     currentAttemptLog.bestScore = currentBestScore;
 
@@ -1849,21 +1849,12 @@ module.exports = async (request, response) => {
              // then override with the cleaner priceData structure where available.
              return {
                  ...rest, // originalIngredient, requested_total_g, stateHint
+                 normalizedKey,  // Keep normalizedKey for frontend lookups
                  dayRefs: Array.from(dayRefs), // Convert Set to Array
-                 // Start with Market Run Result (for product arrays, source, selection URL, queries)
-                 ...marketResult, 
-                 // Override/add with price extraction data (cleaner names)
-                 market: {
-                     price: priceData.price || 0,
-                     url: priceData.url || MOCK_PRODUCT_TEMPLATE.url,
-                     productName: priceData.productName || rest.originalIngredient,
-                     unitPrice: priceData.unitPrice || 0,
-                     store: priceData.store || store
-                 },
-                 // Add core fields from marketResult explicitly to top level for FE compatibility
-                 allProducts: marketResult.allProducts || [],
-                 currentSelectionURL: marketResult.currentSelectionURL || MOCK_PRODUCT_TEMPLATE.url,
-                 source: marketResult.source || 'error'
+                 // Include ALL market result data (allProducts, currentSelectionURL, source)
+                 ...marketResult,
+                 // Include price data (overwrites for cleaner structure)
+                 ...priceData
              };
         });
 
