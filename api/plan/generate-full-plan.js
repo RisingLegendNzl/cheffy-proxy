@@ -17,7 +17,7 @@ const { createClient } = require('@vercel/kv');
 
 // Import cache-wrapped microservices
 const { fetchPriceData } = require('../price-search.js');
-// IMPORT MODIFICATION: Now importing the ingredient-centric lookup function
+// MOD ZONE 1.1: Import new ingredient-centric function
 const { fetchNutritionData, lookupIngredientNutrition } = require('../nutrition-search.js'); 
 
 // Import utils
@@ -805,7 +805,6 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
 
 /**
  * Generates a meal plan for a *single* day.
- * This is the new, reliable replacement for the batched meal generator.
  */
 async function generateMealPlan_Single(day, formData, nutritionalTargets, log) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, mealVariety, cuisine } = formData;
@@ -1159,12 +1158,15 @@ module.exports = async (request, response) => {
                     if (existing) {
                         existing.requested_total_g += gramsOrMl;
                         existing.dayRefs.add(day.dayNumber);
+                        // Carry forward stateHint if not yet set
+                        if (!existing.stateHint) existing.stateHint = item.stateHint; 
                     } else {
                         ingredientMap.set(item.normalizedKey, {
                             originalIngredient: item.key, // Use the first-seen name as the "original"
                             normalizedKey: item.normalizedKey,
                             requested_total_g: gramsOrMl,
-                            dayRefs: new Set([day.dayNumber])
+                            dayRefs: new Set([day.dayNumber]),
+                            stateHint: item.stateHint // MOD ZONE 1.3: Pass stateHint
                         });
                     }
                 }
@@ -1204,7 +1206,8 @@ module.exports = async (request, response) => {
                 ...planDetails, // Contains LLM-generated query data
                 normalizedKey: aggItem.normalizedKey,
                 totalGramsRequired: aggItem.requested_total_g, // Overwrite LLM estimate with our sum
-                dayRefs: aggItem.dayRefs
+                dayRefs: aggItem.dayRefs,
+                stateHint: aggItem.stateHint // MOD ZONE 1.3: Pass stateHint
             };
         });
 
@@ -1267,7 +1270,7 @@ module.exports = async (request, response) => {
                 });
             }
         }
-        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.now() - priceExtractStartTime });
+        sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.無需date } - priceExtractStartTime });
 
 
         // --- Phase 4: Nutrition Fetch (Mod Zone 1 & 2: Ingredient-Centric) ---
@@ -1277,10 +1280,11 @@ module.exports = async (request, response) => {
         const nutritionDataMap = new Map(); // Map<normalizedKey, nutritionData>
         let canonicalHitsToday = 0; // Keep tracking canonical fallbacks
 
-        // 4a. Gather items that need nutrition fetching (ALL aggregated items)
+        // MOD ZONE 1.1: Gather items for ingredient lookup (ALL aggregated ingredients)
         const itemNutritionRequests = aggregatedIngredients.map(item => ({
             normalizedKey: item.normalizedKey,
             query: item.originalIngredient,
+            stateHint: item.stateHint // MOD ZONE 1.3: Pass stateHint
         }));
         
         // 4b. Fetch in parallel using the ingredient-centric lookup
@@ -1288,7 +1292,7 @@ module.exports = async (request, response) => {
             log(`Fetching nutrition for ${itemNutritionRequests.length} unique ingredients...`, 'INFO', 'HTTP');
             const nutritionResults = await concurrentlyMap(itemNutritionRequests, NUTRITION_CONCURRENCY, async (item) => {
                  try {
-                     // MOD ZONE 2: Call Ingredient-Centric Lookup
+                     // MOD ZONE 2.1, 2.2, 2.3: Call lookupIngredientNutrition with only ingredientKey
                      const nut = await lookupIngredientNutrition(item.query, log); 
                      
                      // Check if it's a Canonical hit for telemetry
@@ -1304,9 +1308,6 @@ module.exports = async (request, response) => {
             nutritionResults.forEach(item => {
                  if (item && item.normalizedKey && item.nut) {
                     nutritionDataMap.set(item.normalizedKey, item.nut);
-                     
-                    // IMPORTANT: We NO LONGER ATTACH NUTRITION TO THE PRODUCT (fullResultsMap)
-                    // The macro calculation (Phase 5) now reads directly from nutritionDataMap.
                  }
             });
         }
@@ -1360,7 +1361,7 @@ module.exports = async (request, response) => {
                 computedMacros: { calories: 0, protein: 0, fat: 0, carbs: 0 },
                 source: 'missing',
                 notes: null,
-                lookupMethod: 'ingredient-centric' // MOD ZONE 4.1: Flag new method
+                lookupMethod: 'ingredient-centric' // MOD ZONE 4.3: Add ingredient-centric flag
              };
              
              // ... (rest of initial checks) ...
@@ -1409,11 +1410,12 @@ module.exports = async (request, response) => {
                  f = (fatPer100 / 100) * grams;
                  c = (carbsPer100 / 100) * grams;
                  
-                 source = nutritionData.source.toLowerCase().includes('canon') ? 'canonical' : nutritionData.source.toLowerCase().includes('fall') ? 'fallback' : 'external';
+                 source = nutritionData.source.toLowerCase();
                  debugItem.source = source;
                  
                  // MOD ZONE 4.2: Log warning if an external API was used
-                 if (source === 'external' && gramsInput > 0) {
+                 // In the ingredient-centric flow, the only valid sources are HOT_PATH, CANONICAL, or FALLBACK
+                 if (source !== 'hot_path' && source !== 'canonical' && source !== 'fallback' && gramsInput > 0) {
                      log(`[MACRO_DEBUG] WARNING: External API used for '${item.key}'. Potential for macro drift. Source: ${nutritionData.source}`, 'WARN', 'CALC');
                  }
              } else { 
