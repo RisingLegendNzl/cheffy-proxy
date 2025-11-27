@@ -342,6 +342,7 @@ const useAppLogic = ({
             if (!silent) {
                 showToast('Failed to save profile', 'error');
             }
+            return;
         }
     }, [formData, nutritionalTargets, userId, db, isAuthReady, showToast]);
 
@@ -960,7 +961,8 @@ const useAppLogic = ({
     const categorizedResults = useMemo(() => {
         const groups = {};
         Object.entries(results || {}).forEach(([normalizedKey, item]) => {
-            if (item && item.originalIngredient && (item.source === 'discovery' || item.source === 'failed' || item.source === 'error' || item.source === 'canonical_fallback')) {
+            // FIX: Remove overly restrictive 'source' filter to display all ingredients.
+            if (item && item.originalIngredient) {
                 const category = item.category || 'Uncategorized';
                 if (!groups[category]) groups[category] = [];
                  if (!groups[category].some(existing => existing.originalIngredient === item.originalIngredient)) {
