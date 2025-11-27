@@ -1270,7 +1270,7 @@ module.exports = async (request, response) => {
                 });
             }
         }
-        // FIX: Replaced corrupted code with correct Date.now() subtraction
+        // FIX: Replaced corrupted code with correct syntax
         sendEvent('phase:end', { name: 'price_extract', duration_ms: Date.now() - priceExtractStartTime });
 
 
