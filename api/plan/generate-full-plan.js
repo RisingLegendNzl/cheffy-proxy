@@ -1916,9 +1916,8 @@ module.exports = async (request, response) => {
         const responseData = {
             message: `Successfully generated full ${numDays}-day plan.`,
             mealPlan: finalMealPlan,
-            // REMOVED fullResultsMap (product-centric market run data)
-            // Replaced with finalUniqueIngredients which includes price data
-            results: finalUniqueIngredients, // MOD ZONE 3 Finalize: Now contains full product data
+            // FIX: Restore 'results' field for the frontend shopping list component
+            results: finalUniqueIngredients,           
             uniqueIngredients: finalUniqueIngredients,
             // [NEW] Macro Debug Payload (Rule 1)
             macroDebug: {
