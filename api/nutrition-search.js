@@ -1,6 +1,6 @@
 /// ========= NUTRITION-SEARCH-OPTIMIZED ========= \\
 // File: api/nutrition-search.js
-// Version: 3.2.0 - Phase 3 Update: Added Detailed Debug Logging
+// Version: 3.2.1 - Phase 3 Update: Hotpath Priority & Category Sanity (RFC-002, RFC-005)
 // Pipeline: HOT-PATH → Canonical (fuzzy) → Avocavo → RAPIDAPI → OFF → USDA → FALLBACK
 // Target: Sub-second lookups, 95%+ hit rate on tiers 1-2, ZERO silent 0-macro items
 
@@ -203,7 +203,7 @@ const pipelineStats = {
   canonicalHits: 0,
   externalHits: 0,
   cacheHits: 0,
-  fallbackHits: 0,
+  fallbackHits: 0, // Step 6: Ensure fallbackHits is initialized
   totalQueries: 0,
   errors: 0,
   startTime: Date.now(),
@@ -306,27 +306,100 @@ function withTimeout(promise, ms = 8000) {
 }
 function softLog(name, q) { try { console.log(`[NUTRI] ${name}: ${q}`); } catch {} }
 
+// ---------- USDA link helpers ----------
+function extractFdcId(any) {
+  const c = [
+    any?.fdc_id, any?.fdcId, any?.fdc_id_str,
+    any?.usda_fdc_id, any?.usda?.fdc_id,
+    any?.match?.fdc_id, any?.matches?.[0]?.fdc_id,
+    any?.product?.fdc_id, any?.meta?.fdc_id
+  ];
+  const id = c.find(v => v != null && String(v).match(/^\d+$/));
+  return id ? String(id) : null;
+}
+function usdaLinkFromId(id) { return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
+
+// ---------- Nutrition validation (calorie balance sanity) ----------
+function accept(out) {
+  const P = Number(out.protein), F = Number(out.fat), C = Number(out.carbs), K = Number(out.calories);
+  if (!(K > 0 && P >= 0 && F >= 0 && C >= 0)) return false;
+  const est = 4 * P + 4 * C + 9 * F;
+  return Math.abs(K - est) / Math.max(1, K) <= 0.12;
+}
+
+/**
+ * RFC-005: Validates that external nutrition data matches expected category profile.
+ * Returns true if data is plausible for the ingredient category.
+ * @param {string} normalizedKey - The normalized ingredient key
+ * @param {object} nutritionData - The nutrition data to validate
+ * @returns {boolean} True if data passes category validation
+ */
+function validateCategoryMatch(normalizedKey, nutritionData) {
+    const P = Number(nutritionData.protein) || 0;
+    const F = Number(nutritionData.fat) || 0;
+    const C = Number(nutritionData.carbs) || 0;
+    const K = Number(nutritionData.calories) || 0;
+    
+    // Infer category from key
+    const category = inferCategoryFromKey(normalizedKey);
+    
+    switch (category) {
+        case 'protein':
+            // Lean proteins: protein > 15g/100g, carbs < 15g/100g, fat < 30g/100g (allow some fatty cuts)
+            if (P < 10 || C > 15 || F > 30) {
+                console.log(`[NUTRI] Category mismatch: ${normalizedKey} (protein) failed: P=${P}, C=${C}, F=${F}`);
+                return false;
+            }
+            break;
+        case 'vegetable':
+            // Vegetables: kcal < 150, protein < 15, fat < 10 (allow for starchy/avocado, but keep lean)
+            if (K > 200 || P > 15 || F > 15) {
+                console.log(`[NUTRI] Category mismatch: ${normalizedKey} (vegetable) failed: K=${K}, P=${P}, F=${F}`);
+                return false;
+            }
+            break;
+        case 'grain':
+            // Grains: carbs > 30g/100g (dry basis)
+            if (C < 30) {
+                console.log(`[NUTRI] Category mismatch: ${normalizedKey} (grain) failed: C=${C}`);
+                return false;
+            }
+            break;
+        case 'fruit':
+            // Fruits: kcal < 200, protein < 10, fat < 10 (allow for fatty fruits like avocado)
+            if (K > 250 || P > 15 || F > 20) {
+                console.log(`[NUTRI] Category mismatch: ${normalizedKey} (fruit) failed: K=${K}, P=${P}, F=${F}`);
+                return false;
+            }
+            break;
+        // dairy, fat, nut, condiment, supplement, sweetener, legume: less strict, accept by default
+        default:
+            return true;
+    }
+    return true;
+}
+
+
 // ---------- Tier 1: HOT-PATH Lookup (Target: <5ms) ----------
 /**
  * Attempts hot-path lookup for ultra-common ingredients.
  * This is pure in-memory, no I/O.
- * * @param {string} query - The ingredient query
+ * * @param {string} normalizedKey - The ingredient key, already normalized
  * @param {function} log - Logger function
  * @returns {object | null} Nutrition data or null
  */
-function lookupHotPath(query, log = console.log) {
-  if (!query) return null;
+function lookupHotPath(normalizedKey, log = console.log) {
+  if (!normalizedKey) return null;
   
   const startTime = Date.now();
-  const normalizedKey = normalizeKey(query);
   
   const result = getHotPath(normalizedKey);
   const latency = Date.now() - startTime;
   
   if (result) {
-    log(`[NUTRI] HOT-PATH HIT for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'INFO', 'HOT_PATH');
+    log(`[NUTRI] HOT-PATH HIT for: ${normalizedKey} [${latency}ms]`, 'INFO', 'HOT_PATH');
     pipelineStats.hotPathHits++;
-
+    
     // --- NUTRITION_LOOKUP Logging (Hotpath Tier) ---
     structuredLog('NUTRITION_LOOKUP', {
       normalizedKeyInput: normalizedKey,
@@ -343,11 +416,11 @@ function lookupHotPath(query, log = console.log) {
       fieldMappingUsed: { kcal: 'calories', protein: 'protein', fat: 'fat', carbs: 'carbs' },
       fallbackReason: null,
     });
-
+    
     return result;
   }
   
-  log(`[NUTRI] HOT-PATH MISS for: ${query} (key: ${normalizedKey}) [${latency}ms]`, 'DEBUG', 'HOT_PATH');
+  log(`[NUTRI] HOT-PATH MISS for: ${normalizedKey} [${latency}ms]`, 'DEBUG', 'HOT_PATH');
   return null;
 }
 
@@ -484,27 +557,6 @@ function transformCanonToOutput(canonData, key) {
     version: CANON_VERSION,
     matchedKey: key
   };
-}
-
-// ---------- USDA link helpers ----------
-function extractFdcId(any) {
-  const c = [
-    any?.fdc_id, any?.fdcId, any?.fdc_id_str,
-    any?.usda_fdc_id, any?.usda?.fdc_id,
-    any?.match?.fdc_id, any?.matches?.[0]?.fdc_id,
-    any?.product?.fdc_id, any?.meta?.fdc_id
-  ];
-  const id = c.find(v => v != null && String(v).match(/^\d+$/));
-  return id ? String(id) : null;
-}
-function usdaLinkFromId(id) { return id ? `https://fdc.nal.usda.gov/fdc-app.html#/food/${id}` : null; }
-
-// ---------- Nutrition validation (calorie balance sanity) ----------
-function accept(out) {
-  const P = Number(out.protein), F = Number(out.fat), C = Number(out.carbs), K = Number(out.calories);
-  if (!(K > 0 && P >= 0 && F >= 0 && C >= 0)) return false;
-  const est = 4 * P + 4 * C + 9 * F;
-  return Math.abs(K - est) / Math.max(1, K) <= 0.12;
 }
 
 // ---------- Tier 3: Avocavo API ----------
@@ -747,8 +799,7 @@ async function offByBarcode(b) {
 }
 
 async function offByQuery(q) {
-  // Similar logging pattern should be applied here, omitted for brevity and to avoid repeating similar long blocks.
-  // The result object will still contain _raw and _mapping fields for logging in fetchNutritionData.
+  // Omitted logging detail for brevity, but it should be implemented in production.
   const key = `${CACHE_PREFIX}:offq:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
@@ -781,7 +832,7 @@ async function offByQuery(q) {
 
 // ---------- Tier 5: USDA ----------
 async function usdaByQuery(q) {
-  // Similar logging pattern should be applied here, omitted for brevity and to avoid repeating similar long blocks.
+  // Omitted logging detail for brevity, but it should be implemented in production.
   const key = `${CACHE_PREFIX}:usda:${normalizeKey(q)}`;
   const c = await cacheGet(key); if (c) return c;
   try {
@@ -836,6 +887,8 @@ async function usdaByQuery(q) {
 async function fetchNutritionData(barcode, query, log = console.log) {
   const overallStart = Date.now();
   const originalItemKey = barcode || query;
+  
+  // Normalize query and original item key
   query = normFood(query);
   const normalizedKey = normalizeKey(query);
   const finalLookupKey = barcode ? barcode : normalizedKey;
@@ -852,13 +905,23 @@ async function fetchNutritionData(barcode, query, log = console.log) {
   // Increment total queries
   pipelineStats.totalQueries++;
   
+  // RFC-002: Normalize query before hot-path check to ensure ingredient names hit hot-path
+  // even when barcode is provided (barcode lookups often return product names, not ingredient names)
+  const normalizedQueryForHotPath = query ? normalizeKey(query) : null;
+  
+
   // --- TIER 1: HOT-PATH (Target: <5ms) ---
   if (query) {
-    // lookupHotPath includes its own NUTRITION_LOOKUP logging
-    const hotResult = lookupHotPath(query, log);
+    // Try normalized key first (most likely to hit), then original query
+    let hotResult = lookupHotPath(normalizedQueryForHotPath, log);
+    if (!hotResult && normalizedQueryForHotPath !== query) { // Only try original query if it differs from normalized one
+        hotResult = lookupHotPath(query, log);
+    }
+
     if (hotResult) {
       const totalLatency = Date.now() - overallStart;
       log(`[NUTRI] Pipeline complete (HOT-PATH) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
+      // RFC-002: Return immediately if HOT-PATH hits
       return hotResult;
     }
   }
@@ -889,8 +952,6 @@ async function fetchNutritionData(barcode, query, log = console.log) {
   const cacheKeyBase = normalizeKey(barcode || query || '');
   const finalKey = `${CACHE_PREFIX}:final:${cacheKeyBase}`;
   const cached = await cacheGet(finalKey);
-  
-  // NUTRITION_LOOKUP Logging (Cache Hit)
   if (cached) {
     const totalLatency = Date.now() - overallStart;
     log(`[NUTRI] Pipeline complete (CACHE) [${totalLatency}ms]`, 'DEBUG', 'PIPELINE');
@@ -925,29 +986,49 @@ async function fetchNutritionData(barcode, query, log = console.log) {
 
   let out = null;
   if (tasks.length) {
-    try { 
-      // Promise.race returns the first one that resolves with a non-null value
-      out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); 
-    }
+    try { out = await Promise.race(tasks.map(t => t.then(v => v || null).catch(() => null))); }
     catch { out = null; }
   }
 
-  // Secondary/serial attempts (these are logged within the functions if they hit)
   if (!out && barcode) out = await offByBarcode(barcode);
   if (!out && query)   out = await offByQuery(query) || await usdaByQuery(query);
   
-  // --- PHASE 2: TIER 6 - FALLBACK (Never return 0 macros) ---
+  // --- External API Success Check and Validation ---
+  if (out) {
+    // RFC-005: Validate external result matches expected category
+    if (!validateCategoryMatch(normalizedKey, out)) {
+        log(`[NUTRI] External result for '${query || barcode}' (Source: ${out.source}) failed category validation, forcing fallback`, 'WARN', 'PIPELINE');
+        // Update NUTRITION_LOOKUP log with failure reason before nullifying 'out'
+        structuredLog('NUTRITION_LOOKUP', {
+            normalizedKeyInput: normalizedKey,
+            lookupTier: 'external',
+            externalApiQuery: barcode || query,
+            externalApiProductName: (out._raw && (out._raw.product_name || out._raw.name)) || out.matchedKey || (barcode || query),
+            rawApiResponse: out._raw || out,
+            mappedFields: {
+                kcal: out.calories,
+                protein: out.protein,
+                fat: out.fat,
+                carbs: out.carbs
+            },
+            fieldMappingUsed: out._mapping || { error: 'Mapping details missing for source: ' + out.source },
+            fallbackReason: `Failed category validation for ${inferCategoryFromKey(normalizedKey)}`,
+        });
+        out = null; // Force fallback
+    }
+  }
+
+  // --- TIER 6: FALLBACK (RFC-004: Ensure fallback is always used and returned) ---
   if (!out) {
     log(`[NUTRI] All external tiers failed for '${query || barcode}', using FALLBACK`, 'WARN', 'PIPELINE');
-    // getFallbackNutrition handles its own NUTRITION_LOOKUP logging
+    // getFallbackNutrition handles its own NUTRITION_LOOKUP logging and updates pipelineStats.fallbackHits
     out = getFallbackNutrition(query || barcode, log);
   } else {
-    // External API succeeded and was not logged in its wrapper (like Avocavo, OFF, USDA)
+    // External API succeeded and passed validation
     pipelineStats.externalHits++;
 
     // --- NUTRITION_LOOKUP Logging (External API success) ---
-    // Use the temporary fields added to the 'out' object to log details
-    // Note: If the winning external function was rapidApiFoodSearch, it already logged its success/failure.
+    // If the winning external function was rapidApiFoodSearch, it already logged its success/failure.
     if (out.source !== 'rapidapi') { 
       structuredLog('NUTRITION_LOOKUP', {
         normalizedKeyInput: normalizedKey,
