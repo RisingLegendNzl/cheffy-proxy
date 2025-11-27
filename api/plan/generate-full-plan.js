@@ -1840,13 +1840,30 @@ module.exports = async (request, response) => {
         // Clean up meal objects for the frontend
         let totalCalories = 0, totalProtein = 0, totalFat = 0, totalCarbs = 0;
         
-        // MOD ZONE 3 Finalize: Attach price data to final unique ingredient list
+        // MOD ZONE 3 Finalize: Attach FULL market result data (including products) AND price data
         const finalUniqueIngredients = aggregatedIngredients.map(({ normalizedKey, dayRefs, ...rest }) => {
-             const priceData = priceDataMap.get(normalizedKey);
+             const priceData = priceDataMap.get(normalizedKey) || {};
+             const marketResult = fullResultsMap.get(normalizedKey) || {}; // GET THE FULL RESULT
+             
+             // Merge market data (which contains allProducts, currentSelectionURL, source, etc.)
+             // then override with the cleaner priceData structure where available.
              return {
-                 ...rest,
+                 ...rest, // originalIngredient, requested_total_g, stateHint
                  dayRefs: Array.from(dayRefs), // Convert Set to Array
-                 market: priceData || { price: 0, url: MOCK_PRODUCT_TEMPLATE.url, productName: rest.originalIngredient, unitPrice: 0 }
+                 // Start with Market Run Result (for product arrays, source, selection URL, queries)
+                 ...marketResult, 
+                 // Override/add with price extraction data (cleaner names)
+                 market: {
+                     price: priceData.price || 0,
+                     url: priceData.url || MOCK_PRODUCT_TEMPLATE.url,
+                     productName: priceData.productName || rest.originalIngredient,
+                     unitPrice: priceData.unitPrice || 0,
+                     store: priceData.store || store
+                 },
+                 // Add core fields from marketResult explicitly to top level for FE compatibility
+                 allProducts: marketResult.allProducts || [],
+                 currentSelectionURL: marketResult.currentSelectionURL || MOCK_PRODUCT_TEMPLATE.url,
+                 source: marketResult.source || 'error'
              };
         });
 
@@ -1901,7 +1918,7 @@ module.exports = async (request, response) => {
             mealPlan: finalMealPlan,
             // REMOVED fullResultsMap (product-centric market run data)
             // Replaced with finalUniqueIngredients which includes price data
-            results: finalUniqueIngredients, // MOD ZONE 3 Finalize: Attach price data
+            results: finalUniqueIngredients, // MOD ZONE 3 Finalize: Now contains full product data
             uniqueIngredients: finalUniqueIngredients,
             // [NEW] Macro Debug Payload (Rule 1)
             macroDebug: {
