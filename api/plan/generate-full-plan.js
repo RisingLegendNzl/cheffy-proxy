@@ -739,7 +739,7 @@ JSON Structure:
   "description": "string",
   "instructions": ["string"]
 }
-`; // REMOVED DUPLICATE: This declaration was added in the previous step, causing a SyntaxError.
+`; // This block was the source of the duplicate declaration error and has been removed.
 
 /**
  * Tries to generate a plan from an LLM, retrying on failure.
