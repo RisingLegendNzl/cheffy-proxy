@@ -680,6 +680,44 @@ JSON Structure:
 }
 `;
 
+// --- Grocery Optimizer Prompt ---
+const GROCERY_OPTIMIZER_SYSTEM_PROMPT = (store, australianTermNote) => `
+You are an expert grocery query optimizer for store: ${store}.
+Your SOLE task is to take a JSON array of ingredient names and generate the full query/validation JSON for each.
+RULES:
+1.  'originalIngredient' MUST match the input ingredient name exactly.
+2.  'normalQuery' (REQUIRED): 2-4 generic words, STORE-PREFIXED. CRITICAL: Use MOST COMMON GENERIC NAME. DO NOT include brands, sizes, fat content, specific forms (sliced/grated), or dryness unless ESSENTIAL.${australianTermNote}
+3.  'tightQuery' (OPTIONAL, string | null): Hyper-specific, STORE-PREFIXED. Return null if 'normalQuery' is sufficient.
+4.  'wideQuery' (OPTIONAL, string | null): 1-2 broad words, STORE-PREFIXED. Return null if 'normalQuery' is sufficient.
+5.  'requiredWords' (REQUIRED): Array[1-2] ESSENTIAL CORE NOUNS ONLY, lowercase singular. NO adjectives, forms, plurals. These words MUST exist in product names.
+6.  'negativeKeywords' (REQUIRED): Array[1-3] lowercase words for INCORRECT product. Be concise.
+7.  'targetSize' (REQUIRED): Object {value: NUM, unit: "g"|"ml"} | null. Null if N/A. Prefer common package sizes.
+8.  'totalGramsRequired' (REQUIRED): BEST ESTIMATE total g/ml for THIS DAY. **Since you only have the ingredient list, estimate a common portion (e.g., 200g for a meal protein, 100g for carbs).** This is a rough estimate.
+9.  'quantityUnits' (REQUIRED): A string describing the common purchase unit (e.g., "1kg Bag", "250g Punnet", "500ml Bottle").
+10. 'allowedCategories' (REQUIRED): Array[1-2] precise, lowercase categories from this exact set: ["produce","fruit","veg","dairy","bakery","meat","seafood","pantry","frozen","drinks","canned","grains","spreads","condiments","snacks"].
+
+Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
+
+JSON Structure:
+{
+  "ingredients": [
+    {
+      "originalIngredient": "string",
+      "category": "string",
+      "tightQuery": "string|null",
+      "normalQuery": "string",
+      "wideQuery": "string|null",
+      "requiredWords": ["string"],
+      "negativeKeywords": ["string"],
+      "targetSize": { "value": number, "unit": "g"|"ml" }|null,
+      "totalGramsRequired": number,
+      "quantityUnits": "string",
+      "allowedCategories": ["string"]
+    }
+  ]
+}
+`;
+
 /**
  * Tries to generate a plan from an LLM, retrying on failure.
  * Includes a guard against non-JSON responses.
