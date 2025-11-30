@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.1 - Removed duplicate state inference logic
+// V15.2 - Fixed traceError signature usage
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -23,6 +23,7 @@ const kv = createClient({
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 const LLM_REQUEST_TIMEOUT_MS = 90000;
@@ -167,7 +168,6 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
 
     // Check Cache
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets, perMealTargets }));
-    const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     const cached = await cacheGet(cacheKey, log);
     if (cached) return { dayNumber: day, meals: cached.meals };
@@ -235,7 +235,6 @@ module.exports = async (request, response) => {
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
         
-        // Distribution ratios
         let mainRatio = 1.0, snackRatio = 0.0;
         if (eatingOccasions === 4) { mainRatio = 0.84; snackRatio = 0.16; }
         else if (eatingOccasions >= 5) { mainRatio = 0.75; snackRatio = 0.25; }
@@ -262,19 +261,17 @@ module.exports = async (request, response) => {
         for (let day = 1; day <= numDays; day++) {
             traceStageStart(traceId, `Day_${day}_Processing`);
             
-            // A. Generate Meals (Dietitian Agent)
+            // A. Generate Meals
             const rawDayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log, targetsPerMealType);
 
             // B. Validate LLM Output
             const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
             if (!validation.valid) {
                 log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
-                // Use corrected output if available, otherwise raw
                 if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
             }
 
-            // C. Execute Pipeline (Delegated Shared Logic)
-            // Note: State resolution happens implicitly inside executePipeline via normalizeItemState
+            // C. Execute Pipeline
             const pipelineConfig = {
                 traceId,
                 dayNumber: day,
@@ -286,8 +283,8 @@ module.exports = async (request, response) => {
 
             const processedDayResult = await executePipeline(
                 rawDayPlan.meals,
-                nutritionalTargets, // Pass daily targets
-                fetchLLMWithRetry,  // Pass retry fn for internal pipeline agents (Chef)
+                nutritionalTargets, 
+                fetchLLMWithRetry,  
                 pipelineConfig
             );
 
@@ -329,12 +326,19 @@ module.exports = async (request, response) => {
         return response.status(200).json(responseData);
 
     } catch (error) {
-        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', { traceId, error: error.message });
-        traceError(traceId, error);
-        log(`Pipeline Failure: ${error.message}`, 'CRITICAL', 'ORCHESTRATOR');
+        // Safe wrapping of error object for alerting
+        const safeError = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+        
+        // Pass sanitized message to alerts
+        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', { traceId, error: safeError.message });
+        
+        // Use corrected traceError signature: traceError(id, stage, error)
+        traceError(traceId, 'orchestrator_handler', safeError);
+        
+        log(`Pipeline Failure: ${safeError.message}`, 'CRITICAL', 'ORCHESTRATOR');
         
         return response.status(500).json({
-            error: error.message,
+            error: safeError.message,
             traceId,
             code: "PIPELINE_ERROR"
         });
