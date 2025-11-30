@@ -1,31 +1,7 @@
 /**
  * api/trace.js
- * 
- * Trace Retrieval API Endpoint for Cheffy
- * 
- * PURPOSE:
- * Provides a debugging interface for retrieving complete execution traces
- * by trace ID. Enables engineers to understand exactly what happened
- * during a specific pipeline execution.
- * 
- * PLAN REFERENCE: Step E4 - Implement Trace ID System
- * 
- * ENDPOINTS:
- * - GET /api/trace/:traceId - Retrieves trace data for a specific execution
- * - GET /api/trace/recent - Lists recent traces (with pagination)
- * - POST /api/trace - Records trace data
- * - DELETE /api/trace/:traceId - Deletes a specific trace
- * 
- * DESIGN PRINCIPLES:
- * 1. Every trace is immutable once recorded
- * 2. Traces include all decision points and data transformations
- * 3. Sensitive data is sanitized before storage
- * 4. Traces expire after configurable TTL
- * 
- * ASSUMPTIONS:
- * - @vercel/kv is available for persistence
- * - Trace IDs are UUID v4 format
- * - This runs as a Vercel serverless function
+ * * Trace Retrieval API Endpoint for Cheffy
+ * V15.1 - Hardened error handling
  */
 
 /**
@@ -78,8 +54,7 @@ const activeTraces = new Map();
 
 /**
  * Generates storage key for a trace
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @returns {string} Storage key
  */
 function getTraceKey(traceId) {
@@ -88,8 +63,7 @@ function getTraceKey(traceId) {
 
 /**
  * Sanitizes sensitive data from an object
- * 
- * @param {Object} obj - Object to sanitize
+ * * @param {Object} obj - Object to sanitize
  * @returns {Object} Sanitized copy
  */
 function sanitizeData(obj) {
@@ -125,8 +99,7 @@ function sanitizeData(obj) {
 
 /**
  * Creates a new trace
- * 
- * @param {string} traceId - UUID for this trace
+ * * @param {string} traceId - UUID for this trace
  * @param {Object} metadata - Initial metadata (targets, config, etc.)
  * @returns {Object} Trace object
  */
@@ -153,8 +126,7 @@ function createTrace(traceId, metadata = {}) {
 
 /**
  * Adds an event to a trace
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} eventType - Event type from EVENT_TYPES
  * @param {Object} data - Event data
  * @returns {boolean} Success
@@ -163,13 +135,14 @@ function addTraceEvent(traceId, eventType, data = {}) {
   const trace = activeTraces.get(traceId);
   
   if (!trace) {
-    console.warn(`Trace not found: ${traceId}`);
+    // Ideally we shouldn't log here to avoid noise if trace expired, but keeping minimal warning
+    // console.warn(`Trace not found: ${traceId}`);
     return false;
   }
   
   // Check event limit
   if (trace.events.length >= TRACE_CONFIG.maxEventsPerTrace) {
-    console.warn(`Trace ${traceId} has reached max events limit`);
+    // console.warn(`Trace ${traceId} has reached max events limit`);
     return false;
   }
   
@@ -197,8 +170,7 @@ function addTraceEvent(traceId, eventType, data = {}) {
 
 /**
  * Records the start of a pipeline stage
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} stageName - Stage name
  * @param {Object} input - Stage input (optional)
  */
@@ -211,8 +183,7 @@ function traceStageStart(traceId, stageName, input = null) {
 
 /**
  * Records the end of a pipeline stage
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} stageName - Stage name
  * @param {Object} result - Stage result (optional)
  * @param {number} durationMs - Stage duration in milliseconds
@@ -227,8 +198,7 @@ function traceStageEnd(traceId, stageName, result = null, durationMs = null) {
 
 /**
  * Records a state resolution decision
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} itemKey - Item key
  * @param {Object} resolution - Resolution details
  */
@@ -241,8 +211,7 @@ function traceStateResolution(traceId, itemKey, resolution) {
 
 /**
  * Records a nutrition lookup
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} itemKey - Item key
  * @param {Object} result - Lookup result
  */
@@ -257,8 +226,7 @@ function traceNutritionLookup(traceId, itemKey, result) {
 
 /**
  * Records a validation result
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} validationType - Type of validation
  * @param {Object} result - Validation result
  */
@@ -275,8 +243,7 @@ function traceValidation(traceId, validationType, result) {
 
 /**
  * Records a reconciliation operation
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} scope - 'meal' or 'daily'
  * @param {Object} details - Reconciliation details
  */
@@ -288,18 +255,41 @@ function traceReconciliation(traceId, scope, details) {
 }
 
 /**
- * Records an error
- * 
- * @param {string} traceId - Trace ID
+ * Records an error with hardened input handling
+ * * @param {string} traceId - Trace ID
  * @param {string} stage - Stage where error occurred
- * @param {Error|string} error - Error object or message
+ * @param {Error|string|Object} error - Error object or message
  */
 function traceError(traceId, stage, error) {
+  // Graceful handling if 3rd argument 'error' is missing (signature mismatch protection)
+  // If called as traceError(id, errorObj), swap args
+  if (error === undefined && stage && (typeof stage === 'object' || stage instanceof Error)) {
+      error = stage;
+      stage = 'unknown_stage';
+  }
+
+  // Normalize error to safe values
+  let safeMessage = 'Unknown error';
+  let safeName = 'Error';
+  let safeStack = null;
+
+  if (error) {
+      if (typeof error === 'string') {
+          safeMessage = error;
+      } else if (typeof error === 'object') {
+          safeMessage = error.message || (JSON.stringify(error) !== '{}' ? JSON.stringify(error) : 'Empty error object');
+          safeName = error.name || 'ObjectError';
+          safeStack = error.stack;
+      }
+  } else {
+      safeMessage = 'Undefined or null error passed to traceError';
+  }
+
   const errorData = {
-    stage,
-    message: error.message || error,
-    name: error.name,
-    stack: error.stack?.split('\n').slice(0, 5).join('\n')
+    stage: stage || 'unknown',
+    message: safeMessage,
+    name: safeName,
+    stack: safeStack ? safeStack.split('\n').slice(0, 5).join('\n') : null
   };
   
   addTraceEvent(traceId, EVENT_TYPES.ERROR, errorData);
@@ -307,8 +297,7 @@ function traceError(traceId, stage, error) {
 
 /**
  * Records a warning
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} stage - Stage where warning occurred
  * @param {string} message - Warning message
  * @param {Object} context - Additional context
@@ -323,8 +312,7 @@ function traceWarning(traceId, stage, message, context = {}) {
 
 /**
  * Records debug information
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} label - Debug label
  * @param {Object} data - Debug data
  */
@@ -337,8 +325,7 @@ function traceDebug(traceId, label, data) {
 
 /**
  * Completes a trace and prepares it for storage
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @param {string} status - Final status ('success', 'failure', 'partial')
  * @param {Object} result - Final result summary
  * @returns {Object} Completed trace
@@ -347,7 +334,6 @@ function completeTrace(traceId, status, result = {}) {
   const trace = activeTraces.get(traceId);
   
   if (!trace) {
-    console.warn(`Trace not found for completion: ${traceId}`);
     return null;
   }
   
@@ -385,8 +371,7 @@ function completeTrace(traceId, status, result = {}) {
 
 /**
  * Retrieves a trace by ID
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @returns {Object|null} Trace object or null
  */
 function getTrace(traceId) {
@@ -394,16 +379,12 @@ function getTrace(traceId) {
   if (activeTraces.has(traceId)) {
     return activeTraces.get(traceId);
   }
-  
-  // In production, this would query @vercel/kv
-  // For now, return null for non-active traces
   return null;
 }
 
 /**
  * Lists recent traces
- * 
- * @param {Object} options - { limit, offset, status }
+ * * @param {Object} options - { limit, offset, status }
  * @returns {Array} Array of trace summaries
  */
 function listRecentTraces(options = {}) {
@@ -435,8 +416,7 @@ function listRecentTraces(options = {}) {
 
 /**
  * Deletes a trace
- * 
- * @param {string} traceId - Trace ID
+ * * @param {string} traceId - Trace ID
  * @returns {boolean} Success
  */
 function deleteTrace(traceId) {
@@ -456,8 +436,7 @@ function clearAllTraces() {
 
 /**
  * Gets trace statistics
- * 
- * @returns {Object} Statistics
+ * * @returns {Object} Statistics
  */
 function getTraceStats() {
   const traces = Array.from(activeTraces.values());
@@ -480,8 +459,7 @@ function getTraceStats() {
 
 /**
  * Vercel serverless handler
- * 
- * @param {Object} req - Request object
+ * * @param {Object} req - Request object
  * @param {Object} res - Response object
  */
 async function handler(req, res) {
@@ -658,3 +636,4 @@ module.exports = {
   EVENT_TYPES,
   TRACE_CONFIG
 };
+
