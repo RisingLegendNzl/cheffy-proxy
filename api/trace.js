@@ -1,7 +1,7 @@
 /**
  * api/trace.js
  * * Trace Retrieval API Endpoint for Cheffy
- * V15.1 - Hardened error handling
+ * V15.2 - Hardened error handling
  */
 
 /**
@@ -255,10 +255,10 @@ function traceReconciliation(traceId, scope, details) {
 }
 
 /**
- * Records an error with hardened input handling
+ * Records an error with hardened input handling to prevent circular crashes
  * * @param {string} traceId - Trace ID
- * @param {string} stage - Stage where error occurred
- * @param {Error|string|Object} error - Error object or message
+ * * @param {string} stage - Stage where error occurred
+ * * @param {Error|string|Object} error - Error object or message
  */
 function traceError(traceId, stage, error) {
   // Graceful handling if 3rd argument 'error' is missing (signature mismatch protection)
@@ -636,4 +636,5 @@ module.exports = {
   EVENT_TYPES,
   TRACE_CONFIG
 };
+
 
