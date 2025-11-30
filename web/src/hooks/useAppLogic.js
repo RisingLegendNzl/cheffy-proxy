@@ -378,353 +378,18 @@ const useAppLogic = ({
       }
     }, [mealPlan, showToast]);
 
-    const handleGeneratePlan = useCallback(async (e) => {
-        e.preventDefault();
-        
-        // --- RECOMMENDED FIX: Abort any pending request ---
-        if (abortControllerRef.current) {
-            console.log('[GENERATE] Aborting previous request.');
-            abortControllerRef.current.abort();
-        }
-        abortControllerRef.current = new AbortController();
-        const signal = abortControllerRef.current.signal;
-        // --- End Abort Fix ---
-
-        setLoading(true);
-        setError(null);
-        setDiagnosticLogs([]);
-        setNutritionCache({});
-        if (nutritionalTargets.calories === 0) {
-            setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-        }
-        setResults({});
-        setUniqueIngredients([]);
-        setMealPlan([]);
-        setTotalCost(0);
-        setEatenMeals({});
-        setFailedIngredientsHistory([]);
-        setGenerationStepKey('targets');
-        if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
-        setMacroDebug(null); // Macro Debug Reset
-
-        let targets;
-
-        try {
-            const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(formData),
-                signal: signal,
-            });
-
-            if (!targetsResponse.ok) {
-                const errorMsg = await getResponseErrorDetails(targetsResponse);
-                throw new Error(`Failed to calculate targets: ${errorMsg}`);
-            }
-
-            const targetsData = await targetsResponse.json();
-            targets = targetsData.nutritionalTargets;
-            setNutritionalTargets(targets);
-            setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
-            
-        } catch (err) {
-            if (err.name === 'AbortError') {
-                console.log('[GENERATE] Targets request aborted.');
-                setLoading(false);
-                return; // Exit gracefully
-            }
-            console.error("Plan generation failed critically at Targets:", err);
-            setError(`Critical failure: ${err.message}`);
-            setGenerationStepKey('error');
-            setLoading(false);
-            setDiagnosticLogs(prev => [...prev, {
-                timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
-            }]);
-            return;
-        }
-
-        if (!useBatchedMode) {
-            setGenerationStatus("Generating plan (per-day mode)...");
-            let accumulatedResults = {}; 
-            let accumulatedMealPlan = []; 
-            let accumulatedUniqueIngredients = new Map(); 
-
-            try {
-                const numDays = parseInt(formData.days, 10);
-                for (let day = 1; day <= numDays; day++) {
-                    setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
-                    setGenerationStepKey('planning');
-                    
-                    let dailyFailedIngredients = [];
-                    let dayFetchError = null;
-
-                    try {
-                        const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-                            body: JSON.stringify({ formData, nutritionalTargets: targets }),
-                            signal: signal,
-                        });
-
-                        if (!dayResponse.ok) {
-                            const errorMsg = await getResponseErrorDetails(dayResponse);
-                            throw new Error(`Day ${day} request failed: ${errorMsg}`);
-                        }
-
-                        const reader = dayResponse.body.getReader();
-                        const decoder = new TextDecoder();
-                        let buffer = '';
-                        let dayDataReceived = false;
-
-                        while (true) {
-                            const { value, done } = await reader.read();
-                            if (done) {
-                                if (!dayDataReceived && !dayFetchError) {
-                                    throw new Error(`Day ${day} stream ended unexpectedly without data.`);
-                                }
-                                break;
-                            }
-                            
-                            const { events, newBuffer } = processSseChunk(value, buffer, decoder);
-                            buffer = newBuffer;
-
-                            for (const event of events) {
-                                const eventData = event.data;
-                                switch (event.eventType) {
-                                    case 'message':
-                                    case 'log_message':
-                                        setDiagnosticLogs(prev => [...prev, eventData]);
-                                        if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
-                                            setGenerationStepKey('market');
-                                        } else if (eventData?.tag === 'LLM' || eventData?.tag === 'LLM_PROMPT') {
-                                            setGenerationStepKey('planning');
-                                        }
-                                        break;
-                                    case 'error':
-                                        dayFetchError = eventData.message || 'An error occurred during generation.';
-                                        setError(prevError => prevError ? `${prevError}\nDay ${day}: ${dayFetchError}` : `Day ${day}: ${dayFetchError}`);
-                                        setGenerationStepKey('error');
-                                        break;
-                                    case 'finalData':
-                                        dayDataReceived = true;
-                                        if (eventData.mealPlanForDay) accumulatedMealPlan.push(eventData.mealPlanForDay);
-                                        if (eventData.dayResults) accumulatedResults = { ...accumulatedResults, ...eventData.dayResults };
-                                        if (eventData.dayUniqueIngredients) {
-                                            eventData.dayUniqueIngredients.forEach(ing => {
-                                                if (ing && ing.originalIngredient) accumulatedUniqueIngredients.set(ing.originalIngredient, { ...(accumulatedUniqueIngredients.get(ing.originalIngredient) || {}), ...ing });
-                                            });
-                                        }
-                                        setMealPlan([...accumulatedMealPlan]);
-                                        setResults({ ...accumulatedResults }); 
-                                        setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
-                                        recalculateTotalCost(accumulatedResults);
-                                        break;
-                                    case 'phase:start':
-                                    case 'ingredient:found':
-                                    case 'ingredient:failed':
-                                        setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'DEBUG', tag: 'SSE_UNHANDLED', message: `Received unhandled v2 event '${event.eventType}' in v1 loop.`}]);
-                                        break;
-                                }
-                            }
-                            if (dayFetchError) break;
-                        }
-                    } catch (dayError) {
-                        if (dayError.name === 'AbortError') {
-                            console.log(`[GENERATE] Day ${day} request aborted.`);
-                            return; // Exit gracefully
-                        }
-                        console.error(`Error processing day ${day}:`, dayError);
-                        setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
-                        setGenerationStepKey('error');
-                        setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: dayError.message }]);
-                    } finally {
-                        if (dailyFailedIngredients.length > 0) setFailedIngredientsHistory(prev => [...prev, ...dailyFailedIngredients]);
-                    }
-                }
-
-                if (!error) {
-                    setGenerationStatus(`Plan generation finished.`);
-                    setGenerationStepKey('finalizing');
-                    setTimeout(() => setGenerationStepKey('complete'), 1500);
-                } else {
-                    setGenerationStepKey('error');
-                }
-            } catch (err) {
-                 console.error("Per-day plan generation failed critically:", err);
-                 setError(`Critical failure: ${err.message}`);
-                 setGenerationStepKey('error');
-            } finally {
-                 setTimeout(() => setLoading(false), 2000);
-            }
-
-        } else {
-            setGenerationStatus("Generating full plan (batched mode)...");
-            
-            try {
-                // console.log('[DEBUG] Starting batched plan generation...'); // Diagnostic log removed for cleanup
-                
-                const planResponse = await fetch(ORCHESTRATOR_FULL_PLAN_API_URL, {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'Accept': 'text/event-stream' 
-                    },
-                    body: JSON.stringify({
-                        formData,
-                        nutritionalTargets: targets
-                    }),
-                    signal: signal,
-                });
-
-                // console.log('[DEBUG] Fetch completed, status:', planResponse.status, 'ok:', planResponse.ok); // Diagnostic log removed for cleanup
-
-                if (!planResponse.ok) {
-                    // --- FIXED ERROR HANDLING (Alternative Fix: Clone/Text/JSON) ---
-                    const errorMsg = await getResponseErrorDetails(planResponse);
-                    throw new Error(`Full plan request failed (${planResponse.status}): ${errorMsg}`);
-                    // --- END FIXED ERROR HANDLING ---
-                }
-
-                // console.log('[DEBUG] About to get reader from body...'); // Diagnostic log removed for cleanup
-                // console.log('[DEBUG] planResponse.body exists:', !!planResponse.body); // Diagnostic log removed for cleanup
-                
-                const reader = planResponse.body.getReader();
-                // console.log('[DEBUG] Reader obtained successfully'); // Diagnostic log removed for cleanup
-                
-                const decoder = new TextDecoder();
-                let buffer = '';
-                let planComplete = false;
-
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) {
-                        if (!planComplete && !error) {
-                            console.error("Stream ended unexpectedly before 'plan:complete' event.");
-                            throw new Error("Stream ended unexpectedly. The plan may be incomplete.");
-                        }
-                        break;
-                    }
-                    
-                    const { events, newBuffer } = processSseChunk(value, buffer, decoder);
-                    buffer = newBuffer;
-
-                    for (const event of events) {
-                        const eventData = event.data;
-                        
-                        switch (event.eventType) {
-                            case 'log_message':
-                                setDiagnosticLogs(prev => [...prev, eventData]);
-                                break;
-                            
-                            case 'phase:start':
-                                const phaseMap = {
-                                    'meals': 'planning',
-                                    'aggregate': 'planning',
-                                    'market': 'market',
-                                    'nutrition': 'market',
-                                    'solver': 'finalizing',
-                                    'writer': 'finalizing',
-                                    'finalize': 'finalizing'
-                                };
-                                const stepKey = phaseMap[eventData.name];
-                                if (stepKey) {
-                                    setGenerationStepKey(stepKey);
-                                    if(eventData.description) setGenerationStatus(eventData.description);
-                                }
-                                break;
-                            
-                            case 'ingredient:found':
-                                setResults(prev => ({
-                                    ...prev,
-                                    [eventData.key]: eventData.data
-                                }));
-                                break;
-
-                            case 'ingredient:failed':
-                                const failedItem = {
-                                    timestamp: new Date().toISOString(),
-                                    originalIngredient: eventData.key,
-                                    error: eventData.reason,
-                                };
-                                setFailedIngredientsHistory(prev => [...prev, failedItem]);
-                                setResults(prev => ({
-                                    ...prev,
-                                    [eventData.key]: {
-                                        originalIngredient: eventData.key,
-                                        normalizedKey: eventData.key,
-                                        source: 'failed',
-                                        error: eventData.reason,
-                                        allProducts: [],
-                                        currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
-                                    }
-                                }));
-                                break;
-
-                            case 'plan:complete':
-                                planComplete = true;
-                                setMealPlan(eventData.mealPlan || []);
-                                setResults(eventData.results || {});
-                                setUniqueIngredients(eventData.uniqueIngredients || []);
-                                recalculateTotalCost(eventData.results || {});
-                                
-                                // Capture Macro Debug Data
-                                if (eventData.macroDebug) {
-                                    setMacroDebug(eventData.macroDebug);
-                                }
-                                
-                                setGenerationStepKey('complete');
-                                setGenerationStatus('Plan generation complete!');
-                                
-                                setPlanStats([
-                                  { label: 'Days', value: formData.days, color: '#4f46e5' },
-                                  { label: 'Meals', value: eventData.mealPlan?.length * (parseInt(formData.eatingOccasions) || 3), color: '#10b981' },
-                                  { label: 'Items', value: eventData.uniqueIngredients?.length || 0, color: '#f59e0b' },
-                                ]);
-                                
-                                setTimeout(() => {
-                                  setShowSuccessModal(true);
-                                  setTimeout(() => {
-                                    setShowSuccessModal(false);
-                                  }, 2500);
-                                }, 500);
-                                break;
-
-                            case 'error':
-                                throw new Error(eventData.message || 'Unknown backend error');
-                        }
-                    }
-                }
-                
-            } catch (err) {
-                if (err.name === 'AbortError') {
-                    console.log('[GENERATE] Batched request aborted.');
-                    return; // Exit gracefully
-                }
-                
-                console.error("Batched plan generation failed critically:", err);
-                setError(`Critical failure: ${err.message}`);
-                setGenerationStepKey('error');
-                setDiagnosticLogs(prev => [...prev, {
-                    timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
-                }]);
-            } finally {
-                 setTimeout(() => setLoading(false), 2000);
-            }
-        }
-    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode, showToast, nutritionalTargets.calories, error]);
-
-    // --- NEW HELPER FUNCTION for robust error parsing ---
+    // --- HELPER: Parse Error Response Body ---
     const getResponseErrorDetails = useCallback(async (response) => {
         let errorMsg = `HTTP ${response.status}`;
         try {
-            // Clone the response so we can safely read the body without disturbing the stream
+            // Clone to safely read body
             const clonedResponse = response.clone();
             try {
-                // Attempt to read as JSON first
                 const errorData = await clonedResponse.json();
-                errorMsg = errorData.message || JSON.stringify(errorData);
+                // [FIX] Prioritize 'message', then 'error' (legacy), then fallback to JSON string
+                errorMsg = errorData.message || errorData.error || JSON.stringify(errorData);
             } catch (jsonErr) {
-                // If JSON parsing fails, read the raw text
+                // Fallback to text if JSON parsing fails
                 errorMsg = await response.text() || `HTTP ${response.status} - Could not read body`;
             }
         } catch (e) {
@@ -961,7 +626,6 @@ const useAppLogic = ({
     const categorizedResults = useMemo(() => {
         const groups = {};
         Object.entries(results || {}).forEach(([normalizedKey, item]) => {
-            // FIX: Remove overly restrictive 'source' filter to display all ingredients.
             if (item && item.originalIngredient) {
                 const category = item.category || 'Uncategorized';
                 if (!groups[category]) groups[category] = [];
@@ -988,6 +652,314 @@ const useAppLogic = ({
     }, [mealPlan]); 
 
     const latestLog = diagnosticLogs.length > 0 ? diagnosticLogs[diagnosticLogs.length - 1] : null;
+
+    const handleGeneratePlanFull = useCallback(async (e) => {
+        e.preventDefault();
+        
+        // Use the abort logic
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+        }
+        abortControllerRef.current = new AbortController();
+        const signal = abortControllerRef.current.signal;
+
+        setLoading(true);
+        setError(null);
+        setDiagnosticLogs([]);
+        setNutritionCache({});
+        if (nutritionalTargets.calories === 0) {
+            setNutritionalTargets({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+        }
+        setResults({});
+        setUniqueIngredients([]);
+        setMealPlan([]);
+        setTotalCost(0);
+        setEatenMeals({});
+        setFailedIngredientsHistory([]);
+        setGenerationStepKey('targets');
+        if (!isLogOpen) { setLogHeight(250); setIsLogOpen(true); }
+        setMacroDebug(null);
+
+        let targets;
+
+        try {
+            const targetsResponse = await fetch(ORCHESTRATOR_TARGETS_API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData),
+                signal: signal,
+            });
+
+            if (!targetsResponse.ok) {
+                const errorMsg = await getResponseErrorDetails(targetsResponse);
+                throw new Error(`Failed to calculate targets: ${errorMsg}`);
+            }
+
+            const targetsData = await targetsResponse.json();
+            targets = targetsData.nutritionalTargets;
+            setNutritionalTargets(targets);
+            setDiagnosticLogs(prev => [...prev, ...(targetsData.logs || [])]);
+            
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                setLoading(false);
+                return;
+            }
+            console.error("Plan generation failed critically at Targets:", err);
+            setError(`Critical failure: ${err.message}`);
+            setGenerationStepKey('error');
+            setLoading(false);
+            setDiagnosticLogs(prev => [...prev, {
+                timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
+            }]);
+            return;
+        }
+
+        if (!useBatchedMode) {
+            setGenerationStatus("Generating plan (per-day mode)...");
+            let accumulatedResults = {}; 
+            let accumulatedMealPlan = []; 
+            let accumulatedUniqueIngredients = new Map(); 
+
+            try {
+                const numDays = parseInt(formData.days, 10);
+                for (let day = 1; day <= numDays; day++) {
+                    setGenerationStatus(`Generating plan for Day ${day}/${numDays}...`);
+                    setGenerationStepKey('planning');
+                    
+                    let dailyFailedIngredients = [];
+                    let dayFetchError = null;
+
+                    try {
+                        const dayResponse = await fetch(`${ORCHESTRATOR_DAY_API_URL}?day=${day}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                            body: JSON.stringify({ formData, nutritionalTargets: targets }),
+                            signal: signal,
+                        });
+
+                        if (!dayResponse.ok) {
+                            const errorMsg = await getResponseErrorDetails(dayResponse);
+                            throw new Error(`Day ${day} request failed: ${errorMsg}`);
+                        }
+
+                        const reader = dayResponse.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = '';
+                        let dayDataReceived = false;
+
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) {
+                                if (!dayDataReceived && !dayFetchError) {
+                                    throw new Error(`Day ${day} stream ended unexpectedly without data.`);
+                                }
+                                break;
+                            }
+                            
+                            const { events, newBuffer } = processSseChunk(value, buffer, decoder);
+                            buffer = newBuffer;
+
+                            for (const event of events) {
+                                const eventData = event.data;
+                                switch (event.eventType) {
+                                    case 'message':
+                                    case 'log_message':
+                                        setDiagnosticLogs(prev => [...prev, eventData]);
+                                        if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
+                                            setGenerationStepKey('market');
+                                        } else if (eventData?.tag === 'LLM' || eventData?.tag === 'LLM_PROMPT') {
+                                            setGenerationStepKey('planning');
+                                        }
+                                        break;
+                                    case 'error':
+                                        dayFetchError = eventData.message || 'An error occurred during generation.';
+                                        setError(prevError => prevError ? `${prevError}\nDay ${day}: ${dayFetchError}` : `Day ${day}: ${dayFetchError}`);
+                                        setGenerationStepKey('error');
+                                        break;
+                                    case 'finalData':
+                                        dayDataReceived = true;
+                                        if (eventData.mealPlanForDay) accumulatedMealPlan.push(eventData.mealPlanForDay);
+                                        if (eventData.dayResults) accumulatedResults = { ...accumulatedResults, ...eventData.dayResults };
+                                        if (eventData.dayUniqueIngredients) {
+                                            eventData.dayUniqueIngredients.forEach(ing => {
+                                                if (ing && ing.originalIngredient) accumulatedUniqueIngredients.set(ing.originalIngredient, { ...(accumulatedUniqueIngredients.get(ing.originalIngredient) || {}), ...ing });
+                                            });
+                                        }
+                                        setMealPlan([...accumulatedMealPlan]);
+                                        setResults({ ...accumulatedResults }); 
+                                        setUniqueIngredients(Array.from(accumulatedUniqueIngredients.values()));
+                                        recalculateTotalCost(accumulatedResults);
+                                        break;
+                                }
+                            }
+                            if (dayFetchError) break;
+                        }
+                    } catch (dayError) {
+                        if (dayError.name === 'AbortError') return;
+                        console.error(`Error processing day ${day}:`, dayError);
+                        setError(prevError => prevError ? `${prevError}\n${dayError.message}` : dayError.message); 
+                        setGenerationStepKey('error');
+                        setDiagnosticLogs(prev => [...prev, { timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: dayError.message }]);
+                    } finally {
+                        if (dailyFailedIngredients.length > 0) setFailedIngredientsHistory(prev => [...prev, ...dailyFailedIngredients]);
+                    }
+                }
+
+                if (!error) {
+                    setGenerationStatus(`Plan generation finished.`);
+                    setGenerationStepKey('finalizing');
+                    setTimeout(() => setGenerationStepKey('complete'), 1500);
+                } else {
+                    setGenerationStepKey('error');
+                }
+            } catch (err) {
+                 console.error("Per-day plan generation failed critically:", err);
+                 setError(`Critical failure: ${err.message}`);
+                 setGenerationStepKey('error');
+            } finally {
+                 setTimeout(() => setLoading(false), 2000);
+            }
+
+        } else {
+            // Batched mode uses the new consolidated handler
+            setGenerationStatus("Generating full plan (batched mode)...");
+            
+            try {
+                const planResponse = await fetch(ORCHESTRATOR_FULL_PLAN_API_URL, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Accept': 'text/event-stream' 
+                    },
+                    body: JSON.stringify({
+                        formData,
+                        nutritionalTargets: targets
+                    }),
+                    signal: signal,
+                });
+
+                if (!planResponse.ok) {
+                    const errorMsg = await getResponseErrorDetails(planResponse);
+                    throw new Error(`Full plan request failed: ${errorMsg}`);
+                }
+
+                const reader = planResponse.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let planComplete = false;
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        if (!planComplete && !error) {
+                            try {
+                                const directJson = JSON.parse(buffer);
+                                if (directJson && (directJson.mealPlan || directJson.days)) {
+                                    setMealPlan(directJson.mealPlan || []);
+                                    setResults(directJson.results || {});
+                                    setUniqueIngredients(directJson.uniqueIngredients || []);
+                                    setGenerationStepKey('complete');
+                                    setGenerationStatus('Plan generation complete!');
+                                    setPlanStats([
+                                        { label: 'Days', value: formData.days, color: '#4f46e5' },
+                                        { label: 'Meals', value: (directJson.mealPlan?.length || 0) * (parseInt(formData.eatingOccasions) || 3), color: '#10b981' }
+                                    ]);
+                                    setTimeout(() => setShowSuccessModal(true), 500);
+                                    planComplete = true;
+                                    break;
+                                }
+                            } catch (e) {}
+                            
+                            console.error("Stream ended unexpectedly before 'plan:complete' event.");
+                            throw new Error("Stream ended unexpectedly. The plan may be incomplete.");
+                        }
+                        break;
+                    }
+                    
+                    const { events, newBuffer } = processSseChunk(value, buffer, decoder);
+                    buffer = newBuffer;
+
+                    for (const event of events) {
+                        const eventData = event.data;
+                        
+                        switch (event.eventType) {
+                            case 'log_message':
+                                setDiagnosticLogs(prev => [...prev, eventData]);
+                                break;
+                            
+                            case 'phase:start':
+                                const phaseMap = {
+                                    'meals': 'planning', 'aggregate': 'planning',
+                                    'market': 'market', 'nutrition': 'market',
+                                    'solver': 'finalizing', 'writer': 'finalizing', 'finalize': 'finalizing'
+                                };
+                                const stepKey = phaseMap[eventData.name];
+                                if (stepKey) {
+                                    setGenerationStepKey(stepKey);
+                                    if(eventData.description) setGenerationStatus(eventData.description);
+                                }
+                                break;
+                            
+                            case 'ingredient:found':
+                                setResults(prev => ({ ...prev, [eventData.key]: eventData.data }));
+                                break;
+
+                            case 'ingredient:failed':
+                                const failedItem = {
+                                    timestamp: new Date().toISOString(),
+                                    originalIngredient: eventData.key,
+                                    error: eventData.reason,
+                                };
+                                setFailedIngredientsHistory(prev => [...prev, failedItem]);
+                                setResults(prev => ({
+                                    ...prev,
+                                    [eventData.key]: {
+                                        originalIngredient: eventData.key,
+                                        normalizedKey: eventData.key,
+                                        source: 'failed',
+                                        error: eventData.reason,
+                                        allProducts: [],
+                                        currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
+                                    }
+                                }));
+                                break;
+
+                            case 'plan:complete':
+                                planComplete = true;
+                                setMealPlan(eventData.mealPlan || []);
+                                setResults(eventData.results || {});
+                                setUniqueIngredients(eventData.uniqueIngredients || []);
+                                recalculateTotalCost(eventData.results || {});
+                                if (eventData.macroDebug) setMacroDebug(eventData.macroDebug);
+                                setGenerationStepKey('complete');
+                                setGenerationStatus('Plan generation complete!');
+                                setPlanStats([
+                                  { label: 'Days', value: formData.days, color: '#4f46e5' },
+                                  { label: 'Meals', value: eventData.mealPlan?.length * (parseInt(formData.eatingOccasions) || 3), color: '#10b981' },
+                                  { label: 'Items', value: eventData.uniqueIngredients?.length || 0, color: '#f59e0b' },
+                                ]);
+                                setTimeout(() => { setShowSuccessModal(true); setTimeout(() => setShowSuccessModal(false), 2500); }, 500);
+                                break;
+
+                            case 'error':
+                                throw new Error(eventData.message || 'Unknown backend error');
+                        }
+                    }
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                console.error("Batched plan generation failed critically:", err);
+                setError(`Critical failure: ${err.message}`);
+                setGenerationStepKey('error');
+                setDiagnosticLogs(prev => [...prev, {
+                    timestamp: new Date().toISOString(), level: 'CRITICAL', tag: 'FRONTEND', message: `Critical failure: ${err.message}`
+                }]);
+            } finally {
+                 setTimeout(() => setLoading(false), 2000);
+            }
+        }
+    }, [formData, isLogOpen, recalculateTotalCost, useBatchedMode, showToast, nutritionalTargets.calories, error, getResponseErrorDetails]);
 
     // --- Return all handlers and computed values ---
     return {
@@ -1041,7 +1013,7 @@ const useAppLogic = ({
         handleLoadSettings,
         handleSaveSettings,
         handleRefresh,
-        handleGeneratePlan,
+        handleGeneratePlan: handleGeneratePlanFull, // Using the full handler
         handleFetchNutrition,
         handleSubstituteSelection,
         handleQuantityChange,
@@ -1067,4 +1039,5 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
+
 
