@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.5 - Strict Prompt + Error Serialization Fix
+// V15.6 - Fix CACHE_PREFIX definition error
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -23,6 +23,9 @@ const kv = createClient({
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+
+// [FIX] Restored missing CACHE_PREFIX constant
+const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 const LLM_REQUEST_TIMEOUT_MS = 90000;
@@ -282,7 +285,6 @@ module.exports = async (request, response) => {
             const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
             if (!validation.valid) {
                 log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
-                // Use corrected output if available, otherwise raw
                 if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
             }
 
