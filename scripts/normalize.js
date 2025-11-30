@@ -1,66 +1,59 @@
 /**
  * Cheffy Orchestrator
  * Enhanced Key Normalization Utility (CommonJS)
- * Version: 2.3.0 - Phase 4 Update: Massive Synonym Coverage (Rice, Asian, Baking)
- * * PHASE 1 UPDATE (2025): Expanded SYNONYM_MAP to eliminate orphan keys
- * - Added comprehensive oats/grain mappings
- * - Added milk variations (including plant milks)
- * - Added protein powder variations
- * - Added mince/ground meat variations
- * - Added Australian/British terminology
- * - Fixed plural handling for critical items
+ * Version: 3.0.0 - Canonical Source (Phase 4)
  * * Provides a single, consistent function for turning human-readable
- * ingredient names into standardized database keys with better matching.
+ * ingredient names into standardized database keys.
  */
 
 /**
  * Comprehensive synonym map for ingredient normalization.
  * Maps variations to canonical forms.
- * * PHASE 1 NOTE: Identity mappings (e.g., 'rolled_oats': 'rolled_oats') are intentional.
- * They ensure canonical forms are not accidentally modified by subsequent processing steps.
+ * Identity mappings (e.g., 'rolled_oats': 'rolled_oats') ensure canonical forms 
+ * are not accidentally modified by subsequent processing steps.
  */
 const SYNONYM_MAP = {
   // =====================================================================
-  // OATS - Comprehensive coverage (PHASE 1 EXPANSION)
+  // OATS - Comprehensive coverage
   // =====================================================================
   'oats': 'rolled_oats',
   'oat': 'rolled_oats',
   'rolled_oat': 'rolled_oats',
-  'rolled_oats': 'rolled_oats',           // Identity mapping - protect canonical form
+  'rolled_oats': 'rolled_oats',
   'quick_oat': 'quick_oats',
-  'quick_oats': 'quick_oats',             // Identity mapping
+  'quick_oats': 'quick_oats',
   'instant_oat': 'instant_oats',
-  'instant_oats': 'instant_oats',         // Identity mapping
+  'instant_oats': 'instant_oats',
   'porridge_oat': 'rolled_oats',
-  'porridge': 'rolled_oats',              // PHASE 1: Common name
-  'porridge_oats': 'rolled_oats',         // PHASE 1: Common name
-  'oatmeal': 'rolled_oats',               // PHASE 1: American term
-  'steel_cut_oat': 'steel_cut_oats',      // PHASE 1
-  'steel_cut_oats': 'steel_cut_oats',     // PHASE 1: Identity mapping
-  'scottish_oats': 'steel_cut_oats',      // PHASE 1
-  'overnight_oats': 'rolled_oats',        // PHASE 1: Same base ingredient
+  'porridge': 'rolled_oats',
+  'porridge_oats': 'rolled_oats',
+  'oatmeal': 'rolled_oats',
+  'steel_cut_oat': 'steel_cut_oats',
+  'steel_cut_oats': 'steel_cut_oats',
+  'scottish_oats': 'steel_cut_oats',
+  'overnight_oats': 'rolled_oats',
 
   // =====================================================================
-  // RICE - Comprehensive coverage (PHASE 1/4 EXPANSION)
+  // RICE - Comprehensive coverage
   // =====================================================================
-  'rice': 'white_rice',                   // PHASE 1: Generic defaults to white
+  'rice': 'white_rice',
   'white_rice': 'white_rice',
   'brown_rice': 'brown_rice',
-  'jasmine_rice': 'jasmine_rice',          // MOD ZONE 2: Identity
-  'thai_jasmine_rice': 'jasmine_rice',     // MOD ZONE 2: Alias
-  'basmati_rice': 'basmati_rice',          // MOD ZONE 2: Identity
-  'basmati': 'basmati_rice',               // MOD ZONE 2: Alias
-  'sushi_rice': 'sushi_rice',              // MOD ZONE 2: Identity
-  'japanese_rice': 'sushi_rice',           // MOD ZONE 2: Alias
-  'short_grain_rice': 'sushi_rice',        // MOD ZONE 2: Alias
+  'jasmine_rice': 'jasmine_rice',
+  'thai_jasmine_rice': 'jasmine_rice',
+  'basmati_rice': 'basmati_rice',
+  'basmati': 'basmati_rice',
+  'sushi_rice': 'sushi_rice',
+  'japanese_rice': 'sushi_rice',
+  'short_grain_rice': 'sushi_rice',
   'long_grain_rice': 'white_rice',
-  'cooked_rice': 'cooked_rice',            // MOD ZONE 2: Identity
-  'steamed_rice': 'cooked_rice',           // MOD ZONE 2: Alias
-  'cooked_white_rice': 'cooked_white_rice',// MOD ZONE 2: Identity
-  'arborio_rice': 'white_rice',           // PHASE 1: Risotto rice
-  'arborio': 'white_rice',                // PHASE 1
-  'wild_rice': 'wild_rice',               // PHASE 1: Different nutrition profile
-  'black_rice': 'black_rice',             // PHASE 1
+  'cooked_rice': 'cooked_rice',
+  'steamed_rice': 'cooked_rice',
+  'cooked_white_rice': 'cooked_white_rice',
+  'arborio_rice': 'white_rice',
+  'arborio': 'white_rice',
+  'wild_rice': 'wild_rice',
+  'black_rice': 'black_rice',
 
   // =====================================================================
   // PASTA - Comprehensive coverage
@@ -72,76 +65,74 @@ const SYNONYM_MAP = {
   'macaroni': 'pasta',
   'linguine': 'pasta',
   'fettuccine': 'pasta',
-  'rigatoni': 'pasta',                    // PHASE 1
-  'farfalle': 'pasta',                    // PHASE 1
-  'orzo': 'pasta',                        // PHASE 1
-  'lasagna_sheet': 'pasta',               // PHASE 1
-  'lasagne_sheet': 'pasta',               // PHASE 1: British spelling
-  'noodle': 'pasta',                      // PHASE 1
-  'noodles': 'pasta',                     // PHASE 1
-  'egg_noodle': 'egg_noodles',            // PHASE 1
-  'egg_noodles': 'egg_noodles',           // PHASE 1
+  'rigatoni': 'pasta',
+  'farfalle': 'pasta',
+  'orzo': 'pasta',
+  'lasagna_sheet': 'pasta',
+  'lasagne_sheet': 'pasta',
+  'noodle': 'pasta',
+  'noodles': 'pasta',
+  'egg_noodle': 'egg_noodles',
+  'egg_noodles': 'egg_noodles',
 
   // =====================================================================
-  // MILK - Comprehensive coverage (PHASE 1 EXPANSION)
+  // MILK - Comprehensive coverage
   // =====================================================================
-  'milk': 'whole_milk',                   // PHASE 1: Generic defaults to whole
+  'milk': 'whole_milk',
   'full_cream_milk': 'whole_milk',
-  'full_fat_milk': 'whole_milk',          // PHASE 1
+  'full_fat_milk': 'whole_milk',
   'whole_milk': 'whole_milk',
   'skim_milk': 'skim_milk',
-  'skimmed_milk': 'skim_milk',            // PHASE 1: British spelling
-  'nonfat_milk': 'skim_milk',             // PHASE 1: American term
-  'fat_free_milk': 'skim_milk',           // PHASE 1
+  'skimmed_milk': 'skim_milk',
+  'nonfat_milk': 'skim_milk',
+  'fat_free_milk': 'skim_milk',
   'low_fat_milk': 'low_fat_milk',
-  'lite_milk': 'low_fat_milk',            // PHASE 1: Australian term
-  'light_milk': 'low_fat_milk',           // PHASE 1
+  'lite_milk': 'low_fat_milk',
+  'light_milk': 'low_fat_milk',
   '2_milk': 'low_fat_milk',
-  '2pct_milk': 'low_fat_milk',            // PHASE 1: After % normalization
-  '1_milk': 'low_fat_milk',               // PHASE 1
-  '1pct_milk': 'low_fat_milk',            // PHASE 1
+  '2pct_milk': 'low_fat_milk',
+  '1_milk': 'low_fat_milk',
+  '1pct_milk': 'low_fat_milk',
   'lactose_free_milk': 'milk',
-  // Plant milks (PHASE 1)
   'almond_milk': 'almond_milk',
   'oat_milk': 'oat_milk',
   'soy_milk': 'soy_milk',
-  'soya_milk': 'soy_milk',                // PHASE 1: British term
+  'soya_milk': 'soy_milk',
   'coconut_milk': 'coconut_milk',
   'rice_milk': 'rice_milk',
 
   // =====================================================================
-  // PROTEIN POWDERS - Comprehensive coverage (PHASE 1 EXPANSION)
+  // PROTEIN POWDERS - Comprehensive coverage
   // =====================================================================
   'whey_protein': 'whey_protein_isolate',
-  'whey': 'whey_protein_isolate',         // PHASE 1: Short form
+  'whey': 'whey_protein_isolate',
   'whey_isolate': 'whey_protein_isolate',
-  'whey_protein_powder': 'whey_protein_isolate', // PHASE 1
+  'whey_protein_powder': 'whey_protein_isolate',
   'protein_powder': 'whey_protein_isolate',
-  'protein': 'whey_protein_isolate',      // PHASE 1: Very common shorthand
-  'whey_protein_isolate': 'whey_protein_isolate', // Identity mapping
-  'whey_protein_concentrate': 'whey_protein_concentrate', // PHASE 1: Different product
-  'wpc': 'whey_protein_concentrate',      // PHASE 1: Abbreviation
-  'wpi': 'whey_protein_isolate',          // PHASE 1: Abbreviation
-  'casein': 'casein_protein',             // PHASE 1
-  'casein_protein': 'casein_protein',     // PHASE 1
-  'pea_protein': 'pea_protein',           // PHASE 1: Plant protein
-  'plant_protein': 'pea_protein',         // PHASE 1: Default plant protein
+  'protein': 'whey_protein_isolate',
+  'whey_protein_isolate': 'whey_protein_isolate',
+  'whey_protein_concentrate': 'whey_protein_concentrate',
+  'wpc': 'whey_protein_concentrate',
+  'wpi': 'whey_protein_isolate',
+  'casein': 'casein_protein',
+  'casein_protein': 'casein_protein',
+  'pea_protein': 'pea_protein',
+  'plant_protein': 'pea_protein',
 
   // =====================================================================
-  // MINCE / GROUND MEAT - Comprehensive coverage (PHASE 1 EXPANSION)
+  // MINCE / GROUND MEAT - Comprehensive coverage
   // =====================================================================
-  'mince': 'ground_beef',                 // PHASE 1: Generic defaults to beef
-  'minced_meat': 'ground_beef',           // PHASE 1
-  'ground_meat': 'ground_beef',           // PHASE 1
+  'mince': 'ground_beef',
+  'minced_meat': 'ground_beef',
+  'ground_meat': 'ground_beef',
   'beef_mince': 'ground_beef',
   'lean_beef_mince': 'ground_beef',
   'beef_4_star_lean_mince': 'ground_beef',
   'no_added_hormone_beef_4_star_lean_mince': 'ground_beef',
   'minced_beef': 'ground_beef',
-  'ground_beef': 'ground_beef',           // Identity mapping
+  'ground_beef': 'ground_beef',
   'lean_mince': 'ground_beef',
   'extra_lean_mince': 'ground_beef',
-  // Other ground meats (PHASE 1)
   'pork_mince': 'ground_pork',
   'minced_pork': 'ground_pork',
   'ground_pork': 'ground_pork',
@@ -164,8 +155,8 @@ const SYNONYM_MAP = {
   'chicken_drumstick': 'chicken_leg',
   'chicken_leg': 'chicken_leg',
   'whole_chicken': 'chicken',
-  'chicken_wing': 'chicken_wing',         // PHASE 1
-  'chicken_tender': 'chicken_breast',     // PHASE 1
+  'chicken_wing': 'chicken_wing',
+  'chicken_tender': 'chicken_breast',
 
   // =====================================================================
   // BEEF - Comprehensive coverage
@@ -175,9 +166,9 @@ const SYNONYM_MAP = {
   'beef_steak': 'beef_steak',
   'sirloin': 'beef_steak',
   'ribeye': 'beef_steak',
-  'scotch_fillet': 'beef_steak',          // PHASE 1: Australian term
-  'eye_fillet': 'beef_steak',             // PHASE 1: Australian term
-  'rump_steak': 'beef_steak',             // PHASE 1
+  'scotch_fillet': 'beef_steak',
+  'eye_fillet': 'beef_steak',
+  'rump_steak': 'beef_steak',
 
   // =====================================================================
   // OTHER PROTEINS
@@ -194,10 +185,10 @@ const SYNONYM_MAP = {
   'bacon_rasher': 'bacon',
   'short_cut_bacon': 'bacon',
   'middle_bacon': 'bacon',
-  'streaky_bacon': 'bacon',               // PHASE 1
+  'streaky_bacon': 'bacon',
 
   // =====================================================================
-  // SEAFOOD (PHASE 1 EXPANSION)
+  // SEAFOOD
   // =====================================================================
   'salmon': 'salmon',
   'salmon_fillet': 'salmon',
@@ -209,11 +200,11 @@ const SYNONYM_MAP = {
   'tuna_in_oil': 'canned_tuna',
   'prawn': 'prawns',
   'prawns': 'prawns',
-  'shrimp': 'prawns',                     // PHASE 1: American term
+  'shrimp': 'prawns',
   'shrimps': 'prawns',
   'cod': 'white_fish',
-  'barramundi': 'white_fish',             // PHASE 1: Australian fish
-  'snapper': 'white_fish',                // PHASE 1
+  'barramundi': 'white_fish',
+  'snapper': 'white_fish',
   'white_fish': 'white_fish',
   'fish': 'white_fish',
 
@@ -221,10 +212,10 @@ const SYNONYM_MAP = {
   // EGGS
   // =====================================================================
   'egg': 'egg',
-  'eggs': 'egg',                          // PHASE 1: Explicit plural
+  'eggs': 'egg',
   'large_egg': 'egg',
   'free_range_egg': 'egg',
-  'cage_free_egg': 'egg',                 // PHASE 1
+  'cage_free_egg': 'egg',
   'whole_egg': 'egg',
   'egg_white': 'egg_white',
   'egg_yolk': 'egg_yolk',
@@ -238,8 +229,8 @@ const SYNONYM_MAP = {
   'greek_yoghurt': 'greek_yogurt',
   'plain_yogurt': 'yogurt',
   'natural_yogurt': 'yogurt',
-  'low_fat_yogurt': 'low_fat_yogurt',     // PHASE 1
-  'nonfat_yogurt': 'low_fat_yogurt',      // PHASE 1
+  'low_fat_yogurt': 'low_fat_yogurt',
+  'nonfat_yogurt': 'low_fat_yogurt',
 
   // =====================================================================
   // BUTTER & SPREADS
@@ -249,9 +240,9 @@ const SYNONYM_MAP = {
   'unsalted_butter': 'butter',
   'dairy_butter': 'butter',
   'peanut_butter': 'peanut_butter',
-  'pb': 'peanut_butter',                  // PHASE 1: Abbreviation
+  'pb': 'peanut_butter',
   'almond_butter': 'almond_butter',
-  'pb2': 'peanut_butter_powder',          // PHASE 1: Powdered peanut butter
+  'pb2': 'peanut_butter_powder',
   'peanut_butter_powder': 'peanut_butter_powder',
 
   // =====================================================================
@@ -262,7 +253,7 @@ const SYNONYM_MAP = {
   'cheddar': 'cheddar',
   'cheddar_slice': 'cheddar',
   'cheese_cheddar_slice': 'cheddar',
-  'tasty_cheese': 'cheddar',              // Australian term
+  'tasty_cheese': 'cheddar',
   'mozzarella_cheese': 'mozzarella',
   'mozzarella': 'mozzarella',
   'parmesan_cheese': 'parmesan',
@@ -277,7 +268,7 @@ const SYNONYM_MAP = {
   // =====================================================================
   // BREAD
   // =====================================================================
-  'bread': 'white_bread',                 // PHASE 1: Generic defaults to white
+  'bread': 'white_bread',
   'white_bread': 'white_bread',
   'wholemeal_bread': 'whole_wheat_bread',
   'whole_wheat_bread': 'whole_wheat_bread',
@@ -291,21 +282,21 @@ const SYNONYM_MAP = {
   'brioche_burger_bun': 'brioche',
   'burger_bun': 'burger_bun',
   'bread_roll': 'bread_roll',
-  'toast': 'white_bread',                 // PHASE 1
+  'toast': 'white_bread',
 
   // =====================================================================
   // OILS
   // =====================================================================
-  'oil': 'olive_oil',                     // PHASE 1: Generic defaults to olive
+  'oil': 'olive_oil',
   'olive_oil': 'olive_oil',
   'extra_virgin_olive_oil': 'olive_oil',
   'extra_mild_olive_oil': 'olive_oil',
-  'evoo': 'olive_oil',                    // PHASE 1: Abbreviation
+  'evoo': 'olive_oil',
   'vegetable_oil': 'vegetable_oil',
   'canola_oil': 'canola_oil',
   'coconut_oil': 'coconut_oil',
-  'sunflower_oil': 'sunflower_oil',       // PHASE 1
-  'avocado_oil': 'avocado_oil',           // PHASE 1
+  'sunflower_oil': 'sunflower_oil',
+  'avocado_oil': 'avocado_oil',
 
   // =====================================================================
   // SWEETENERS
@@ -320,13 +311,13 @@ const SYNONYM_MAP = {
   'pure_honey': 'honey',
 
   // =====================================================================
-  // FRUITS - With explicit plural protection (PHASE 1 EXPANSION)
+  // FRUITS
   // =====================================================================
   'banana': 'banana',
-  'bananas': 'banana',                    // PHASE 1: Explicit plural
-  'ripe_banana': 'banana',                // PHASE 1
+  'bananas': 'banana',
+  'ripe_banana': 'banana',
   'apple': 'apple',
-  'apples': 'apple',                      // PHASE 1: Explicit plural
+  'apples': 'apple',
   'modi_apple': 'apple',
   'granny_smith_apple': 'apple',
   'pink_lady_apple': 'apple',
@@ -335,80 +326,79 @@ const SYNONYM_MAP = {
   'green_apple': 'apple',
   'red_apple': 'apple',
   'strawberry': 'strawberry',
-  'strawberries': 'strawberry',           // PHASE 1: Explicit plural
+  'strawberries': 'strawberry',
   'blueberry': 'blueberry',
-  'blueberries': 'blueberry',             // PHASE 1: Explicit plural
+  'blueberries': 'blueberry',
   'raspberry': 'raspberry',
-  'raspberries': 'raspberry',             // PHASE 1: Explicit plural
+  'raspberries': 'raspberry',
   'orange': 'orange',
-  'oranges': 'orange',                    // PHASE 1: Explicit plural
+  'oranges': 'orange',
   'mango': 'mango',
-  'mangoes': 'mango',                     // PHASE 1: Explicit plural
+  'mangoes': 'mango',
   'avocado': 'avocado',
-  'avocados': 'avocado',                  // PHASE 1: Explicit plural
+  'avocados': 'avocado',
   'grape': 'grape',
-  'grapes': 'grape',                      // PHASE 1: Explicit plural
+  'grapes': 'grape',
   'pear': 'pear',
-  'pears': 'pear',                        // PHASE 1
+  'pears': 'pear',
   'peach': 'peach',
-  'peaches': 'peach',                     // PHASE 1
+  'peaches': 'peach',
   'watermelon': 'watermelon',
-  'rockmelon': 'cantaloupe',              // PHASE 1: Australian term
+  'rockmelon': 'cantaloupe',
   'cantaloupe': 'cantaloupe',
   'honeydew': 'honeydew',
   'kiwi': 'kiwi',
   'kiwifruit': 'kiwi',
 
   // =====================================================================
-  // VEGETABLES (PHASE 1 EXPANSION - Including Australian/British terms)
+  // VEGETABLES
   // =====================================================================
   'potato': 'potato',
-  'potatoes': 'potato',                   // PHASE 1: Explicit plural
+  'potatoes': 'potato',
   'sweet_potato': 'sweet_potato',
-  'sweet_potatoes': 'sweet_potato',       // PHASE 1
+  'sweet_potatoes': 'sweet_potato',
   'tomato': 'tomato',
-  'tomatoes': 'tomato',                   // PHASE 1: Explicit plural
+  'tomatoes': 'tomato',
   'cherry_tomato': 'tomato',
-  'cherry_tomatoes': 'tomato',            // PHASE 1
+  'cherry_tomatoes': 'tomato',
   'lettuce': 'lettuce',
   'iceberg_lettuce': 'lettuce',
   'shredded_iceberg_lettuce': 'lettuce',
-  'cos_lettuce': 'romaine_lettuce',       // PHASE 1: Australian term
+  'cos_lettuce': 'romaine_lettuce',
   'romaine_lettuce': 'romaine_lettuce',
   'romaine': 'romaine_lettuce',
   'spinach': 'spinach',
   'baby_spinach': 'spinach',
   'broccoli': 'broccoli',
   'carrot': 'carrot',
-  'carrots': 'carrot',                    // PHASE 1
+  'carrots': 'carrot',
   'onion': 'onion',
-  'onions': 'onion',                      // PHASE 1
+  'onions': 'onion',
   'brown_onion': 'onion',
   'red_onion': 'red_onion',
-  'spring_onion': 'green_onion',          // PHASE 1: Australian/British term
+  'spring_onion': 'green_onion',
   'green_onion': 'green_onion',
-  'scallion': 'green_onion',              // PHASE 1: American term
+  'scallion': 'green_onion',
   'shallot': 'shallot',
-  // Australian/British terminology (PHASE 1)
-  'capsicum': 'bell_pepper',              // Australian term
+  'capsicum': 'bell_pepper',
   'red_capsicum': 'bell_pepper',
   'green_capsicum': 'bell_pepper',
   'bell_pepper': 'bell_pepper',
-  'courgette': 'zucchini',                // British term
+  'courgette': 'zucchini',
   'zucchini': 'zucchini',
-  'aubergine': 'eggplant',                // British term
+  'aubergine': 'eggplant',
   'eggplant': 'eggplant',
-  'rocket': 'arugula',                    // British/Australian term
+  'rocket': 'arugula',
   'arugula': 'arugula',
-  'coriander': 'cilantro',                // British term (for leaves)
+  'coriander': 'cilantro',
   'cilantro': 'cilantro',
-  'beetroot': 'beet',                     // British/Australian term
+  'beetroot': 'beet',
   'beet': 'beet',
   'beets': 'beet',
   'corn': 'corn',
   'sweetcorn': 'corn',
   'mushroom': 'mushroom',
-  'mushrooms': 'mushroom',                // PHASE 1
+  'mushrooms': 'mushroom',
   'cucumber': 'cucumber',
   'celery': 'celery',
   'asparagus': 'asparagus',
@@ -416,7 +406,7 @@ const SYNONYM_MAP = {
   'green_beans': 'green_beans',
 
   // =====================================================================
-  // LEGUMES (PHASE 1 EXPANSION)
+  // LEGUMES
   // =====================================================================
   'lentil': 'lentils',
   'lentils': 'lentils',
@@ -424,7 +414,7 @@ const SYNONYM_MAP = {
   'red_lentils': 'red_lentils',
   'chickpea': 'chickpeas',
   'chickpeas': 'chickpeas',
-  'garbanzo': 'chickpeas',                // PHASE 1: American term
+  'garbanzo': 'chickpeas',
   'garbanzo_bean': 'chickpeas',
   'black_bean': 'black_beans',
   'black_beans': 'black_beans',
@@ -433,11 +423,9 @@ const SYNONYM_MAP = {
   'cannellini_bean': 'cannellini_beans',
   'cannellini_beans': 'cannellini_beans',
   'baked_beans': 'baked_beans',
-  // RFC-003: Edamame
   'edamame': 'edamame',
   'edamame_beans': 'edamame',
   'soy_beans': 'edamame',
-
 
   // =====================================================================
   // BREAKFAST ITEMS
@@ -448,7 +436,7 @@ const SYNONYM_MAP = {
   'cornflakes': 'corn_flakes',
   'wheat_biscuit': 'wheat_cereal',
   'weetbix': 'wheat_cereal',
-  'weet_bix': 'wheat_cereal',             // PHASE 1
+  'weet_bix': 'wheat_cereal',
   'granola': 'granola',
   'muesli': 'muesli',
 
@@ -463,7 +451,7 @@ const SYNONYM_MAP = {
   'water': 'water',
 
   // =====================================================================
-  // ASIAN INGREDIENTS (MOD ZONE 1)
+  // ASIAN INGREDIENTS
   // =====================================================================
   'dashi': 'dashi',
   'dashi_stock': 'dashi',
@@ -472,8 +460,8 @@ const SYNONYM_MAP = {
   'fish_stock': 'dashi',
   'nori': 'nori',
   'nori_seaweed': 'nori',
-  'nori_sheet': 'nori',                    // MOD ZONE 1: Alias
-  'nori_sheets': 'nori',                   // MOD ZONE 1: Alias (Plural)
+  'nori_sheet': 'nori',
+  'nori_sheets': 'nori',
   'seaweed_sheet': 'nori',
   'dried_seaweed': 'nori',
   'teriyaki_sauce': 'teriyaki_sauce',
@@ -486,9 +474,8 @@ const SYNONYM_MAP = {
   'red_miso': 'miso_paste',
   'wakame': 'wakame',
 
-
   // =====================================================================
-  // COATINGS & BREADCRUMBS (MOD ZONE 3)
+  // COATINGS & BREADCRUMBS
   // =====================================================================
   'panko': 'panko_breadcrumbs',
   'panko_crumbs': 'panko_breadcrumbs',
@@ -508,7 +495,7 @@ const SYNONYM_MAP = {
   'potato_starch': 'potato_starch',
 
   // =====================================================================
-  // SPICES & CURRY (MOD ZONE 4)
+  // SPICES & CURRY
   // =====================================================================
   'curry_powder': 'curry_powder',
   'curry': 'curry_powder',
@@ -520,9 +507,8 @@ const SYNONYM_MAP = {
   'garam_masala': 'garam_masala',
   'curry_paste': 'curry_paste',
 
-
   // =====================================================================
-  // SUPPLEMENTS / PERFORMANCE (PHASE 1)
+  // SUPPLEMENTS / PERFORMANCE
   // =====================================================================
   'maltodextrin': 'maltodextrin',
   'maltodextrin_powder': 'maltodextrin',
@@ -537,7 +523,7 @@ const SYNONYM_MAP = {
 const STRIP_PREFIXES = [
   'coles_',
   'woolworths_',
-  'aldi_',                                // PHASE 1
+  'aldi_',
   'no_added_hormone_',
   'free_range_',
   'organic_',
@@ -547,8 +533,8 @@ const STRIP_PREFIXES = [
   'gourmet_',
   'by_laurent_',
   'traditional_',
-  'homestyle_',                           // PHASE 1
-  'country_',                             // PHASE 1
+  'homestyle_',
+  'country_',
 ];
 
 /**
@@ -560,8 +546,8 @@ const STRIP_SUFFIXES = [
   '_multipack',
   '_family_pack',
   '_bulk',
-  '_each',                                // PHASE 1
-  '_per_kg',                              // PHASE 1
+  '_each',
+  '_per_kg',
 ];
 
 /**
@@ -574,29 +560,30 @@ const QUALITY_WORDS = [
   'extra', 'super', 'ultra', 'best', 'quality', 'choice', 'select',
   'mild', 'strong', 'medium', 'light', 'dark', 'bold',
   'virgin', 'refined', 'unrefined', 'cold_pressed',
-  'homemade', 'homestyle',                // PHASE 1
+  'homemade', 'homestyle',
 ];
 
 /**
- * Normalizes a string into a snake_case database key with enhanced matching.
- * @param {string} name The ingredient name to normalize.
- * @returns {string} The normalized, snake_case key.
+ * Normalizes an ingredient key for consistent lookup.
+ * Idempotent: normalizeKey(normalizeKey(x)) === normalizeKey(x).
+ * * @param {string} key - Raw ingredient key
+ * @returns {string} Normalized key (lowercase, trimmed, snake_case) or empty string if invalid.
  */
-function normalizeKey(name) {
-  if (typeof name !== 'string' || !name) {
-    return 'unknown';
+function normalizeKey(key) {
+  if (!key || typeof key !== 'string') {
+    return '';
   }
 
-  let key = name.toLowerCase().trim();
+  let normalized = key.toLowerCase().trim();
 
   // 1. Handle percent signs
-  key = key.replace(/%|\bpercent\b/g, 'pct');
+  normalized = normalized.replace(/%|\bpercent\b/g, 'pct');
 
   // 2. Basic synonym replacement (yoghurt -> yogurt)
-  key = key.replace(/yoghurt/g, 'yogurt');
+  normalized = normalized.replace(/yoghurt/g, 'yogurt');
 
   // 3. Convert to snake_case and remove invalid characters
-  key = key
+  normalized = normalized
     .replace(/[\s&/-]+/g, '_')   // Replace spaces, ampersands, slashes, hyphens with underscore
     .replace(/[^a-z0-9_]/g, '')  // Remove any remaining non-alphanumeric_underscore characters
     .replace(/__+/g, '_')        // Collapse multiple underscores
@@ -604,75 +591,75 @@ function normalizeKey(name) {
 
   // 4. Strip common brand prefixes
   for (const prefix of STRIP_PREFIXES) {
-    if (key.startsWith(prefix)) {
-      key = key.substring(prefix.length);
+    if (normalized.startsWith(prefix)) {
+      normalized = normalized.substring(prefix.length);
       break; // Only strip one prefix
     }
   }
 
   // 5. Strip common suffixes
   for (const suffix of STRIP_SUFFIXES) {
-    if (key.endsWith(suffix)) {
-      key = key.substring(0, key.length - suffix.length);
+    if (normalized.endsWith(suffix)) {
+      normalized = normalized.substring(0, normalized.length - suffix.length);
       break; // Only strip one suffix
     }
   }
 
   // 6. Remove quality descriptors if they create multi-part keys
-  const parts = key.split('_');
+  const parts = normalized.split('_');
   const filteredParts = parts.filter(part => !QUALITY_WORDS.includes(part));
   if (filteredParts.length > 0 && filteredParts.length < parts.length) {
-    key = filteredParts.join('_');
+    normalized = filteredParts.join('_');
   }
 
   // 7. Apply synonym map for comprehensive matching (FIRST PASS)
-  if (SYNONYM_MAP[key]) {
-    key = SYNONYM_MAP[key];
+  if (SYNONYM_MAP[normalized]) {
+    normalized = SYNONYM_MAP[normalized];
   }
 
   // 8. Handle simple plurals (with exceptions)
-  // PHASE 1 FIX: Extended exceptions list for critical plural-form ingredients
-  if (key.endsWith('ies') && key.length > 3) {
-    key = key.slice(0, -3) + 'y'; // e.g., berries -> berry
-  } else if (key.endsWith('oes') && key.length > 3) {
-    key = key.slice(0, -2); // e.g., tomatoes -> tomato
+  if (normalized.endsWith('ies') && normalized.length > 3) {
+    normalized = normalized.slice(0, -3) + 'y'; // e.g., berries -> berry
+  } else if (normalized.endsWith('oes') && normalized.length > 3) {
+    normalized = normalized.slice(0, -2); // e.g., tomatoes -> tomato
   } else if (
-    key.endsWith('s') &&
-    !key.endsWith('ss') &&                // avoid 'hummus' -> 'hummu'
-    key !== 'oats' &&                     // Preserve oats
-    key !== 'rolled_oats' &&              // PHASE 1: Preserve rolled_oats
-    key !== 'quick_oats' &&               // PHASE 1: Preserve quick_oats
-    key !== 'instant_oats' &&             // PHASE 1: Preserve instant_oats
-    key !== 'steel_cut_oats' &&           // PHASE 1: Preserve steel_cut_oats
-    key !== 'hummus' &&
-    key !== 'couscous' &&
-    key !== 'asparagus' &&
-    key !== 'lentils' &&
-    key !== 'chickpeas' &&                // PHASE 1: Preserve chickpeas
-    key !== 'prawns' &&                   // PHASE 1: Preserve prawns
-    key !== 'green_beans' &&              // PHASE 1: Preserve green_beans
-    key !== 'black_beans' &&              // PHASE 1: Preserve black_beans
-    key !== 'kidney_beans' &&             // PHASE 1: Preserve kidney_beans
-    key !== 'cannellini_beans' &&         // PHASE 1: Preserve cannellini_beans
-    key !== 'baked_beans' &&              // PHASE 1: Preserve baked_beans
-    key !== 'corn_flakes' &&              // PHASE 1: Preserve corn_flakes
-    key !== 'egg_noodles' &&              // PHASE 1: Preserve egg_noodles
-    key !== 'panko_breadcrumbs' &&        // MOD ZONE 5.1: Preserve panko_breadcrumbs
-    key !== 'breadcrumbs' &&              // MOD ZONE 5.2: Preserve breadcrumbs
-    key.length > 2
+    normalized.endsWith('s') &&
+    !normalized.endsWith('ss') &&
+    // Exceptions list (preserved from original logic)
+    normalized !== 'oats' &&
+    normalized !== 'rolled_oats' &&
+    normalized !== 'quick_oats' &&
+    normalized !== 'instant_oats' &&
+    normalized !== 'steel_cut_oats' &&
+    normalized !== 'hummus' &&
+    normalized !== 'couscous' &&
+    normalized !== 'asparagus' &&
+    normalized !== 'lentils' &&
+    normalized !== 'chickpeas' &&
+    normalized !== 'prawns' &&
+    normalized !== 'green_beans' &&
+    normalized !== 'black_beans' &&
+    normalized !== 'kidney_beans' &&
+    normalized !== 'cannellini_beans' &&
+    normalized !== 'baked_beans' &&
+    normalized !== 'corn_flakes' &&
+    normalized !== 'egg_noodles' &&
+    normalized !== 'panko_breadcrumbs' &&
+    normalized !== 'breadcrumbs' &&
+    normalized.length > 2
   ) {
-    key = key.slice(0, -1); // e.g., apples -> apple
+    normalized = normalized.slice(0, -1); // e.g., apples -> apple
   }
 
   // 9. Final synonym map check after plural handling (SECOND PASS)
-  if (SYNONYM_MAP[key]) {
-    key = SYNONYM_MAP[key];
+  if (SYNONYM_MAP[normalized]) {
+    normalized = SYNONYM_MAP[normalized];
   }
 
   // 10. Final cleanup
-  key = key.replace(/__+/g, '_').replace(/^_|_+$/g, '');
+  normalized = normalized.replace(/__+/g, '_').replace(/^_|_+$/g, '');
 
-  return key || 'unknown';
+  return normalized || '';
 }
 
 /**
