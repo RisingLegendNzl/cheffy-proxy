@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.3 - Strict Schema + Trace Fix
+// V15.4 - Explicit Prompt Schema
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -131,7 +131,7 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
     }
 }
 
-// --- Helper: LLM System Prompt (Strict Schema Enforced) ---
+// --- Helper: LLM System Prompt (Explicit Units) ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, day, perMealTargets) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
 Strictly adhere to the JSON schema. No free text, no comments, no markdown blocks.
@@ -146,7 +146,7 @@ JSON SCHEMA:
         {
           "key": "string (Generic ingredient name, e.g. 'Oats')",
           "qty_value": number (Decimal or integer),
-          "qty_unit": "g" | "ml" | "tsp" | "tbsp" | "cup" | "slice" | "egg" | "can",
+          "qty_unit": "string (SEE ALLOWED LIST BELOW)",
           "stateHint": "dry" | "raw" | "cooked" | "as_pack",
           "methodHint": "string (Cooking method, e.g. 'boiled', or null)"
         }
@@ -155,8 +155,14 @@ JSON SCHEMA:
   ]
 }
 
+ALLOWED UNITS (qty_unit):
+- Metric: "g", "ml", "kg", "L"
+- Volume: "cup", "tbsp", "tsp"
+- Count: "piece", "slice", "egg", "can", "tin", "packet", "sachet"
+- Other: "clove", "stalk", "sprig", "bunch", "head", "fillet", "rasher", "pinch", "handful"
+
 CRITICAL RULES:
-1. **UNITS:** Use ONLY the allowed units in the schema. Do NOT use 'medium', 'large', 'piece', 'serving'. Convert to grams (g) if unsure.
+1. **UNITS:** Use ONLY the allowed units above. Do NOT use 'medium', 'large', 'serving', 'bowl'. Convert to 'g' or 'piece' if unsure.
 2. **PROTEIN CAP:** Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
 3. **STATE HINT:** Mandatory.
    - "dry": grains, pasta, oats before cooking.
@@ -240,12 +246,11 @@ module.exports = async (request, response) => {
 
         log(`Starting Multi-Day Plan Generation for ${numDays} days`, 'INFO', 'ORCHESTRATOR');
 
-        // 4. Calculate Per-Meal Targets (Phase B logic)
+        // 4. Calculate Per-Meal Targets
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
         
-        // Distribution ratios
         let mainRatio = 1.0, snackRatio = 0.0;
         if (eatingOccasions === 4) { mainRatio = 0.84; snackRatio = 0.16; }
         else if (eatingOccasions >= 5) { mainRatio = 0.75; snackRatio = 0.25; }
@@ -279,25 +284,23 @@ module.exports = async (request, response) => {
             const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
             if (!validation.valid) {
                 log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
-                // Use corrected output if available, otherwise raw
                 if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
             }
 
-            // C. Execute Pipeline (Delegated Shared Logic)
-            // This handles Market -> Nutrition -> Solver -> Chef -> Validation
+            // C. Execute Pipeline
             const pipelineConfig = {
                 traceId,
                 dayNumber: day,
                 store: store,
-                scaleProtein: true, // Winning code path enforced
+                scaleProtein: true, 
                 allowReconciliation: true,
                 generateRecipes: true
             };
 
             const processedDayResult = await executePipeline(
                 rawDayPlan.meals,
-                nutritionalTargets, // Pass daily targets
-                fetchLLMWithRetry,  // Pass retry fn for internal pipeline agents (Chef)
+                nutritionalTargets, 
+                fetchLLMWithRetry,  
                 pipelineConfig
             );
 
@@ -339,15 +342,9 @@ module.exports = async (request, response) => {
         return response.status(200).json(responseData);
 
     } catch (error) {
-        // Safe wrapping of error object for alerting
         const safeError = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
-        
-        // Pass sanitized message to alerts
         emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', { traceId, error: safeError.message });
-        
-        // Use corrected traceError signature: traceError(id, stage, error)
         traceError(traceId, 'orchestrator_handler', safeError);
-        
         log(`Pipeline Failure: ${safeError.message}`, 'CRITICAL', 'ORCHESTRATOR');
         
         return response.status(500).json({
