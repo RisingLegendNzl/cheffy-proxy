@@ -22,7 +22,7 @@
  * - Trace storage uses @vercel/kv
  */
 
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const { normalizeKey } = require('../scripts/normalize.js');
 const { lookupIngredientNutrition } = require('../api/nutrition-search.js');
 const { reconcileNonProtein, reconcileMealLevel } = require('./reconcileNonProtein.js');
@@ -50,10 +50,11 @@ const DEFAULT_CONFIG = {
 
 /**
  * Generates a unique trace ID for request correlation
+ * Uses Node.js built-in crypto.randomUUID() (available since Node 14.17.0)
  * @returns {string} UUID v4 trace ID
  */
 function generateTraceId() {
-  return uuidv4();
+  return crypto.randomUUID();
 }
 
 /**
