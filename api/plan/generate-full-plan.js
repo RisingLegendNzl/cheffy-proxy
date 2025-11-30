@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.2 - Fixed traceError signature usage
+// V15.3 - Strict Schema + Trace Fix
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -131,34 +131,44 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
     }
 }
 
-// --- Helper: LLM System Prompt ---
+// --- Helper: LLM System Prompt (Strict Schema Enforced) ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, day, perMealTargets) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
-RULES:
-1. Generate meals ('meals') & items ('items') used TODAY.
-2. CRITICAL PROTEIN CAP: Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
-3. MEAL PORTIONS: For each meal, populate 'items' with:
-    a) 'key': (string) Generic ingredient name.
-    b) 'qty_value': (number) Portion size.
-    c) 'qty_unit': (string) 'g', 'ml', 'slice', 'egg'.
-    d) 'stateHint': (string) MANDATORY: "dry", "raw", "cooked", "as_pack".
-    e) 'methodHint': (string | null) MANDATORY if cooked.
-4. UNITS: Use 'g' or 'ml' primarily. No 'medium', 'large'.
-5. TARGETS: MAIN MEALS (~${perMealTargets.main.calories} kcal, ~${perMealTargets.main.protein}g P). SNACKS (~${perMealTargets.snack.calories} kcal, ~${perMealTargets.snack.protein}g P).
-6. SCALING: Scale protein portions to match targets (e.g. 120g chicken, not 200g).
-7. Return only valid JSON.
+Strictly adhere to the JSON schema. No free text, no comments, no markdown blocks.
 
-JSON Structure:
+JSON SCHEMA:
 {
   "meals": [
     {
-      "type": "string", "name": "string",
+      "type": "Breakfast" | "Lunch" | "Dinner" | "Snack",
+      "name": "string (Meal Name)",
       "items": [
-        { "key": "string", "qty_value": number, "qty_unit": "string", "stateHint": "string", "methodHint": "string|null" }
+        {
+          "key": "string (Generic ingredient name, e.g. 'Oats')",
+          "qty_value": number (Decimal or integer),
+          "qty_unit": "g" | "ml" | "tsp" | "tbsp" | "cup" | "slice" | "egg" | "can",
+          "stateHint": "dry" | "raw" | "cooked" | "as_pack",
+          "methodHint": "string (Cooking method, e.g. 'boiled', or null)"
+        }
       ]
     }
   ]
 }
+
+CRITICAL RULES:
+1. **UNITS:** Use ONLY the allowed units in the schema. Do NOT use 'medium', 'large', 'piece', 'serving'. Convert to grams (g) if unsure.
+2. **PROTEIN CAP:** Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
+3. **STATE HINT:** Mandatory.
+   - "dry": grains, pasta, oats before cooking.
+   - "raw": meats, veg before cooking.
+   - "cooked": only if user explicitly eats pre-cooked item.
+   - "as_pack": yogurt, bread, cheese.
+4. **TARGETS:**
+   - MAIN MEALS: ~${perMealTargets.main.calories} kcal, ~${perMealTargets.main.protein}g P
+   - SNACKS: ~${perMealTargets.snack.calories} kcal, ~${perMealTargets.snack.protein}g P
+5. **SCALING:** Scale portion sizes (qty_value) to hit these targets exactly.
+
+Return ONLY the JSON object.
 `;
 
 // --- Helper: Generate Single Day Plan (LLM) ---
@@ -230,11 +240,12 @@ module.exports = async (request, response) => {
 
         log(`Starting Multi-Day Plan Generation for ${numDays} days`, 'INFO', 'ORCHESTRATOR');
 
-        // 4. Calculate Per-Meal Targets
+        // 4. Calculate Per-Meal Targets (Phase B logic)
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
         
+        // Distribution ratios
         let mainRatio = 1.0, snackRatio = 0.0;
         if (eatingOccasions === 4) { mainRatio = 0.84; snackRatio = 0.16; }
         else if (eatingOccasions >= 5) { mainRatio = 0.75; snackRatio = 0.25; }
@@ -261,30 +272,32 @@ module.exports = async (request, response) => {
         for (let day = 1; day <= numDays; day++) {
             traceStageStart(traceId, `Day_${day}_Processing`);
             
-            // A. Generate Meals
+            // A. Generate Meals (Dietitian Agent)
             const rawDayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log, targetsPerMealType);
 
             // B. Validate LLM Output
             const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
             if (!validation.valid) {
                 log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
+                // Use corrected output if available, otherwise raw
                 if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
             }
 
-            // C. Execute Pipeline
+            // C. Execute Pipeline (Delegated Shared Logic)
+            // This handles Market -> Nutrition -> Solver -> Chef -> Validation
             const pipelineConfig = {
                 traceId,
                 dayNumber: day,
                 store: store,
-                scaleProtein: true, 
+                scaleProtein: true, // Winning code path enforced
                 allowReconciliation: true,
                 generateRecipes: true
             };
 
             const processedDayResult = await executePipeline(
                 rawDayPlan.meals,
-                nutritionalTargets, 
-                fetchLLMWithRetry,  
+                nutritionalTargets, // Pass daily targets
+                fetchLLMWithRetry,  // Pass retry fn for internal pipeline agents (Chef)
                 pipelineConfig
             );
 
