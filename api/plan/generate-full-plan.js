@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.4 - Explicit Prompt Schema
+// V15.5 - Strict Prompt + Error Serialization Fix
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -23,7 +23,6 @@ const kv = createClient({
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
-const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 const LLM_REQUEST_TIMEOUT_MS = 90000;
@@ -131,10 +130,10 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJs
     }
 }
 
-// --- Helper: LLM System Prompt (Explicit Units) ---
+// --- Helper: LLM System Prompt (Explicit Units + Strict Schema) ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, day, perMealTargets) => `
 You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
-Strictly adhere to the JSON schema. No free text, no comments, no markdown blocks.
+STRICTLY output valid JSON matching the schema below. No markdown, no prose, no comments.
 
 JSON SCHEMA:
 {
@@ -144,9 +143,9 @@ JSON SCHEMA:
       "name": "string (Meal Name)",
       "items": [
         {
-          "key": "string (Generic ingredient name, e.g. 'Oats')",
+          "key": "string (Generic ingredient name, e.g. 'Oats', 'Chicken Breast')",
           "qty_value": number (Decimal or integer),
-          "qty_unit": "string (SEE ALLOWED LIST BELOW)",
+          "qty_unit": "string (MUST BE FROM ALLOWED LIST)",
           "stateHint": "dry" | "raw" | "cooked" | "as_pack",
           "methodHint": "string (Cooking method, e.g. 'boiled', or null)"
         }
@@ -156,15 +155,14 @@ JSON SCHEMA:
 }
 
 ALLOWED UNITS (qty_unit):
-- Metric: "g", "ml", "kg", "L"
-- Volume: "cup", "tbsp", "tsp"
-- Count: "piece", "slice", "egg", "can", "tin", "packet", "sachet"
-- Other: "clove", "stalk", "sprig", "bunch", "head", "fillet", "rasher", "pinch", "handful"
+- Weight: "g", "kg", "oz", "lb"
+- Volume: "ml", "L", "cup", "tbsp", "tsp"
+- Count: "piece", "slice", "egg", "can", "tin", "packet", "sachet", "clove", "stalk", "sprig", "bunch", "fillet"
 
 CRITICAL RULES:
-1. **UNITS:** Use ONLY the allowed units above. Do NOT use 'medium', 'large', 'serving', 'bowl'. Convert to 'g' or 'piece' if unsure.
+1. **UNITS:** Do NOT use vague units like 'medium', 'large', 'serving', 'bowl', 'plate'. Convert to 'piece' or 'g'.
 2. **PROTEIN CAP:** Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
-3. **STATE HINT:** Mandatory.
+3. **STATE HINT:**
    - "dry": grains, pasta, oats before cooking.
    - "raw": meats, veg before cooking.
    - "cooked": only if user explicitly eats pre-cooked item.
@@ -174,7 +172,7 @@ CRITICAL RULES:
    - SNACKS: ~${perMealTargets.snack.calories} kcal, ~${perMealTargets.snack.protein}g P
 5. **SCALING:** Scale portion sizes (qty_value) to hit these targets exactly.
 
-Return ONLY the JSON object.
+Output ONLY the JSON.
 `;
 
 // --- Helper: Generate Single Day Plan (LLM) ---
@@ -284,6 +282,7 @@ module.exports = async (request, response) => {
             const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
             if (!validation.valid) {
                 log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
+                // Use corrected output if available, otherwise raw
                 if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
             }
 
@@ -342,13 +341,22 @@ module.exports = async (request, response) => {
         return response.status(200).json(responseData);
 
     } catch (error) {
+        // Safe wrapping of error object for alerting
         const safeError = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+        
+        // Pass sanitized message to alerts
         emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', { traceId, error: safeError.message });
+        
+        // Use corrected traceError signature
         traceError(traceId, 'orchestrator_handler', safeError);
+        
         log(`Pipeline Failure: ${safeError.message}`, 'CRITICAL', 'ORCHESTRATOR');
         
+        // Return standard error shape expected by frontend
         return response.status(500).json({
-            error: safeError.message,
+            message: safeError.message,
+            error: safeError.message, // Legacy support
+            details: safeError.validationErrors || null,
             traceId,
             code: "PIPELINE_ERROR"
         });
