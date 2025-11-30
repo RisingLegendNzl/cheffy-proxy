@@ -718,7 +718,7 @@ JSON Structure:
 }
 `;
 
-// --- Chef AI Prompt ---
+// --- Chef AI Prompt (Consolidated Definition) ---
 const CHEF_SYSTEM_PROMPT = (store) => `
 You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
 RULES:
@@ -739,7 +739,7 @@ JSON Structure:
   "description": "string",
   "instructions": ["string"]
 }
-`; // This block was the source of the duplicate declaration error and has been removed.
+`;
 
 /**
  * Tries to generate a plan from an LLM, retrying on failure.
@@ -956,29 +956,6 @@ async function generateGroceryQueries_Batched(aggregatedIngredients, store, log)
     
     return parsedResult;
 }
-
-// --- Chef AI Prompt ---
-const CHEF_SYSTEM_PROMPT = (store) => `
-You are an expert chef for ${store} shoppers. You write clear, safe, and appetizing recipes.
-RULES:
-1.  You will be given a meal name and a list of ingredients with quantities.
-2.  Your job is to generate an appetizing 1-sentence 'description' for the meal.
-3.  You MUST also generate a 'instructions' array, with each element being one step.
-4.  Instructions MUST be safe, clear, and logical.
-5.  **FOOD SAFETY IS CRITICAL:**
-    * ALWAYS include a step to "cook chicken/pork thoroughly until no longer pink and juices run clear."
-    * ALWAYS include a step to "wash all produce (vegetables/fruit) thoroughly."
-6.  Be concise. Aim for 4-7 steps.
-7.  Do NOT add any ingredients not in the provided list, except for "salt, pepper, and water" which are assumed.
-
-Output ONLY the valid JSON object described below. ABSOLUTELY NO PROSE OR MARKDOWN.
-
-JSON Structure:
-{
-  "description": "string",
-  "instructions": ["string"]
-}
-`;
 
 /**
  * Tries to generate a recipe from an LLM, retrying on failure.
