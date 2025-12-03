@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.6 - Fixed CACHE_PREFIX undefined error
+// V15.7 - Fixed CACHE_PREFIX + emitAlert signature
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -25,7 +25,7 @@ const kv = createClient({
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
-// --- [FIX] Added missing CACHE_PREFIX constant ---
+// --- [FIX V15.6] Added missing CACHE_PREFIX constant ---
 const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
 // --- [END FIX] ---
 
@@ -356,15 +356,14 @@ module.exports = async (request, response) => {
             stack: errorStack
         });
 
-        emitAlert({
-            level: ALERT_LEVELS.CRITICAL,
-            metric: 'pipeline_failure',
-            category: 'system',
-            context: {
-                traceId,
-                error: errorMessage
-            }
+        // --- [FIX V15.7] Corrected emitAlert call signature ---
+        // Signature: emitAlert(level, metric, context)
+        // Was incorrectly passing object as first argument
+        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
+            traceId,
+            error: errorMessage
         });
+        // --- [END FIX] ---
 
         completeTrace(traceId, { 
             status: 'error', 
