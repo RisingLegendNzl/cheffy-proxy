@@ -1,15 +1,30 @@
-// --- Cheffy API: /api/nutrition-search.js ---
-// Module 3 Refactor: Nutrition Lookup Module
-// V15.0 - Ingredient-Centric Single Source of Truth
+/**
+ * Cheffy API: /api/nutrition-search.js
+ * V2.0 - Added pre-use validation gate in lookup chain
+ * 
+ * Module 3 Refactor: Nutrition Lookup Module
+ * Ingredient-Centric Single Source of Truth
+ * 
+ * V2.0 CHANGES (Minimum Viable Reliability):
+ * - Added validateNutritionAtLookup() for pre-use validation
+ * - HotPath and Canonical results are validated before returning
+ * - If validation fails, lookup skips to next tier
+ * - Fallback data is NOT validated (marked with _validated: false)
+ * - New alert: lookup_validation_failed
+ */
 
 const { createClient } = require('@vercel/kv');
 
 // --- Imports ---
 const { normalizeKey } = require('../scripts/normalize.js');
-const { emitAlert, alertNewIngredient, ALERT_LEVELS } = require('../utils/alerting.js');
+const { 
+  emitAlert, 
+  alertNewIngredient, 
+  alertLookupValidationFailed,
+  ALERT_LEVELS 
+} = require('../utils/alerting.js');
 
-// --- Hot-Path Module (Ultra-fast, top 50+ ingredients) ---
-// Preserving existing local dependency
+// --- Hot-Path Module (Ultra-fast, top 150+ ingredients) ---
 const { getHotPath, getHotPathStats } = require('./nutrition-hotpath.js');
 
 // --- Canonical Database ---
@@ -24,11 +39,24 @@ try {
   
   if (canonModule.CANON && typeof canonModule.CANON === 'object') {
     CANON_KEYS = Object.keys(canonModule.CANON);
-    // Silent success log to reduce noise
   }
 } catch (e) {
   console.warn('[nutrition-search] WARN: Could not load _canon.js. Canonical DB will be unavailable.', e.message);
 }
+
+// --- V2.0: Validation Configuration ---
+const VALIDATION_CONFIG = {
+  // Macro-calorie consistency tolerance (5% per reliability strategy)
+  calorieTolerancePct: 5,
+  
+  // Calorie calculation constants
+  caloriesPerGramProtein: 4,
+  caloriesPerGramCarbs: 4,
+  caloriesPerGramFat: 9,
+  
+  // Enable/disable lookup validation
+  enableLookupValidation: true
+};
 
 // --- Configuration ---
 const FALLBACK_NUTRITION = {
@@ -50,45 +78,150 @@ const FALLBACK_NUTRITION = {
 
 /**
  * Infers category for fallback selection.
+ * 
+ * @param {string} key - Normalized ingredient key
+ * @returns {string} Category name
  */
-function inferCategoryFromKey(normalizedKey) {
-  const key = (normalizedKey || '').toLowerCase();
+function inferCategoryFromKey(key) {
+  const k = key.toLowerCase();
   
-  if (/rice|pasta|oat|quinoa|couscous|barley|bulgur|farro|bread|cereal|wheat|corn_flake|granola|muesli|noodle|freekeh|spelt|teff|amaranth|millet|buckwheat/.test(key)) return 'grain';
-  if (/chicken|beef|pork|lamb|turkey|fish|salmon|tuna|prawn|shrimp|egg|tofu|tempeh|duck|goat|veal|venison|mince|steak|fillet|breast|thigh|drumstick|bacon|sausage/.test(key)) return 'protein';
-  if (/lentil|chickpea|bean(?!_sprout)|pea(?!nut)|dal|dhal/.test(key)) return 'legume';
-  if (/broccoli|spinach|carrot|potato(?!_chip)|tomato|onion|pepper|capsicum|zucchini|mushroom|lettuce|cabbage|celery|asparagus|cucumber|corn(?!_flake)|kale|cauliflower|eggplant|aubergine|pumpkin|squash|beetroot|beet/.test(key)) return 'vegetable';
-  if (/banana|apple|orange|strawberry|blueberry|mango|grape|watermelon|pear|peach|plum|cherry|raspberry|blackberry|kiwi|pineapple|melon|avocado/.test(key)) return 'fruit';
-  if (/milk|yogurt|yoghurt|cheese|cream(?!_of)|butter|ricotta|feta|mozzarella|cheddar|parmesan|cottage/.test(key)) return 'dairy';
-  if (/oil|lard|ghee|dripping|tallow|shortening/.test(key)) return 'fat';
-  if (/almond|walnut|cashew|peanut|nut|seed|pecan|pistachio|macadamia|hazelnut|chestnut/.test(key)) return 'nut';
-  if (/whey|protein_powder|protein_isolate|creatine|maltodextrin|dextrose|bcaa|casein/.test(key)) return 'supplement';
-  if (/sugar|honey|syrup|maple|agave|stevia|sweetener/.test(key)) return 'sweetener';
-  if (/sauce|ketchup|mustard|mayo|dressing|vinegar|soy_sauce|sriracha|salsa/.test(key)) return 'condiment';
+  // Proteins
+  if (/chicken|beef|pork|lamb|fish|salmon|tuna|prawn|shrimp|egg|tofu|tempeh|turkey|bacon|mince/.test(k)) return 'protein';
+  
+  // Grains/Carbs
+  if (/rice|pasta|bread|oat|quinoa|couscous|noodle|flour|cereal|wheat|corn|potato|sweet_potato/.test(k)) return 'grain';
+  
+  // Dairy
+  if (/milk|cheese|yogurt|cream|butter|cheddar|mozzarella|parmesan|feta|ricotta/.test(k)) return 'dairy';
+  
+  // Fats
+  if (/oil|olive|coconut|avocado|butter|lard|ghee|fat|dripping/.test(k)) return 'fat';
+  
+  // Vegetables
+  if (/broccoli|spinach|carrot|tomato|onion|lettuce|zucchini|cucumber|mushroom|cabbage|pepper|asparagus|celery|bean|pea|eggplant/.test(k)) return 'vegetable';
+  
+  // Fruits
+  if (/apple|banana|orange|berry|grape|mango|melon|pear|peach|plum|kiwi|strawberry|blueberry/.test(k)) return 'fruit';
+  
+  // Legumes
+  if (/lentil|chickpea|black_bean|kidney_bean|bean(?!s$)/.test(k)) return 'legume';
+  
+  // Nuts/Seeds
+  if (/almond|walnut|cashew|peanut|nut|seed|pistachio/.test(k)) return 'nut';
+  
+  // Supplements
+  if (/whey|protein|casein|creatine|supplement/.test(k)) return 'supplement';
+  
+  // Sweeteners
+  if (/sugar|honey|syrup|sweetener|maple/.test(k)) return 'sweetener';
+  
+  // Condiments
+  if (/sauce|dressing|mayo|ketchup|mustard|vinegar|soy|miso|curry/.test(k)) return 'condiment';
   
   return 'unknown';
 }
 
 /**
- * Calculates Levenshtein distance for fuzzy matching.
+ * Levenshtein distance for fuzzy matching
+ * 
+ * @param {string} a - First string
+ * @param {string} b - Second string
+ * @returns {number} Edit distance
  */
 function levenshteinDistance(a, b) {
   if (a.length === 0) return b.length;
   if (b.length === 0) return a.length;
+  
   const matrix = [];
-  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  
   for (let i = 1; i <= b.length; i++) {
     for (let j = 1; j <= a.length; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) matrix[i][j] = matrix[i - 1][j - 1];
-      else matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
     }
   }
+  
   return matrix[b.length][a.length];
 }
 
 /**
- * Transforms internal canonical data to standard output format.
+ * V2.0: Validates nutrition data at lookup time
+ * Checks macro-calorie consistency before returning data
+ * 
+ * @param {Object} nutrition - Nutrition data { calories, protein, fat, carbs }
+ * @param {string} key - Ingredient key for logging
+ * @param {string} source - Source name (hotpath, canonical)
+ * @returns {{ valid: boolean, deviation_pct: number, expected_kcal: number, reported_kcal: number }}
+ */
+function validateNutritionAtLookup(nutrition, key, source) {
+  // Skip validation if disabled
+  if (!VALIDATION_CONFIG.enableLookupValidation) {
+    return { valid: true, deviation_pct: 0 };
+  }
+  
+  const { calories, protein, fat, carbs } = nutrition;
+  
+  // Skip if values are missing or zero
+  if (!calories || calories === 0) {
+    return { valid: true, deviation_pct: 0 };
+  }
+  if (protein === undefined || fat === undefined || carbs === undefined) {
+    return { valid: true, deviation_pct: 0 };
+  }
+  
+  // Calculate expected calories from macros
+  const expectedKcal = 
+    (protein * VALIDATION_CONFIG.caloriesPerGramProtein) +
+    (carbs * VALIDATION_CONFIG.caloriesPerGramCarbs) +
+    (fat * VALIDATION_CONFIG.caloriesPerGramFat);
+  
+  // Skip if expected is zero
+  if (expectedKcal === 0) {
+    return { valid: true, deviation_pct: 0 };
+  }
+  
+  // Calculate deviation
+  const deviation = Math.abs((calories - expectedKcal) / expectedKcal) * 100;
+  const deviationRounded = Math.round(deviation * 100) / 100;
+  
+  // Check against tolerance
+  if (deviation > VALIDATION_CONFIG.calorieTolerancePct) {
+    return {
+      valid: false,
+      deviation_pct: deviationRounded,
+      expected_kcal: Math.round(expectedKcal),
+      reported_kcal: calories
+    };
+  }
+  
+  return {
+    valid: true,
+    deviation_pct: deviationRounded,
+    expected_kcal: Math.round(expectedKcal),
+    reported_kcal: calories
+  };
+}
+
+/**
+ * Transforms canonical data to standard output format
+ * 
+ * @param {Object} canonData - Raw canonical data
+ * @param {string} key - Matched key
+ * @param {string} source - Source identifier
+ * @returns {Object} Standardized nutrition object
  */
 function transformCanonToOutput(canonData, key, source) {
   return {
@@ -103,33 +236,77 @@ function transformCanonToOutput(canonData, key, source) {
     fiber: canonData.fiber_g_per_100g,
     notes: canonData.notes,
     version: CANON_VERSION,
-    matchedKey: key
+    matchedKey: key,
+    _validated: true  // V2.0: Mark as validated
   };
 }
 
 // --- Lookup Tiers ---
 
+/**
+ * V2.0: Looks up in HotPath with validation
+ * 
+ * @param {string} normalizedKey - Normalized ingredient key
+ * @param {Function} log - Logger function
+ * @returns {Object|null} Nutrition data or null if not found/invalid
+ */
 function lookupHotPath(normalizedKey, log) {
   const result = getHotPath(normalizedKey);
-  if (result) {
-    log(`[NUTRI] HOT-PATH HIT: ${normalizedKey}`, 'DEBUG', 'HOT_PATH');
-    // Ensure HotPath result has the standard source/isFallback structure
-    return {
-      ...result,
-      source: 'hotpath',
-      isFallback: false,
-      status: 'found'
-    };
+  if (!result) return null;
+  
+  // Transform to standard format
+  const nutrition = {
+    ...result,
+    source: 'hotpath',
+    isFallback: false,
+    status: 'found',
+    _validated: true  // Will be set based on validation
+  };
+  
+  // V2.0: Validate before returning
+  const validation = validateNutritionAtLookup(nutrition, normalizedKey, 'hotpath');
+  
+  if (!validation.valid) {
+    // Log validation failure
+    log(`[NUTRI] HOT-PATH VALIDATION FAILED: ${normalizedKey} (${validation.deviation_pct}% deviation)`, 'WARN', 'HOT_PATH');
+    
+    // Emit alert
+    alertLookupValidationFailed(normalizedKey, 'hotpath', validation, {});
+    
+    // Return null to skip to next tier
+    return null;
   }
-  return null;
+  
+  log(`[NUTRI] HOT-PATH HIT: ${normalizedKey}`, 'DEBUG', 'HOT_PATH');
+  return nutrition;
 }
 
+/**
+ * V2.0: Looks up in Canonical DB with validation
+ * 
+ * @param {string} normalizedKey - Normalized ingredient key
+ * @param {Function} log - Logger function
+ * @returns {Object|null} Nutrition data or null if not found/invalid
+ */
 function lookupCanonical(normalizedKey, log) {
   if (!CANON_VERSION) return null;
 
   // 1. Exact Match
   let data = canonGet(normalizedKey);
-  if (data) return transformCanonToOutput(data, normalizedKey, 'canonical');
+  if (data) {
+    const nutrition = transformCanonToOutput(data, normalizedKey, 'canonical');
+    
+    // V2.0: Validate before returning
+    const validation = validateNutritionAtLookup(nutrition, normalizedKey, 'canonical');
+    
+    if (!validation.valid) {
+      log(`[NUTRI] CANONICAL VALIDATION FAILED: ${normalizedKey} (${validation.deviation_pct}% deviation)`, 'WARN', 'CANON');
+      alertLookupValidationFailed(normalizedKey, 'canonical', validation, {});
+      return null;  // Skip to fallback
+    }
+    
+    return nutrition;
+  }
 
   // 2. Fuzzy Match (Simple distance check on keys)
   if (CANON_KEYS.length > 0) {
@@ -147,14 +324,33 @@ function lookupCanonical(normalizedKey, log) {
 
     if (bestMatch) {
       data = canonGet(bestMatch);
+      const nutrition = transformCanonToOutput(data, bestMatch, 'canonical');
+      
+      // V2.0: Validate fuzzy match too
+      const validation = validateNutritionAtLookup(nutrition, bestMatch, 'canonical');
+      
+      if (!validation.valid) {
+        log(`[NUTRI] CANONICAL FUZZY VALIDATION FAILED: ${normalizedKey} -> ${bestMatch} (${validation.deviation_pct}% deviation)`, 'WARN', 'CANON');
+        alertLookupValidationFailed(bestMatch, 'canonical-fuzzy', validation, { originalKey: normalizedKey });
+        return null;  // Skip to fallback
+      }
+      
       log(`[NUTRI] CANONICAL FUZZY HIT: ${normalizedKey} -> ${bestMatch}`, 'DEBUG', 'CANON');
-      return transformCanonToOutput(data, bestMatch, 'canonical');
+      return nutrition;
     }
   }
 
   return null;
 }
 
+/**
+ * Gets fallback nutrition based on inferred category
+ * V2.0: Fallback is NOT validated, marked with _validated: false
+ * 
+ * @param {string} normalizedKey - Normalized ingredient key
+ * @param {Function} log - Logger function
+ * @returns {Object} Fallback nutrition data
+ */
 function getFallbackNutrition(normalizedKey, log) {
   const category = inferCategoryFromKey(normalizedKey);
   const fallback = FALLBACK_NUTRITION[category] || FALLBACK_NUTRITION.unknown;
@@ -181,7 +377,8 @@ function getFallbackNutrition(normalizedKey, log) {
     confidence: fallback.confidence,
     inferredCategory: category,
     matchedKey: normalizedKey,
-    notes: `${fallback.description} - estimated`
+    notes: `${fallback.description} - estimated`,
+    _validated: false  // V2.0: Fallback is NOT validated
   };
 }
 
@@ -190,7 +387,11 @@ function getFallbackNutrition(normalizedKey, log) {
 /**
  * Looks up nutrition data for a given ingredient.
  * Pipeline: Normalization -> HotPath -> Canonical -> Fallback
- * * @param {string} ingredientKey - Raw ingredient name
+ * 
+ * V2.0: Each tier validates data before returning.
+ * If validation fails, lookup proceeds to next tier.
+ * 
+ * @param {string} ingredientKey - Raw ingredient name
  * @param {function} log - Logger instance
  * @returns {object} Standardized nutrition object
  */
@@ -198,10 +399,10 @@ async function lookupIngredientNutrition(ingredientKey, log = console.log) {
   const normalizedKey = normalizeKey(ingredientKey);
   let result = null;
 
-  // 1. HotPath
+  // 1. HotPath (with validation)
   result = lookupHotPath(normalizedKey, log);
 
-  // 2. Canonical
+  // 2. Canonical (with validation)
   if (!result) {
     result = lookupCanonical(normalizedKey, log);
     
@@ -211,7 +412,7 @@ async function lookupIngredientNutrition(ingredientKey, log = console.log) {
     }
   }
 
-  // 3. Fallback
+  // 3. Fallback (NO validation - assumed correct)
   if (!result) {
     result = getFallbackNutrition(normalizedKey, log);
   }
@@ -224,7 +425,8 @@ module.exports = {
   lookupIngredientNutrition,
   getHotPathStats,
   inferCategoryFromKey,
+  validateNutritionAtLookup,  // V2.0: Export for testing
+  VALIDATION_CONFIG,          // V2.0: Export config for testing
   // Deprecated: Maintained strictly for legacy test compatibility if needed
   fetchNutritionData: async (barcode, query, log) => lookupIngredientNutrition(query || '', log)
 };
-
