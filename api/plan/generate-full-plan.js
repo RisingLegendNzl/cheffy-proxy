@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.5 - Strict Prompt + Error Serialization Fix
+// V15.6 - Fixed CACHE_PREFIX undefined error
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -24,6 +24,10 @@ const kv = createClient({
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
+
+// --- [FIX] Added missing CACHE_PREFIX constant ---
+const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
+// --- [END FIX] ---
 
 const LLM_REQUEST_TIMEOUT_MS = 90000;
 const MAX_LLM_RETRIES = 3;
@@ -88,66 +92,73 @@ async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
 
             if (response.status !== 429 && response.status < 500) {
                 const errorBody = await response.text();
-                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody}`);
+                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody.substring(0, 200)}`);
             }
-            log(`${attemptPrefix} Attempt ${attempt}: Retryable error ${response.status}.`, 'WARN', 'HTTP');
 
+            // Retryable error (429 or 5xx)
+            log(`${attemptPrefix} Attempt ${attempt} failed with status ${response.status}. Retrying...`, 'WARN', 'HTTP');
         } catch (error) {
             clearTimeout(timeout);
-            log(`${attemptPrefix} Attempt ${attempt}: Error: ${error.message}`, 'WARN', 'HTTP');
-            if (attempt === MAX_LLM_RETRIES) throw error;
+            if (error.name === 'AbortError') {
+                log(`${attemptPrefix} Attempt ${attempt} timed out after ${LLM_REQUEST_TIMEOUT_MS}ms.`, 'WARN', 'HTTP');
+            } else if (attempt === MAX_LLM_RETRIES) {
+                throw error;
+            } else {
+                log(`${attemptPrefix} Attempt ${attempt} error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+            }
         }
 
-        const delayTime = Math.pow(2, attempt - 1) * 3000 + Math.random() * 1000;
-        await new Promise(r => setTimeout(r, delayTime));
+        // Wait before retry
+        if (attempt < MAX_LLM_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
     }
+
+    throw new Error(`${attemptPrefix} failed after ${MAX_LLM_RETRIES} attempts.`);
 }
 
-// --- Helper: Try Generate Plan ---
-async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
-    const apiUrl = getGeminiApiUrl(modelName);
-    const response = await fetchLLMWithRetry(apiUrl, {
+// --- Helper: Try Generate LLM Plan ---
+async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, opts = {}) {
+    const url = `${getGeminiApiUrl(modelName)}?key=${GEMINI_API_KEY}`;
+    const options = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-    }, log, logPrefix);
+    };
 
-    const result = await response.json();
-    const candidate = result.candidates?.[0];
-    const content = candidate?.content;
-    
-    if (!content || !content.parts?.[0]?.text) {
-        throw new Error(`Model ${modelName} failed: Response missing content.`);
+    const response = await fetchLLMWithRetry(url, options, log, logPrefix);
+    const data = await response.json();
+
+    // Extract text from Gemini response
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+        throw new Error(`${logPrefix}: No text in LLM response`);
     }
 
-    const jsonText = content.parts[0].text;
-    try {
-        const parsed = JSON.parse(jsonText.trim());
-        if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
-        return parsed;
-    } catch (parseError) {
-        throw new Error(`Model ${modelName} failed: Invalid JSON. ${parseError.message}`);
-    }
+    // Parse JSON
+    const parsed = JSON.parse(text);
+    return parsed;
 }
 
-// --- Helper: LLM System Prompt (Explicit Units + Strict Schema) ---
+// --- System Prompt ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, day, perMealTargets) => `
-You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
-STRICTLY output valid JSON matching the schema below. No markdown, no prose, no comments.
+You are a precision meal planner for Day ${day}. Your output is parsed by code—return ONLY valid JSON.
 
-JSON SCHEMA:
+Target: ${calories} kcal/day for a ${weight}kg individual.
+
+JSON Schema:
 {
   "meals": [
     {
-      "type": "Breakfast" | "Lunch" | "Dinner" | "Snack",
-      "name": "string (Meal Name)",
+      "type": "string (e.g., 'Breakfast', 'Lunch', 'Dinner', 'Snack')",
+      "name": "string (e.g., 'Grilled Chicken Salad')",
       "items": [
         {
-          "key": "string (Generic ingredient name, e.g. 'Oats', 'Chicken Breast')",
-          "qty_value": number (Decimal or integer),
-          "qty_unit": "string (MUST BE FROM ALLOWED LIST)",
-          "stateHint": "dry" | "raw" | "cooked" | "as_pack",
-          "methodHint": "string (Cooking method, e.g. 'boiled', or null)"
+          "key": "string (ingredient name, e.g., 'chicken breast')",
+          "qty_value": "number (portion size)",
+          "qty_unit": "string ('g', 'ml', 'piece', 'slice', 'egg', etc.)",
+          "stateHint": "string (MANDATORY: 'dry', 'raw', 'cooked', or 'as_pack')",
+          "methodHint": "string|null (MANDATORY if cooked, e.g., 'grilled', 'boiled', or null)"
         }
       ]
     }
@@ -311,57 +322,59 @@ module.exports = async (request, response) => {
             traceStageEnd(traceId, `Day_${day}_Processing`);
         }
 
-        // 6. Aggregate Metrics & Stats
-        const aggregatedStats = allStats.reduce((acc, curr) => ({
-            marketQueries: (acc.marketQueries || 0) + (curr.marketQueries || 0),
-            nutritionLookups: (acc.nutritionLookups || 0) + (curr.nutritionLookups || 0),
-            cacheHits: (acc.cacheHits || 0) + (curr.cacheHits || 0),
-            durationMs: (acc.durationMs || 0) + (curr.durationMs || 0)
-        }), {});
-        
-        recordPipelineStats(aggregatedStats);
+        // 6. Finalize Trace
+        completeTrace(traceId, { 
+            status: 'success', 
+            daysGenerated: processedDays.length 
+        });
 
-        // 7. Assemble Final Response
-        const responseData = {
+        // 7. Record Pipeline Stats
+        if (allStats.length > 0) {
+            await recordPipelineStats(traceId, allStats, log);
+        }
+
+        log(`Multi-Day Plan Generation Complete: ${processedDays.length} days`, 'INFO', 'ORCHESTRATOR');
+
+        // 8. Return Response
+        return response.status(200).json({
+            success: true,
             traceId,
-            days: processedDays,
-            validation: {
-                overallValid: processedDays.every(d => d.validation?.isValid),
-                issuesCount: processedDays.reduce((acc, d) => acc + (d.validation?.summary?.totalIssues || 0), 0)
-            },
-            debug: {
-                traceId,
-                aggregatedStats,
-                timestamp: new Date().toISOString()
-            }
-        };
-
-        completeTrace(traceId, 'success', { dayCount: numDays });
-        log('Multi-day plan generation completed successfully', 'SUCCESS', 'ORCHESTRATOR');
-
-        return response.status(200).json(responseData);
+            data: processedDays,
+            stats: allStats
+        });
 
     } catch (error) {
-        // Safe wrapping of error object for alerting
-        const safeError = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+        // Log error and emit alert
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorStack = error instanceof Error ? error.stack : undefined;
         
-        // Pass sanitized message to alerts
-        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', { traceId, error: safeError.message });
+        log(`Multi-Day Plan Generation Failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
         
-        // Use corrected traceError signature
-        traceError(traceId, 'orchestrator_handler', safeError);
-        
-        log(`Pipeline Failure: ${safeError.message}`, 'CRITICAL', 'ORCHESTRATOR');
-        
-        // Return standard error shape expected by frontend
+        traceError(traceId, {
+            stage: 'ORCHESTRATOR',
+            error: errorMessage,
+            stack: errorStack
+        });
+
+        emitAlert({
+            level: ALERT_LEVELS.CRITICAL,
+            metric: 'pipeline_failure',
+            category: 'system',
+            context: {
+                traceId,
+                error: errorMessage
+            }
+        });
+
+        completeTrace(traceId, { 
+            status: 'error', 
+            error: errorMessage 
+        });
+
         return response.status(500).json({
-            message: safeError.message,
-            error: safeError.message, // Legacy support
-            details: safeError.validationErrors || null,
+            success: false,
             traceId,
-            code: "PIPELINE_ERROR"
+            error: errorMessage
         });
     }
 };
-
-
