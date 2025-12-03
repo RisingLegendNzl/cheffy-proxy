@@ -2,24 +2,25 @@
  * utils/alerting.js
  * 
  * Alerting System for Cheffy
+ * V2.0 - Added new alert metrics for reliability layer
  * 
  * PURPOSE:
  * Provides centralized alerting infrastructure for the Cheffy pipeline.
  * Emits structured alerts when system metrics exceed thresholds or
  * when critical events occur.
  * 
- * PLAN REFERENCE: Step E2 - Implement Alerting Rules
+ * V2.0 CHANGES (Minimum Viable Reliability):
+ * - Added item_flagged_inv001: Item flagged for macro-kcal inconsistency
+ * - Added response_blocked_inv001: Entire response blocked due to >20% flagged items
+ * - Added lookup_validation_failed: Nutrition lookup failed pre-use validation
+ * - Added ingestion_rejected: Build-time record rejection
+ * - Added macro_kcal_inconsistency: Specific alert for INV-001 violations
  * 
  * DESIGN PRINCIPLES:
  * 1. Every alert is structured and machine-parseable
  * 2. Alert levels have semantic meaning (CRITICAL, WARNING, INFO)
  * 3. Alerts include sufficient context for debugging
  * 4. Alerting is non-blocking (failures don't crash pipeline)
- * 
- * ASSUMPTIONS:
- * - Alerts are emitted to console.log as structured JSON
- * - External notification systems (Slack, email) can be integrated via hooks
- * - @vercel/kv is available for alert history storage
  */
 
 /**
@@ -85,6 +86,17 @@ const ALERT_THRESHOLDS = {
   // Validation issues
   validation_critical_count: {
     critical: 0    // > 0 critical issues triggers CRITICAL
+  },
+  
+  // V2.0: Macro-kcal consistency thresholds
+  macro_kcal_deviation: {
+    warning: 5,    // > 5% triggers WARNING (flag item)
+    critical: 20   // > 20% triggers CRITICAL (hard fail)
+  },
+  
+  // V2.0: Flagged items rate (response blocking)
+  flagged_items_rate: {
+    critical: 20   // > 20% of items flagged triggers response block
   }
 };
 
@@ -98,17 +110,21 @@ const ALERT_CATEGORIES = {
   RECONCILIATION: 'reconciliation',
   MARKET_RUN: 'market_run',
   LLM: 'llm',
-  SYSTEM: 'system'
+  SYSTEM: 'system',
+  INVARIANTS: 'invariants',      // V2.0: New category
+  INGESTION: 'ingestion'         // V2.0: New category
 };
 
 /**
  * Maps alert metrics to categories
  */
 const METRIC_TO_CATEGORY = {
+  // Existing metrics
   high_fallback_rate: ALERT_CATEGORIES.NUTRITION,
   elevated_fallback_rate: ALERT_CATEGORIES.NUTRITION,
   yield_unmapped: ALERT_CATEGORIES.NUTRITION,
   hotpath_miss: ALERT_CATEGORIES.NUTRITION,
+  nutrition_fallback: ALERT_CATEGORIES.NUTRITION,
   
   llm_state_disagreement: ALERT_CATEGORIES.STATE_RESOLUTION,
   low_confidence_resolution: ALERT_CATEGORIES.STATE_RESOLUTION,
@@ -118,6 +134,7 @@ const METRIC_TO_CATEGORY = {
   
   reconciliation_factor_bounds: ALERT_CATEGORIES.RECONCILIATION,
   daily_reconciliation_bounds: ALERT_CATEGORIES.RECONCILIATION,
+  reconciliation_clamped: ALERT_CATEGORIES.RECONCILIATION,
   
   market_run_failure: ALERT_CATEGORIES.MARKET_RUN,
   product_mismatch: ALERT_CATEGORIES.MARKET_RUN,
@@ -126,7 +143,21 @@ const METRIC_TO_CATEGORY = {
   llm_retry_exhausted: ALERT_CATEGORIES.LLM,
   
   system_error: ALERT_CATEGORIES.SYSTEM,
-  pipeline_failure: ALERT_CATEGORIES.SYSTEM
+  pipeline_failure: ALERT_CATEGORIES.SYSTEM,
+  
+  // V2.0: New metrics for reliability layer
+  item_flagged_inv001: ALERT_CATEGORIES.INVARIANTS,
+  response_blocked_inv001: ALERT_CATEGORIES.INVARIANTS,
+  macro_kcal_inconsistency: ALERT_CATEGORIES.INVARIANTS,
+  invariant_violation: ALERT_CATEGORIES.INVARIANTS,
+  invariant_violation_critical: ALERT_CATEGORIES.INVARIANTS,
+  
+  lookup_validation_failed: ALERT_CATEGORIES.NUTRITION,
+  nutrition_validation_skipped: ALERT_CATEGORIES.NUTRITION,
+  
+  ingestion_rejected: ALERT_CATEGORIES.INGESTION,
+  ingestion_validation_failed: ALERT_CATEGORIES.INGESTION,
+  canonical_audit_failure: ALERT_CATEGORIES.INGESTION
 };
 
 /**
@@ -208,7 +239,7 @@ function createAlert(level, metric, context = {}) {
     context,
     traceId: context.traceId || null,
     source: 'cheffy-pipeline',
-    version: '1.0'
+    version: '2.0'
   };
 }
 
@@ -540,6 +571,92 @@ function alertPipelineFailure(stage, error, context = {}) {
   });
 }
 
+// =====================================================================
+// V2.0: NEW ALERT FUNCTIONS FOR RELIABILITY LAYER
+// =====================================================================
+
+/**
+ * Emits an alert when an item is flagged for INV-001 violation
+ * 
+ * @param {string} itemKey - The item key
+ * @param {Object} violation - Violation details { expected_kcal, reported_kcal, deviation_pct, severity }
+ * @param {Object} context - Additional context
+ * @returns {Object|null} Alert
+ */
+function alertItemFlaggedInv001(itemKey, violation, context = {}) {
+  const level = violation.severity === 'CRITICAL' ? ALERT_LEVELS.CRITICAL : ALERT_LEVELS.WARNING;
+  
+  return emitAlert(level, 'item_flagged_inv001', {
+    ...context,
+    itemKey,
+    expectedKcal: violation.expected_kcal,
+    reportedKcal: violation.reported_kcal,
+    deviationPct: violation.deviation_pct,
+    severity: violation.severity,
+    message: `Item '${itemKey}' macro-kcal inconsistency: ${violation.deviation_pct}% deviation`
+  });
+}
+
+/**
+ * Emits an alert when entire response is blocked due to too many flagged items
+ * 
+ * @param {number} flaggedCount - Number of flagged items
+ * @param {number} totalItems - Total number of items
+ * @param {Object} context - Additional context (should include traceId)
+ * @returns {Object|null} Alert
+ */
+function alertResponseBlockedInv001(flaggedCount, totalItems, context = {}) {
+  const flaggedRate = (flaggedCount / totalItems) * 100;
+  
+  return emitAlert(ALERT_LEVELS.CRITICAL, 'response_blocked_inv001', {
+    ...context,
+    flaggedCount,
+    totalItems,
+    flaggedRatePct: flaggedRate.toFixed(2),
+    threshold: ALERT_THRESHOLDS.flagged_items_rate.critical,
+    message: `Response blocked: ${flaggedRate.toFixed(1)}% of items flagged (${flaggedCount}/${totalItems})`
+  });
+}
+
+/**
+ * Emits an alert when nutrition lookup fails pre-use validation
+ * 
+ * @param {string} ingredientKey - The ingredient key
+ * @param {string} source - Source that failed validation (hotpath, canonical)
+ * @param {Object} validationResult - Result from validation check
+ * @param {Object} context - Additional context
+ * @returns {Object|null} Alert
+ */
+function alertLookupValidationFailed(ingredientKey, source, validationResult, context = {}) {
+  return emitAlert(ALERT_LEVELS.WARNING, 'lookup_validation_failed', {
+    ...context,
+    ingredientKey,
+    source,
+    expectedKcal: validationResult.expected_kcal,
+    reportedKcal: validationResult.reported_kcal,
+    deviationPct: validationResult.deviation_pct,
+    message: `Nutrition lookup from '${source}' failed validation for '${ingredientKey}'`
+  });
+}
+
+/**
+ * Emits an alert when a nutrition record is rejected at ingestion (build time)
+ * 
+ * @param {string} key - The record key
+ * @param {Array} errors - List of validation errors
+ * @param {Object} context - Additional context
+ * @returns {Object|null} Alert
+ */
+function alertIngestionRejected(key, errors, context = {}) {
+  return emitAlert(ALERT_LEVELS.WARNING, 'ingestion_rejected', {
+    ...context,
+    key,
+    errors,
+    errorCount: errors.length,
+    message: `Nutrition record '${key}' rejected at ingestion: ${errors.join('; ')}`
+  });
+}
+
 /**
  * Clears the rate limit buffer (for testing)
  */
@@ -594,6 +711,12 @@ module.exports = {
   alertYieldUnmapped,
   alertMarketRunFailure,
   alertPipelineFailure,
+  
+  // V2.0: New alert emitters for reliability layer
+  alertItemFlaggedInv001,
+  alertResponseBlockedInv001,
+  alertLookupValidationFailed,
+  alertIngestionRejected,
   
   // Hook management
   registerNotificationHook,
