@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/generate-full-plan.js ---
 // Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.7 - Fixed CACHE_PREFIX + emitAlert signature
+// V15.8 - Fixed CACHE_PREFIX + emitAlert signature + executePipeline call signature
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -289,7 +289,7 @@ module.exports = async (request, response) => {
             // A. Generate Meals (Dietitian Agent)
             const rawDayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log, targetsPerMealType);
 
-            // B. Validate LLM Output
+            // B. Validate LLM Output (pre-pipeline sanity check)
             const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
             if (!validation.valid) {
                 log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
@@ -299,21 +299,23 @@ module.exports = async (request, response) => {
 
             // C. Execute Pipeline (Delegated Shared Logic)
             // This handles Market -> Nutrition -> Solver -> Chef -> Validation
-            const pipelineConfig = {
-                traceId,
-                dayNumber: day,
-                store: store,
-                scaleProtein: true, // Winning code path enforced
-                allowReconciliation: true,
-                generateRecipes: true
-            };
-
-            const processedDayResult = await executePipeline(
-                rawDayPlan.meals,
-                nutritionalTargets, 
-                fetchLLMWithRetry,  
-                pipelineConfig
-            );
+            // --- [FIX V15.8] Corrected executePipeline call signature ---
+            // Was: executePipeline(rawMeals, targets, llmRetryFn, config)  [positional]
+            // Now: executePipeline({ rawMeals, targets, llmRetryFn, config })  [object]
+            const processedDayResult = await executePipeline({
+                rawMeals: rawDayPlan.meals,
+                targets: nutritionalTargets,
+                llmRetryFn: fetchLLMWithRetry,
+                config: {
+                    traceId,
+                    dayNumber: day,
+                    store: store,
+                    scaleProtein: true,
+                    allowReconciliation: true,
+                    generateRecipes: true
+                }
+            });
+            // --- [END FIX] ---
 
             // D. Collect Results
             processedDays.push(processedDayResult.data);
@@ -357,8 +359,6 @@ module.exports = async (request, response) => {
         });
 
         // --- [FIX V15.7] Corrected emitAlert call signature ---
-        // Signature: emitAlert(level, metric, context)
-        // Was incorrectly passing object as first argument
         emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
             traceId,
             error: errorMessage
