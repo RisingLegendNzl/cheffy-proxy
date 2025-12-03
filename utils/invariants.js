@@ -2,33 +2,27 @@
  * utils/invariants.js
  * 
  * Runtime Invariant Assertions for Cheffy
+ * V2.0 - Added non-throwing check variant and blocking thresholds
  * 
  * PURPOSE:
  * Provides runtime enforcement of system invariants. These assertions
  * catch logic errors and data corruption before they propagate through
  * the pipeline and cause incorrect macro calculations.
  * 
- * PLAN REFERENCE: Step F4 - Implement Runtime Invariant Assertions
+ * V2.0 CHANGES (Minimum Viable Reliability):
+ * - Added checkMacroCalorieConsistency() non-throwing variant
+ * - Added BLOCKING_DEVIATION_THRESHOLD (20%)
+ * - Added FLAG_STRUCTURE for item flagging
+ * - INV-001 now has tiered response: flag at 5%, block at 20%
  * 
  * INVARIANTS IMPLEMENTED:
- * - INV-001: Macro-calorie consistency (±5% tolerance)
+ * - INV-001: Macro-calorie consistency (±5% tolerance, block at ±20%)
  * - INV-002: Positive quantities
  * - INV-003: Reasonable portion sizes (5g-1000g)
  * - INV-004: Reconciliation factor bounds (0.5-2.0)
  * - INV-005: YIELDS coverage for cooked items
  * - INV-006: Resolved state for all items
  * - INV-007: LLM schema validation passed
- * 
- * DESIGN PRINCIPLES:
- * 1. Assertions throw InvariantViolationError with context
- * 2. Soft assertions log but don't throw (for monitoring)
- * 3. All violations include the invariant ID for tracking
- * 4. Context is preserved for debugging
- * 
- * ASSUMPTIONS:
- * - Macros object has { kcal, protein, fat, carbs }
- * - Item object has { key, qty_value, qty_unit, stateHint }
- * - Calorie formula: kcal ≈ (protein * 4) + (carbs * 4) + (fat * 9)
  */
 
 /**
@@ -42,7 +36,6 @@ class InvariantViolationError extends Error {
     this.context = context;
     this.timestamp = new Date().toISOString();
     
-    // Capture stack trace
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, InvariantViolationError);
     }
@@ -64,8 +57,14 @@ class InvariantViolationError extends Error {
  * Invariant configuration
  */
 const INVARIANT_CONFIG = {
-  // INV-001: Macro-calorie consistency tolerance
+  // INV-001: Macro-calorie consistency tolerance (5% for flagging)
   calorieConsistencyTolerancePct: 5,
+  
+  // INV-001: Blocking threshold (20% - hard fail)
+  calorieConsistencyBlockingPct: 20,
+  
+  // Response-level blocking threshold (20% of items flagged)
+  responseBlockingThresholdPct: 20,
   
   // INV-003: Portion size bounds
   portionBounds: {
@@ -91,7 +90,99 @@ const INVARIANT_CONFIG = {
 const VALID_STATES = ['dry', 'raw', 'cooked', 'as_pack'];
 
 /**
- * INV-001: Assert macro-calorie consistency
+ * Flag structure template for items that fail INV-001
+ * Applied to macros object when deviation is 5-20%
+ */
+const FLAG_STRUCTURE = {
+  _flagged: false,
+  _invariant_violation: null
+  // When flagged, _invariant_violation will be:
+  // {
+  //   id: 'INV-001',
+  //   expected_kcal: number,
+  //   reported_kcal: number,
+  //   deviation_pct: number,
+  //   severity: 'WARNING' | 'CRITICAL' | 'BLOCKING'
+  // }
+};
+
+/**
+ * Severity levels for invariant violations
+ */
+const INVARIANT_SEVERITY = {
+  WARNING: 'WARNING',     // 5-20% deviation: flag item, continue
+  CRITICAL: 'CRITICAL',   // >20% deviation on single item: emit alert
+  BLOCKING: 'BLOCKING'    // >20% items flagged: block entire response
+};
+
+/**
+ * INV-001: Check macro-calorie consistency (NON-THROWING)
+ * 
+ * Returns a result object instead of throwing.
+ * Use this for tiered response handling.
+ * 
+ * @param {Object} macros - { kcal, protein, fat, carbs }
+ * @param {number} tolerancePct - Warning threshold (default 5%)
+ * @param {number} blockingPct - Blocking threshold (default 20%)
+ * @returns {Object} { valid, deviation_pct, expected_kcal, reported_kcal, severity }
+ */
+function checkMacroCalorieConsistency(
+  macros,
+  tolerancePct = INVARIANT_CONFIG.calorieConsistencyTolerancePct,
+  blockingPct = INVARIANT_CONFIG.calorieConsistencyBlockingPct
+) {
+  const { kcal, protein, fat, carbs } = macros;
+  
+  // Default result: valid
+  const result = {
+    valid: true,
+    deviation_pct: 0,
+    expected_kcal: null,
+    reported_kcal: kcal,
+    severity: null
+  };
+  
+  // Skip check if any value is missing or zero calories
+  if (kcal === undefined || kcal === null || kcal === 0) {
+    return result;
+  }
+  
+  if (protein === undefined || fat === undefined || carbs === undefined) {
+    return result;
+  }
+  
+  // Calculate expected calories from macros
+  const expectedKcal = 
+    (protein * INVARIANT_CONFIG.caloriesPerGramProtein) +
+    (carbs * INVARIANT_CONFIG.caloriesPerGramCarbs) +
+    (fat * INVARIANT_CONFIG.caloriesPerGramFat);
+  
+  result.expected_kcal = Math.round(expectedKcal);
+  
+  // Skip check if expected is zero (avoid division by zero)
+  if (expectedKcal === 0) {
+    return result;
+  }
+  
+  // Calculate deviation percentage
+  const deviation = Math.abs((kcal - expectedKcal) / expectedKcal) * 100;
+  result.deviation_pct = Math.round(deviation * 100) / 100; // Round to 2 decimal places
+  
+  // Determine severity based on deviation
+  if (deviation > blockingPct) {
+    result.valid = false;
+    result.severity = INVARIANT_SEVERITY.CRITICAL;
+  } else if (deviation > tolerancePct) {
+    result.valid = false;
+    result.severity = INVARIANT_SEVERITY.WARNING;
+  }
+  // If deviation <= tolerancePct, result.valid remains true
+  
+  return result;
+}
+
+/**
+ * INV-001: Assert macro-calorie consistency (THROWING)
  * 
  * Verifies that the reported calories are consistent with the
  * macro breakdown using the standard formula:
@@ -102,46 +193,44 @@ const VALID_STATES = ['dry', 'raw', 'cooked', 'as_pack'];
  * @throws {InvariantViolationError} If calories deviate more than tolerance
  */
 function assertMacroCalorieConsistency(macros, tolerancePct = INVARIANT_CONFIG.calorieConsistencyTolerancePct) {
-  const { kcal, protein, fat, carbs } = macros;
+  const check = checkMacroCalorieConsistency(macros, tolerancePct, tolerancePct);
   
-  // Skip check if any value is missing or zero calories
-  if (kcal === undefined || kcal === null || kcal === 0) {
-    return;
-  }
-  
-  if (protein === undefined || fat === undefined || carbs === undefined) {
-    return;
-  }
-  
-  // Calculate expected calories from macros
-  const expectedKcal = 
-    (protein * INVARIANT_CONFIG.caloriesPerGramProtein) +
-    (carbs * INVARIANT_CONFIG.caloriesPerGramCarbs) +
-    (fat * INVARIANT_CONFIG.caloriesPerGramFat);
-  
-  // Skip check if expected is zero (avoid division by zero)
-  if (expectedKcal === 0) {
-    return;
-  }
-  
-  // Calculate deviation percentage
-  const deviation = Math.abs((kcal - expectedKcal) / expectedKcal) * 100;
-  
-  if (deviation > tolerancePct) {
+  if (!check.valid) {
     throw new InvariantViolationError(
       'INV-001',
-      `Macro-calorie inconsistency: reported ${kcal} kcal but macros suggest ${expectedKcal.toFixed(0)} kcal (${deviation.toFixed(1)}% deviation, tolerance ${tolerancePct}%)`,
+      `Macro-calorie inconsistency: reported ${check.reported_kcal} kcal but macros suggest ${check.expected_kcal} kcal (${check.deviation_pct}% deviation, tolerance ${tolerancePct}%)`,
       {
-        reportedKcal: kcal,
-        expectedKcal: Math.round(expectedKcal),
-        protein,
-        fat,
-        carbs,
-        deviationPct: deviation.toFixed(2),
+        reportedKcal: check.reported_kcal,
+        expectedKcal: check.expected_kcal,
+        protein: macros.protein,
+        fat: macros.fat,
+        carbs: macros.carbs,
+        deviationPct: check.deviation_pct,
         tolerancePct
       }
     );
   }
+}
+
+/**
+ * Creates a flagged macros object for items with INV-001 violations
+ * 
+ * @param {Object} macros - Original macros object
+ * @param {Object} checkResult - Result from checkMacroCalorieConsistency
+ * @returns {Object} Macros with _flagged and _invariant_violation properties
+ */
+function createFlaggedMacros(macros, checkResult) {
+  return {
+    ...macros,
+    _flagged: true,
+    _invariant_violation: {
+      id: 'INV-001',
+      expected_kcal: checkResult.expected_kcal,
+      reported_kcal: checkResult.reported_kcal,
+      deviation_pct: checkResult.deviation_pct,
+      severity: checkResult.severity
+    }
+  };
 }
 
 /**
@@ -275,7 +364,6 @@ function assertReconciliationBounds(factor, bounds = INVARIANT_CONFIG.reconcilia
  * INV-005: Assert YIELDS coverage for cooked items
  * 
  * Verifies that items with state 'cooked' have a valid yield factor.
- * This is a placeholder that should be called after yield lookup.
  * 
  * @param {Object} item - Item with stateHint
  * @param {Object} yieldResult - Result from yield lookup { found, factor }
@@ -586,6 +674,13 @@ function createInvariantChecker(config = {}) {
     assertMacroCalorieConsistency: (macros) => 
       assertMacroCalorieConsistency(macros, mergedConfig.calorieConsistencyTolerancePct),
     
+    checkMacroCalorieConsistency: (macros) =>
+      checkMacroCalorieConsistency(
+        macros,
+        mergedConfig.calorieConsistencyTolerancePct,
+        mergedConfig.calorieConsistencyBlockingPct
+      ),
+    
     assertReasonablePortions: (item) => 
       assertReasonablePortions(item, mergedConfig.portionBounds),
     
@@ -611,7 +706,7 @@ module.exports = {
   // Error class
   InvariantViolationError,
   
-  // Individual assertions
+  // Individual assertions (throwing)
   assertMacroCalorieConsistency,
   assertPositiveQuantities,
   assertReasonablePortions,
@@ -622,6 +717,10 @@ module.exports = {
   assertReasonableDayTotals,
   assertMealHasItems,
   
+  // Non-throwing checks (NEW in V2.0)
+  checkMacroCalorieConsistency,
+  createFlaggedMacros,
+  
   // Composite assertions
   assertAllItemInvariants,
   assertAllMacroInvariants,
@@ -631,7 +730,9 @@ module.exports = {
   softAssert,
   createInvariantChecker,
   
-  // Configuration
+  // Configuration and constants
   INVARIANT_CONFIG,
-  VALID_STATES
+  VALID_STATES,
+  FLAG_STRUCTURE,
+  INVARIANT_SEVERITY
 };
