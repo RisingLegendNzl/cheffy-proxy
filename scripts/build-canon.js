@@ -1,31 +1,53 @@
 /**
  * Cheffy Canonical DB Build Script
+ * V2.0 - Tightened Ingestion Gate for Reliability Layer
  *
  * This script runs at build time (via `npm run prebuild`).
  * It reads all raw data files from /Data/CanonicalNutrition/,
- * cleans and parses them, transforms them to the final schema (Plan A),
- * runs sanity checks, and generates a single, fast CommonJS module
+ * cleans and parses them, transforms them to the final schema,
+ * runs strict validation, and generates a single, fast CommonJS module
  * at /api/_canon.js for in-memory lookups.
+ * 
+ * V2.0 CHANGES (Minimum Viable Reliability):
+ * - Tightened calorie tolerance from 12% to 5%
+ * - Added mass balance check (protein + fat + carbs ≤ 105g per 100g)
+ * - Records failing validation are REJECTED (not inserted)
+ * - Rejected records are logged to api/_canon.rejections.json
+ * - Validation function returns { valid, errors } instead of pushing warnings
  */
 
 const fs = require('fs');
 const path = require('path');
-// [MODIFIED] Use the normalize script from its correct location
-const { normalizeKey } = require('./normalize.js'); // Use shared normalizer
+const { normalizeKey } = require('./normalize.js');
 
-// --- [FIX] Use __dirname to create reliable paths ---
-// __dirname is the directory of the *current script* (e.g., /vercel/path/scripts)
+// --- Path Configuration ---
 const SCRIPT_DIR = __dirname;
-// Project root is one level up (e.g., /vercel/path)
 const PROJECT_ROOT = path.join(SCRIPT_DIR, '..');
-
 const DATA_DIR = path.join(PROJECT_ROOT, 'Data', 'CanonicalNutrition');
 const API_DIR = path.join(PROJECT_ROOT, 'api');
-// --- [END FIX] ---
 
 const MANIFEST_FILE = 'manifest.json';
 const OUTPUT_MODULE_FILE = '_canon.js';
 const OUTPUT_MANIFEST_FILE = '_canon.manifest.json';
+const OUTPUT_REJECTIONS_FILE = '_canon.rejections.json';
+
+// --- V2.0: Validation Configuration ---
+const VALIDATION_CONFIG = {
+  // Macro-calorie consistency tolerance (5% per reliability strategy)
+  calorieTolerancePct: 5,
+  
+  // Mass balance: macros cannot exceed 105g per 100g serving (5% tolerance for measurement variance)
+  maxMassBalanceGrams: 105,
+  
+  // Calorie calculation constants
+  caloriesPerGramProtein: 4,
+  caloriesPerGramCarbs: 4,
+  caloriesPerGramFat: 9,
+  
+  // Range bounds (per 100g)
+  maxKcalPer100g: 900,  // Pure fat is ~900 kcal/100g
+  minKcalPer100g: 0
+};
 
 /**
  * Cleans header/footer text and parses *all* JSON arrays from a file.
@@ -33,19 +55,17 @@ const OUTPUT_MANIFEST_FILE = '_canon.manifest.json';
  * @returns {Array} - A single, merged array of all items found.
  */
 function cleanAndParseJson(content) {
-  // 1. Clean headers/footers (e.g., "———-Produce-Start————-")
-  // [FIX] Also remove single-line JS comments
+  // Clean headers/footers and JS comments
   const cleanedContent = content.replace(/———-.*?———-|\(.*\)/g, '').replace(/\/\/.*/g, '');
 
-  // 2. Find all occurrences of JSON arrays (text blocks starting with '[' and ending with ']')
-  const jsonMatches = cleanedContent.match(/\[.*?\]/gs); // 'g' for global, 's' for dotall
+  // Find all occurrences of JSON arrays
+  const jsonMatches = cleanedContent.match(/\[.*?\]/gs);
 
   if (!jsonMatches || jsonMatches.length === 0) {
     console.warn('  -> No JSON arrays found in file.');
     return [];
   }
 
-  // 3. Parse each match and concatenate
   let allEntries = [];
   for (const match of jsonMatches) {
     try {
@@ -54,13 +74,8 @@ function cleanAndParseJson(content) {
         allEntries = allEntries.concat(parsedArray);
       }
     } catch (e) {
-      // This is a WARNING, not an ERROR. We log it and continue.
-      console.warn(
-        `  -> Found a JSON-like block but failed to parse: ${e.message}`
-      );
-      console.warn(
-        `  -> Block (first 100 chars): ${match.substring(0, 100)}...`
-      );
+      console.warn(`  -> Found a JSON-like block but failed to parse: ${e.message}`);
+      console.warn(`  -> Block (first 100 chars): ${match.substring(0, 100)}...`);
     }
   }
 
@@ -68,36 +83,69 @@ function cleanAndParseJson(content) {
 }
 
 /**
- * Runs sanity checks on a single transformed CanonRow.
+ * V2.0: Validates a single nutrition record with strict checks.
+ * Returns { valid, errors } instead of mutating a warnings array.
+ * 
  * @param {object} item - The transformed item (CanonRow schema).
- * @param {Array<string>} warnings - An array to push warnings into.
+ * @returns {{ valid: boolean, errors: string[] }}
  */
-function runSanityChecks(item, warnings) {
+function validateNutritionRecord(item) {
+  const errors = [];
   const {
     key,
     kcal_per_100g: kcal,
-    protein_g_per_100g: p,
-    fat_g_per_100g: f,
-    carb_g_per_100g: c,
+    protein_g_per_100g: protein,
+    fat_g_per_100g: fat,
+    carb_g_per_100g: carbs,
     fiber_g_per_100g: fiber,
   } = item;
 
-  // 1. Calorie balance check (±12%)
-  const estimatedKcal = p * 4 + c * 4 + f * 9;
-  if (kcal > 0.1 && Math.abs(kcal - estimatedKcal) / kcal > 0.12) {
-    warnings.push(
-      `[${key}] Calorie mismatch: Stated ${kcal} kcal, but P/F/C calculates to ${estimatedKcal.toFixed(
-        0
-      )} kcal.`
+  // 1. Range checks
+  if (kcal < VALIDATION_CONFIG.minKcalPer100g) {
+    errors.push(`Negative calories: ${kcal} kcal`);
+  }
+  if (kcal > VALIDATION_CONFIG.maxKcalPer100g) {
+    errors.push(`Calories exceed maximum (${VALIDATION_CONFIG.maxKcalPer100g}): ${kcal} kcal`);
+  }
+  if (protein < 0 || fat < 0 || carbs < 0) {
+    errors.push(`Negative macro value: p=${protein}, f=${fat}, c=${carbs}`);
+  }
+
+  // 2. Macro-calorie consistency check (5% tolerance)
+  const estimatedKcal = 
+    (protein * VALIDATION_CONFIG.caloriesPerGramProtein) +
+    (carbs * VALIDATION_CONFIG.caloriesPerGramCarbs) +
+    (fat * VALIDATION_CONFIG.caloriesPerGramFat);
+  
+  if (kcal > 0.1 && estimatedKcal > 0) {
+    const deviation = Math.abs(kcal - estimatedKcal) / estimatedKcal;
+    if (deviation > VALIDATION_CONFIG.calorieTolerancePct / 100) {
+      errors.push(
+        `Macro-kcal mismatch: stated ${kcal} kcal, macros suggest ${estimatedKcal.toFixed(0)} kcal (${(deviation * 100).toFixed(1)}% deviation, max ${VALIDATION_CONFIG.calorieTolerancePct}%)`
+      );
+    }
+  }
+
+  // 3. Mass balance check (protein + fat + carbs ≤ 105g per 100g)
+  const totalMacroMass = protein + fat + carbs;
+  if (totalMacroMass > VALIDATION_CONFIG.maxMassBalanceGrams) {
+    errors.push(
+      `Mass balance violation: p+f+c = ${totalMacroMass.toFixed(1)}g exceeds ${VALIDATION_CONFIG.maxMassBalanceGrams}g per 100g`
     );
   }
 
-  // 2. Fiber check
-  if (fiber > c) {
-    warnings.push(
-      `[${key}] Fiber > Carbs: Fiber ${fiber}g, Carbs ${c}g. (Note: This is common for high-fiber, low-carb items)`
-    );
-  }
+  // 4. Fiber check (warning only, doesn't cause rejection)
+  // Fiber > carbs is unusual but can occur for some high-fiber foods
+  // We log it but don't reject
+  const fiberWarning = fiber > carbs 
+    ? `Fiber > Carbs: ${fiber}g > ${carbs}g (unusual but not invalid)`
+    : null;
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings: fiberWarning ? [fiberWarning] : []
+  };
 }
 
 /**
@@ -105,31 +153,31 @@ function runSanityChecks(item, warnings) {
  */
 async function run() {
   console.log('=======================================');
-  console.log('[build-canon] SCRIPT EXECUTION STARTED');
+  console.log('[build-canon] SCRIPT EXECUTION STARTED (V2.0 - Strict Validation)');
   console.log('=======================================');
   console.log(`[build-canon] Node.js CWD: ${process.cwd()}`);
-  console.log(`[build-canon] __dirname (SCRIPT_DIR): ${SCRIPT_DIR}`);
   console.log(`[build-canon] Resolved PROJECT_ROOT: ${PROJECT_ROOT}`);
   console.log(`[build-canon] Resolved DATA_DIR: ${DATA_DIR}`);
   console.log(`[build-canon] Resolved API_DIR: ${API_DIR}`);
 
-  // --- [FIX] Declare all variables in the outer scope, *before* the try block ---
+  // Declare all variables in outer scope
   let manifestData = {
     version: '0.0.0-error',
     builtAt: new Date().toISOString(),
     totalItems: 0,
     categories: {},
     warnings: ['Build script failed during initialization'],
+    rejectedCount: 0,
     duplicateKeysFound: 0,
   };
   let canonVersion = '0.0.0-dev';
   let filesToProcess = [];
   const allEntries = [];
   const warnings = [];
+  const rejections = [];  // V2.0: Track rejected records
   const categoryCounts = {};
   let totalItems = 0;
   let duplicates = [];
-  // --- [END FIX] ---
 
   try {
     // 1. Read Manifest
@@ -141,9 +189,8 @@ async function run() {
     canonVersion = manifest.canon_version || canonVersion;
     filesToProcess = manifest.source_files || [];
 
-    console.log(
-      `[build-canon] Manifest OK. Version ${canonVersion}. Found ${filesToProcess.length} files.`
-    );
+    console.log(`[build-canon] Manifest OK. Version ${canonVersion}. Found ${filesToProcess.length} files.`);
+    console.log(`[build-canon] Validation tolerance: ${VALIDATION_CONFIG.calorieTolerancePct}% (strict mode)`);
     console.log(`[build-canon] Reading source data files...`);
 
     // 2. Read and Parse All Files
@@ -164,28 +211,26 @@ async function run() {
     }
     console.log(`[build-canon] Total raw entries aggregated: ${allEntries.length}`);
 
-    // 3. Transform, Normalize, and De-duplicate
-    console.log('[build-canon] Normalizing and transforming entries...');
+    // 3. Transform, Normalize, Validate, and De-duplicate
+    console.log('[build-canon] Normalizing, validating, and transforming entries...');
     const CANON = {};
-    duplicates = []; // Assign to outer scope var
+    duplicates = [];
 
     for (const item of allEntries) {
       if (!item.name) {
-        warnings.push(
-          `Skipping item with no 'name' field: ${JSON.stringify(item)}`
-        );
+        warnings.push(`Skipping item with no 'name' field: ${JSON.stringify(item)}`);
         continue;
       }
 
       const key = normalizeKey(item.name);
+      
+      // Check for duplicates
       if (CANON[key]) {
-        duplicates.push(
-          `Duplicate key '${key}' (from '${item.name}'). '${CANON[key].name}' won.`
-        );
+        duplicates.push(`Duplicate key '${key}' (from '${item.name}'). '${CANON[key].name}' won.`);
         continue;
       }
 
-      // --- [Plan A] Transform Schema ---
+      // Transform to canonical schema
       const canonItem = {
         key: key,
         name: item.display_name || item.name,
@@ -200,17 +245,35 @@ async function run() {
         notes: item.notes || '',
         fallback_source: item.fallback_source || null,
       };
-      // --- End Transform ---
 
-      runSanityChecks(canonItem, warnings);
+      // V2.0: Strict validation - REJECT on failure
+      const validation = validateNutritionRecord(canonItem);
+      
+      if (!validation.valid) {
+        // REJECT: Do not insert into canonical store
+        rejections.push({
+          key: key,
+          originalName: item.name,
+          errors: validation.errors,
+          record: canonItem
+        });
+        console.warn(`  -> REJECTED [${key}]: ${validation.errors.join('; ')}`);
+        continue;  // Skip insertion
+      }
+      
+      // Add warnings (non-blocking)
+      if (validation.warnings && validation.warnings.length > 0) {
+        warnings.push(...validation.warnings.map(w => `[${key}] ${w}`));
+      }
 
+      // Insert into canonical store
       CANON[key] = canonItem;
-      categoryCounts[canonItem.category] =
-        (categoryCounts[canonItem.category] || 0) + 1;
+      categoryCounts[canonItem.category] = (categoryCounts[canonItem.category] || 0) + 1;
     }
 
-    totalItems = Object.keys(CANON).length; // Assign to outer scope var
-    console.log(`[build-canon] Processed ${totalItems} unique items.`);
+    totalItems = Object.keys(CANON).length;
+    console.log(`[build-canon] Processed ${totalItems} valid items.`);
+    console.log(`[build-canon] REJECTED ${rejections.length} items (validation failures).`);
 
     // 4. Generate Output Module (CommonJS format)
     console.log('[build-canon] Generating module content...');
@@ -227,6 +290,8 @@ async function run() {
  * Version: ${canonVersion}
  * Built: ${new Date().toISOString()}
  * Total Items: ${totalItems}
+ * Rejected Items: ${rejections.length}
+ * Validation Tolerance: ${VALIDATION_CONFIG.calorieTolerancePct}%
  */
 
 const CANON_VERSION = "${canonVersion}";
@@ -256,16 +321,19 @@ module.exports = {
 
     // 5. Generate Output Manifest
     console.log('[build-canon] Generating build manifest...');
-    // --- [FIX] Assign to the outer-scoped variable ---
     manifestData = {
       version: canonVersion,
       builtAt: new Date().toISOString(),
       totalItems: totalItems,
       categories: categoryCounts,
       warnings: warnings,
+      rejectedCount: rejections.length,
       duplicateKeysFound: duplicates.length,
+      validationConfig: {
+        calorieTolerancePct: VALIDATION_CONFIG.calorieTolerancePct,
+        maxMassBalanceGrams: VALIDATION_CONFIG.maxMassBalanceGrams
+      }
     };
-    // --- [END FIX] ---
 
     // 6. Write Files
     // Create api directory if it doesn't exist
@@ -274,54 +342,68 @@ module.exports = {
       fs.mkdirSync(API_DIR, { recursive: true });
     }
 
+    // Write main module
     const modulePath = path.join(API_DIR, OUTPUT_MODULE_FILE);
     fs.writeFileSync(modulePath, outputContent);
     console.log(`[build-canon] Successfully wrote module to ${modulePath}`);
 
+    // Write manifest
     const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
     fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
-    console.log(
-      `[build-canon] Successfully wrote manifest to ${outputManifestPath}`
-    );
+    console.log(`[build-canon] Successfully wrote manifest to ${outputManifestPath}`);
 
+    // V2.0: Write rejections file
+    const rejectionsPath = path.join(API_DIR, OUTPUT_REJECTIONS_FILE);
+    const rejectionsData = {
+      generatedAt: new Date().toISOString(),
+      version: canonVersion,
+      validationConfig: VALIDATION_CONFIG,
+      totalRejected: rejections.length,
+      rejections: rejections
+    };
+    fs.writeFileSync(rejectionsPath, JSON.stringify(rejectionsData, null, 2));
+    console.log(`[build-canon] Successfully wrote rejections to ${rejectionsPath}`);
+
+    // 7. Summary
+    console.log('=========================================');
+    console.log('[build-canon] BUILD SUMMARY');
+    console.log('=========================================');
+    console.log(`  Version:         ${canonVersion}`);
+    console.log(`  Total Valid:     ${totalItems}`);
+    console.log(`  Total Rejected:  ${rejections.length}`);
+    console.log(`  Duplicates:      ${duplicates.length}`);
+    console.log(`  Warnings:        ${warnings.length}`);
+    console.log(`  Tolerance:       ${VALIDATION_CONFIG.calorieTolerancePct}%`);
     console.log('=========================================');
     console.log('[build-canon] SCRIPT EXECUTION SUCCEEDED');
     console.log('=========================================');
+
   } catch (e) {
     console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
     console.error('[build-canon] SCRIPT EXECUTION FAILED');
-    console.error(e); // This will print the error
+    console.error(e);
 
-    // --- [FIX] Write a failure manifest using the outer-scoped variable ---
+    // Write a failure manifest
     warnings.push(`FATAL BUILD ERROR: ${e.message}`);
-    // Check if manifestData is still at its initial error state or was populated
-    if (manifestData.totalItems === 0) {
-        manifestData.warnings = warnings;
-    } else {
-        // If error happened after parsing, we can still provide some data
-        manifestData = {
-           ...manifestData,
-           warnings: warnings,
-           builtAt: new Date().toISOString(),
-        };
-    }
+    manifestData = {
+      ...manifestData,
+      warnings: warnings,
+      builtAt: new Date().toISOString(),
+      error: e.message
+    };
     
     try {
       const outputManifestPath = path.join(API_DIR, OUTPUT_MANIFEST_FILE);
-      // We are *guaranteed* manifestData is initialized now.
       fs.writeFileSync(outputManifestPath, JSON.stringify(manifestData, null, 2));
       console.log('[build-canon] Wrote failure manifest.');
     } catch (writeError) {
       console.error('[build-canon] Could not even write failure manifest.', writeError);
     }
-    // --- [END FIX] ---
 
     console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
-    process.exit(1); // Fail the build
+    process.exit(1);
   }
 }
 
 // Run the script
 run();
-
-
