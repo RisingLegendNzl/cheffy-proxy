@@ -2,7 +2,7 @@
  * utils/alerting.js
  * 
  * Alerting System for Cheffy
- * V2.0 - Added new alert metrics for reliability layer
+ * V2.1 - Added quantity validation alerts for NaN prevention
  * 
  * PURPOSE:
  * Provides centralized alerting infrastructure for the Cheffy pipeline.
@@ -15,6 +15,10 @@
  * - Added lookup_validation_failed: Nutrition lookup failed pre-use validation
  * - Added ingestion_rejected: Build-time record rejection
  * - Added macro_kcal_inconsistency: Specific alert for INV-001 violations
+ * 
+ * V2.1 CHANGES (Reconciliation NaN Fix):
+ * - Added quantity_normalization_failed: Quantity failed to normalize (undefined/NaN)
+ * - Added grams_as_sold_invalid: grams_as_sold transform produced invalid result
  * 
  * DESIGN PRINCIPLES:
  * 1. Every alert is structured and machine-parseable
@@ -154,6 +158,10 @@ const METRIC_TO_CATEGORY = {
   
   lookup_validation_failed: ALERT_CATEGORIES.NUTRITION,
   nutrition_validation_skipped: ALERT_CATEGORIES.NUTRITION,
+  
+  // V2.3: Quantity validation alerts (NaN prevention)
+  quantity_normalization_failed: ALERT_CATEGORIES.NUTRITION,
+  grams_as_sold_invalid: ALERT_CATEGORIES.NUTRITION,
   
   ingestion_rejected: ALERT_CATEGORIES.INGESTION,
   ingestion_validation_failed: ALERT_CATEGORIES.INGESTION,
