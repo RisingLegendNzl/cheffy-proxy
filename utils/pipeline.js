@@ -2,16 +2,21 @@
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
- * V2.1 - Fixed property name mismatches for validation compatibility
+ * V2.2 - Made INV-001 blocking with tiered response
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
  * into a single source of truth. Both orchestrators become thin wrappers
  * that call into this shared module.
  * 
- * FIX HISTORY:
- * - V2.1: Fixed dayPlan property name (totals → dayTotals) for validation.js compatibility
- * - V2.1: Added 'calories' alias in calculateDayTotals() return for validation.js compatibility
+ * V2.1 CHANGES:
+ * - Fixed property name mismatches (totals → dayTotals, kcal → calories alias)
+ * 
+ * V2.2 CHANGES (Minimum Viable Reliability):
+ * - INV-001 is now BLOCKING: items with >20% deviation cause immediate throw
+ * - Items with 5-20% deviation are FLAGGED (marked with _flagged: true)
+ * - If >20% of items are flagged, entire response is blocked
+ * - New alert emissions for flagged items and blocked responses
  */
 
 const crypto = require('crypto');
@@ -22,12 +27,21 @@ const { validateDayPlan } = require('./validation.js');
 const { toAsSold, normalizeToGramsOrMl } = require('./transforms.js');
 const { resolveState } = require('./stateResolver.js');
 const { validateLLMOutput } = require('./llmValidator.js');
-const { emitAlert, ALERT_LEVELS } = require('./alerting.js');
 const { 
-  assertMacroCalorieConsistency, 
+  emitAlert, 
+  ALERT_LEVELS,
+  alertItemFlaggedInv001,
+  alertResponseBlockedInv001
+} = require('./alerting.js');
+const { 
+  checkMacroCalorieConsistency,
+  createFlaggedMacros,
   assertPositiveQuantities, 
   assertReasonablePortions,
-  assertReconciliationBounds 
+  assertReconciliationBounds,
+  InvariantViolationError,
+  INVARIANT_CONFIG,
+  INVARIANT_SEVERITY
 } = require('./invariants.js');
 
 /**
@@ -37,7 +51,12 @@ const DEFAULT_CONFIG = {
   reconciliationTolerancePct: 0.15,
   maxLLMRetries: 2,
   enableBlockingValidation: true,
-  enableTracing: true
+  enableTracing: true,
+  // V2.2: INV-001 blocking configuration
+  enableInv001Blocking: true,
+  inv001FlagThresholdPct: 5,      // Flag items with >5% deviation
+  inv001BlockThresholdPct: 20,    // Block items with >20% deviation
+  responseBlockThresholdPct: 20   // Block response if >20% items flagged
 };
 
 /**
@@ -88,14 +107,12 @@ function createTracedLogger(traceId, component = 'pipeline') {
 function normalizeItemState(item, log) {
   const { key, stateHint: llmStateHint, methodHint: llmMethodHint } = item;
   
-  // Resolve state using rule engine
   const resolution = resolveState(key);
   
   let finalState = resolution.state;
   let finalMethod = resolution.method;
   let stateSource = 'rule';
   
-  // If LLM provided a state, log comparison
   if (llmStateHint && llmStateHint !== resolution.state) {
     log('info', 'LLM state hint overridden by rule resolution', {
       itemKey: key,
@@ -105,7 +122,6 @@ function normalizeItemState(item, log) {
       confidence: resolution.confidence
     });
     
-    // Emit alert for monitoring LLM compliance
     if (resolution.confidence === 'high') {
       emitAlert(ALERT_LEVELS.INFO, 'llm_state_disagreement', {
         itemKey: key,
@@ -116,7 +132,6 @@ function normalizeItemState(item, log) {
     }
   }
   
-  // Handle method hint similarly
   if (llmMethodHint && resolution.method && llmMethodHint !== resolution.method) {
     log('debug', 'LLM method hint differs from rule resolution', {
       itemKey: key,
@@ -125,7 +140,6 @@ function normalizeItemState(item, log) {
     });
   }
   
-  // Use LLM method if rule didn't specify one
   if (!resolution.method && llmMethodHint) {
     finalMethod = llmMethodHint;
   }
@@ -211,7 +225,6 @@ async function fetchNutritionForIngredients(ingredients, log) {
     
     nutritionMap.set(ingredient.normalizedKey, nutrition);
     
-    // Track source for metrics
     if (nutrition.source === 'hotpath') hotPathHits++;
     else if (nutrition.source === 'canonical') canonicalHits++;
     else if (nutrition.isFallback) fallbackHits++;
@@ -228,7 +241,6 @@ async function fetchNutritionForIngredients(ingredients, log) {
     fallbackRatePct: fallbackRate.toFixed(2)
   });
   
-  // Alert if fallback rate exceeds threshold
   if (fallbackRate > 30) {
     emitAlert(ALERT_LEVELS.CRITICAL, 'high_fallback_rate', {
       fallbackRate,
@@ -249,15 +261,15 @@ async function fetchNutritionForIngredients(ingredients, log) {
 }
 
 /**
- * Computes macros for a single item
- * Applies unit normalization, toAsSold transform, and nutrition lookup
+ * V2.2: Computes macros for a single item with INV-001 blocking
  * 
  * @param {Object} item - Item object with key, qty_value, qty_unit, stateHint, methodHint
  * @param {Map} nutritionMap - Map of normalizedKey → nutritionData
  * @param {Function} log - Traced logger function
- * @returns {Object} Macro data { kcal, protein, fat, carbs, grams_as_sold, confidence }
+ * @param {Object} config - Pipeline configuration
+ * @returns {Object} Macro data with potential _flagged property
  */
-function computeItemMacros(item, nutritionMap, log) {
+function computeItemMacros(item, nutritionMap, log, config = DEFAULT_CONFIG) {
   const normalizedKey = normalizeKey(item.key);
   
   // Step 1: Normalize quantity to grams or ml
@@ -266,7 +278,6 @@ function computeItemMacros(item, nutritionMap, log) {
   // Step 2: Convert to as-sold weight
   const asSold = toAsSold(item, normalized.value, log);
   
-  // Check for YIELD_UNMAPPED error
   if (asSold.error === 'YIELD_UNMAPPED') {
     log('error', 'Unmapped yield factor for cooked item', {
       itemKey: item.key,
@@ -300,9 +311,9 @@ function computeItemMacros(item, nutritionMap, log) {
   }
   
   // Step 4: Calculate macros based on as-sold grams
-  const factor = asSold.grams_as_sold / 100; // Nutrition data is per 100g
+  const factor = asSold.grams_as_sold / 100;
   
-  const macros = {
+  let macros = {
     kcal: Math.round(nutrition.calories * factor),
     protein: Math.round(nutrition.protein * factor * 10) / 10,
     fat: Math.round(nutrition.fat * factor * 10) / 10,
@@ -313,7 +324,7 @@ function computeItemMacros(item, nutritionMap, log) {
     isFallback: nutrition.isFallback || false
   };
   
-  // Add confidence band if available from toAsSold
+  // Add confidence band if available
   if (asSold.grams_as_sold_min !== undefined) {
     const factorMin = asSold.grams_as_sold_min / 100;
     const factorMax = asSold.grams_as_sold_max / 100;
@@ -321,15 +332,67 @@ function computeItemMacros(item, nutritionMap, log) {
     macros.kcal_max = Math.round(nutrition.calories * factorMax);
   }
   
-  // Validate macro consistency
-  try {
-    assertMacroCalorieConsistency(macros);
-  } catch (err) {
-    log('warning', 'Macro calorie consistency check failed', {
-      itemKey: item.key,
+  // V2.2: INV-001 Check with BLOCKING behavior
+  if (config.enableInv001Blocking) {
+    const consistencyCheck = checkMacroCalorieConsistency(
       macros,
-      error: err.message
-    });
+      config.inv001FlagThresholdPct,
+      config.inv001BlockThresholdPct
+    );
+    
+    if (!consistencyCheck.valid) {
+      if (consistencyCheck.severity === INVARIANT_SEVERITY.CRITICAL) {
+        // >20% deviation: HARD FAIL immediately
+        log('error', 'INV-001 BLOCKING: Macro-calorie inconsistency exceeds blocking threshold', {
+          itemKey: item.key,
+          reportedKcal: consistencyCheck.reported_kcal,
+          expectedKcal: consistencyCheck.expected_kcal,
+          deviationPct: consistencyCheck.deviation_pct,
+          threshold: config.inv001BlockThresholdPct
+        });
+        
+        // Emit critical alert
+        alertItemFlaggedInv001(item.key, {
+          expected_kcal: consistencyCheck.expected_kcal,
+          reported_kcal: consistencyCheck.reported_kcal,
+          deviation_pct: consistencyCheck.deviation_pct,
+          severity: 'CRITICAL'
+        }, { normalizedKey });
+        
+        // Throw immediately for >20% deviation
+        throw new InvariantViolationError(
+          'INV-001',
+          `Item '${item.key}' has ${consistencyCheck.deviation_pct}% macro-kcal deviation (blocking threshold: ${config.inv001BlockThresholdPct}%)`,
+          {
+            itemKey: item.key,
+            normalizedKey,
+            reportedKcal: consistencyCheck.reported_kcal,
+            expectedKcal: consistencyCheck.expected_kcal,
+            deviationPct: consistencyCheck.deviation_pct,
+            macros
+          }
+        );
+      } else {
+        // 5-20% deviation: FLAG item but continue
+        log('warning', 'INV-001 WARNING: Macro-calorie inconsistency flagged', {
+          itemKey: item.key,
+          reportedKcal: consistencyCheck.reported_kcal,
+          expectedKcal: consistencyCheck.expected_kcal,
+          deviationPct: consistencyCheck.deviation_pct
+        });
+        
+        // Emit warning alert
+        alertItemFlaggedInv001(item.key, {
+          expected_kcal: consistencyCheck.expected_kcal,
+          reported_kcal: consistencyCheck.reported_kcal,
+          deviation_pct: consistencyCheck.deviation_pct,
+          severity: 'WARNING'
+        }, { normalizedKey });
+        
+        // Flag the macros object
+        macros = createFlaggedMacros(macros, consistencyCheck);
+      }
+    }
   }
   
   return macros;
@@ -340,11 +403,12 @@ function computeItemMacros(item, nutritionMap, log) {
  * 
  * @param {Map} nutritionMap - Map of normalizedKey → nutritionData
  * @param {Function} log - Traced logger function
+ * @param {Object} config - Pipeline configuration
  * @returns {Function} getItemMacros callback
  */
-function createGetItemMacrosCallback(nutritionMap, log) {
+function createGetItemMacrosCallback(nutritionMap, log, config = DEFAULT_CONFIG) {
   return function getItemMacros(item) {
-    return computeItemMacros(item, nutritionMap, log);
+    return computeItemMacros(item, nutritionMap, log, config);
   };
 }
 
@@ -369,7 +433,6 @@ function runMealReconciliation(meal, targetKcal, targetProtein, getItemMacros, t
   });
   
   if (result.adjusted && result.factor !== null) {
-    // Validate reconciliation bounds
     try {
       assertReconciliationBounds(result.factor);
     } catch (err) {
@@ -439,7 +502,6 @@ function runDailyReconciliation(meals, targetKcal, targetProtein, getItemMacros,
 
 /**
  * Runs validation on a day plan
- * Returns validation result with critical/warning/info categories
  * 
  * @param {Object} dayPlan - Day plan object
  * @param {Function} getMacros - Callback to get macros
@@ -450,7 +512,6 @@ function runDailyReconciliation(meals, targetKcal, targetProtein, getItemMacros,
 function runValidation(dayPlan, getMacros, config, log) {
   const result = validateDayPlan(dayPlan, getMacros);
   
-  // Log validation issues
   if (result.critical && result.critical.length > 0) {
     log('error', 'Critical validation issues detected', {
       issues: result.critical
@@ -466,7 +527,6 @@ function runValidation(dayPlan, getMacros, config, log) {
     });
   }
   
-  // If blocking validation is enabled and there are critical issues, throw
   if (config.enableBlockingValidation && result.critical && result.critical.length > 0) {
     const error = new Error('Critical validation issues prevent plan delivery');
     error.validationResult = result;
@@ -482,7 +542,7 @@ function runValidation(dayPlan, getMacros, config, log) {
  * 
  * @param {Object} output - Raw LLM output
  * @param {string} schemaName - Schema to validate against
- * @param {Function} retryFn - Function to call for retry (should return new LLM output)
+ * @param {Function} retryFn - Function to call for retry
  * @param {number} maxRetries - Maximum retry attempts
  * @param {Function} log - Traced logger function
  * @returns {Object} Validated and possibly corrected output
@@ -504,7 +564,6 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
       return validation.correctedOutput || currentOutput;
     }
     
-    // Validation failed
     log('warning', 'LLM output validation failed', {
       schemaName,
       attempt: attempts + 1,
@@ -516,7 +575,6 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
       log('info', 'Retrying LLM call', { attempt: attempts });
       currentOutput = await retryFn();
     } else {
-      // Max retries exceeded
       emitAlert(ALERT_LEVELS.WARNING, 'llm_validation_failed', {
         schemaName,
         attempts: attempts + 1,
@@ -535,14 +593,11 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
 
 /**
  * Calculates day totals from meals
+ * Returns BOTH 'kcal' and 'calories' for compatibility
  * 
  * @param {Array} meals - Array of meal objects
  * @param {Function} getItemMacros - Callback to compute item macros
  * @returns {Object} { kcal, calories, protein, fat, carbs }
- * 
- * NOTE: Returns BOTH 'kcal' and 'calories' for compatibility:
- * - 'kcal' is used by pipeline internals and reconciliation
- * - 'calories' is used by validation.js
  */
 function calculateDayTotals(meals, getItemMacros) {
   let totalKcal = 0;
@@ -563,10 +618,8 @@ function calculateDayTotals(meals, getItemMacros) {
   const kcalRounded = Math.round(totalKcal);
   
   return {
-    // --- [FIX V2.1] Return BOTH kcal and calories for compatibility ---
     kcal: kcalRounded,
-    calories: kcalRounded,  // Alias for validation.js compatibility
-    // --- [END FIX] ---
+    calories: kcalRounded,
     protein: Math.round(totalProtein * 10) / 10,
     fat: Math.round(totalFat * 10) / 10,
     carbs: Math.round(totalCarbs * 10) / 10
@@ -574,8 +627,34 @@ function calculateDayTotals(meals, getItemMacros) {
 }
 
 /**
+ * V2.2: Counts flagged items in meals array
+ * 
+ * @param {Array} meals - Array of meal objects
+ * @param {Function} getItemMacros - Callback to compute item macros
+ * @returns {{ flaggedCount: number, totalItems: number, flaggedRate: number }}
+ */
+function countFlaggedItems(meals, getItemMacros) {
+  let flaggedCount = 0;
+  let totalItems = 0;
+  
+  for (const meal of meals) {
+    for (const item of meal.items) {
+      totalItems++;
+      const macros = getItemMacros(item);
+      if (macros._flagged) {
+        flaggedCount++;
+      }
+    }
+  }
+  
+  const flaggedRate = totalItems > 0 ? (flaggedCount / totalItems) * 100 : 0;
+  
+  return { flaggedCount, totalItems, flaggedRate };
+}
+
+/**
  * Main pipeline execution function
- * Orchestrates the full meal plan generation pipeline
+ * V2.2: Now includes response-level blocking for flagged items
  * 
  * @param {Object} params - Pipeline parameters
  * @param {Array} params.rawMeals - Raw meals from LLM
@@ -601,7 +680,8 @@ async function executePipeline(params) {
   const debug = {
     traceId,
     stages: [],
-    timings: {}
+    timings: {},
+    inv001Stats: null  // V2.2: Track flagged items
   };
   
   try {
@@ -635,8 +715,8 @@ async function executePipeline(params) {
     debug.timings.fetchNutrition = Date.now() - startNutrition;
     debug.stages.push('nutrition_fetch');
     
-    // Stage 5: Create macro callback
-    const getItemMacros = createGetItemMacrosCallback(nutritionMap, log);
+    // Stage 5: Create macro callback (with INV-001 blocking)
+    const getItemMacros = createGetItemMacrosCallback(nutritionMap, log, config);
     
     // Stage 6: Per-meal reconciliation
     const startMealRecon = Date.now();
@@ -673,24 +753,61 @@ async function executePipeline(params) {
     const dayTotals = calculateDayTotals(dailyResult.meals, getItemMacros);
     debug.stages.push('calculate_totals');
     
+    // V2.2: Stage 8.5 - Check for response-level blocking
+    if (config.enableInv001Blocking) {
+      const flaggedStats = countFlaggedItems(dailyResult.meals, getItemMacros);
+      debug.inv001Stats = flaggedStats;
+      
+      log('info', 'INV-001 flagged items check', {
+        flaggedCount: flaggedStats.flaggedCount,
+        totalItems: flaggedStats.totalItems,
+        flaggedRatePct: flaggedStats.flaggedRate.toFixed(2),
+        threshold: config.responseBlockThresholdPct
+      });
+      
+      if (flaggedStats.flaggedRate > config.responseBlockThresholdPct) {
+        // BLOCK ENTIRE RESPONSE
+        log('error', 'INV-001 RESPONSE BLOCKED: Too many items flagged', {
+          flaggedCount: flaggedStats.flaggedCount,
+          totalItems: flaggedStats.totalItems,
+          flaggedRatePct: flaggedStats.flaggedRate.toFixed(2),
+          threshold: config.responseBlockThresholdPct
+        });
+        
+        // Emit critical alert
+        alertResponseBlockedInv001(
+          flaggedStats.flaggedCount,
+          flaggedStats.totalItems,
+          { traceId }
+        );
+        
+        throw new InvariantViolationError(
+          'INV-001-RESPONSE',
+          `Response blocked: ${flaggedStats.flaggedRate.toFixed(1)}% of items have macro-kcal inconsistencies (threshold: ${config.responseBlockThresholdPct}%)`,
+          {
+            flaggedCount: flaggedStats.flaggedCount,
+            totalItems: flaggedStats.totalItems,
+            flaggedRatePct: flaggedStats.flaggedRate,
+            threshold: config.responseBlockThresholdPct,
+            traceId
+          }
+        );
+      }
+    }
+    
     // Stage 9: Validation
-    // --- [FIX V2.1] Use property name 'dayTotals' instead of 'totals' ---
-    // validation.js expects: { meals, dayTotals, targets, ... }
-    // Previously was: { meals, totals: dayTotals, targets }
     const startValidation = Date.now();
     const dayPlan = {
       meals: dailyResult.meals,
-      dayTotals: dayTotals,  // FIX: was 'totals: dayTotals'
+      dayTotals: dayTotals,
       targets: {
-        // Provide both 'kcal' and 'calories' for compatibility
         kcal: targets.kcal,
-        calories: targets.kcal,  // Alias for validation.js
+        calories: targets.kcal,
         protein: targets.protein,
         fat: targets.fat,
         carbs: targets.carbs
       }
     };
-    // --- [END FIX] ---
     
     const validationResult = runValidation(dayPlan, getItemMacros, config, log);
     debug.timings.validation = Date.now() - startValidation;
@@ -714,7 +831,8 @@ async function executePipeline(params) {
     log('info', 'Pipeline execution completed', {
       traceId,
       totalTime: Object.values(debug.timings).reduce((a, b) => a + b, 0),
-      dayTotals
+      dayTotals,
+      inv001Stats: debug.inv001Stats
     });
     
     return {
@@ -723,7 +841,6 @@ async function executePipeline(params) {
       dayTotals,
       validation: validationResult,
       debug,
-      // Add 'data' property for orchestrator compatibility
       data: {
         meals: dailyResult.meals,
         dayTotals,
@@ -733,7 +850,8 @@ async function executePipeline(params) {
         traceId,
         success: true,
         totalDuration: Object.values(debug.timings).reduce((a, b) => a + b, 0),
-        stageDurations: debug.timings
+        stageDurations: debug.timings,
+        inv001Stats: debug.inv001Stats
       }
     };
     
@@ -742,7 +860,15 @@ async function executePipeline(params) {
       traceId,
       error: error.message,
       isValidationError: error.isValidationError,
-      isLLMValidationError: error.isLLMValidationError
+      isLLMValidationError: error.isLLMValidationError,
+      isInvariantViolation: error.name === 'InvariantViolationError'
+    });
+    
+    // Emit pipeline failure alert
+    emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
+      traceId,
+      error: error.message,
+      invariantId: error.invariantId || null
     });
     
     throw error;
@@ -756,7 +882,7 @@ module.exports = {
   // Configuration
   DEFAULT_CONFIG,
   
-  // Utility functions (exported for orchestrators that need granular control)
+  // Utility functions
   generateTraceId,
   createTracedLogger,
   normalizeItemState,
@@ -769,5 +895,6 @@ module.exports = {
   runDailyReconciliation,
   runValidation,
   validateLLMOutputWithRetry,
-  calculateDayTotals
+  calculateDayTotals,
+  countFlaggedItems  // V2.2: New export
 };
