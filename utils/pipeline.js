@@ -2,24 +2,16 @@
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
+ * V2.1 - Fixed property name mismatches for validation compatibility
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
  * into a single source of truth. Both orchestrators become thin wrappers
  * that call into this shared module.
  * 
- * PLAN REFERENCE: Step A1 - Create Shared Pipeline Module
- * 
- * ASSUMPTIONS:
- * - normalizeKey is exported from scripts/normalize.js
- * - lookupIngredientNutrition is exported from api/nutrition-search.js
- * - reconcileNonProtein and reconcileMealLevel are exported from utils/reconcileNonProtein.js
- * - validateDayPlan is exported from utils/validation.js
- * - toAsSold, normalizeToGramsOrMl are exported from utils/transforms.js
- * - resolveState is exported from utils/stateResolver.js (new file)
- * - validateLLMOutput is exported from utils/llmValidator.js (new file)
- * - emitAlert is exported from utils/alerting.js (new file)
- * - Trace storage uses @vercel/kv
+ * FIX HISTORY:
+ * - V2.1: Fixed dayPlan property name (totals → dayTotals) for validation.js compatibility
+ * - V2.1: Added 'calories' alias in calculateDayTotals() return for validation.js compatibility
  */
 
 const crypto = require('crypto');
@@ -50,7 +42,6 @@ const DEFAULT_CONFIG = {
 
 /**
  * Generates a unique trace ID for request correlation
- * Uses Node.js built-in crypto.randomUUID() (available since Node 14.17.0)
  * @returns {string} UUID v4 trace ID
  */
 function generateTraceId() {
@@ -58,59 +49,54 @@ function generateTraceId() {
 }
 
 /**
- * Creates a structured logger that includes trace ID in all log entries
- * @param {string} traceId - The trace ID for this request
- * @param {string} stage - Pipeline stage name
- * @returns {Function} Logger function
+ * Creates a traced logger function
+ * 
+ * @param {string} traceId - Trace ID to include in all logs
+ * @param {string} component - Component name (default: 'pipeline')
+ * @returns {Function} Logger function (level, message, data)
  */
-function createTracedLogger(traceId, stage) {
+function createTracedLogger(traceId, component = 'pipeline') {
   return function log(level, message, data = {}) {
     const entry = {
       timestamp: new Date().toISOString(),
       traceId,
-      stage,
+      component,
       level,
       message,
       ...data
     };
     
-    // Output structured log
-    console.log(JSON.stringify(entry));
+    if (level === 'error') {
+      console.error(JSON.stringify(entry));
+    } else if (level === 'warning') {
+      console.warn(JSON.stringify(entry));
+    } else {
+      console.log(JSON.stringify(entry));
+    }
     
     return entry;
   };
 }
 
 /**
- * Normalizes state hint for a single item using the deterministic state resolver
- * Compares LLM-provided stateHint with rule-based resolution
+ * Normalizes item state using rule-based resolution
  * 
- * @param {Object} item - Item object with key, stateHint, methodHint
+ * @param {Object} item - Item with potential stateHint from LLM
  * @param {Function} log - Traced logger function
- * @returns {Object} Item with resolved state and method
+ * @returns {Object} Item with normalized stateHint and _stateResolution metadata
  */
 function normalizeItemState(item, log) {
   const { key, stateHint: llmStateHint, methodHint: llmMethodHint } = item;
   
-  // Get deterministic resolution
+  // Resolve state using rule engine
   const resolution = resolveState(key);
   
-  // Determine final state
   let finalState = resolution.state;
   let finalMethod = resolution.method;
   let stateSource = 'rule';
   
-  // If LLM provided a state hint, compare with rule-based result
-  if (llmStateHint && llmStateHint === resolution.state) {
-    stateSource = 'llm_agreed';
-    log('debug', 'LLM state hint matches rule resolution', {
-      itemKey: key,
-      state: finalState,
-      ruleId: resolution.ruleId
-    });
-  } else if (llmStateHint && llmStateHint !== resolution.state) {
-    // LLM disagrees - use rule-based result but log disagreement
-    stateSource = 'rule_override';
+  // If LLM provided a state, log comparison
+  if (llmStateHint && llmStateHint !== resolution.state) {
     log('info', 'LLM state hint overridden by rule resolution', {
       itemKey: key,
       llmState: llmStateHint,
@@ -173,7 +159,6 @@ function normalizeAllItemStates(meals, log) {
 
 /**
  * Extracts unique ingredient keys from meals array
- * Deduplicates by normalized key
  * 
  * @param {Array} meals - Array of meal objects
  * @param {Function} log - Traced logger function
@@ -553,7 +538,11 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
  * 
  * @param {Array} meals - Array of meal objects
  * @param {Function} getItemMacros - Callback to compute item macros
- * @returns {Object} { kcal, protein, fat, carbs }
+ * @returns {Object} { kcal, calories, protein, fat, carbs }
+ * 
+ * NOTE: Returns BOTH 'kcal' and 'calories' for compatibility:
+ * - 'kcal' is used by pipeline internals and reconciliation
+ * - 'calories' is used by validation.js
  */
 function calculateDayTotals(meals, getItemMacros) {
   let totalKcal = 0;
@@ -571,8 +560,13 @@ function calculateDayTotals(meals, getItemMacros) {
     }
   }
   
+  const kcalRounded = Math.round(totalKcal);
+  
   return {
-    kcal: Math.round(totalKcal),
+    // --- [FIX V2.1] Return BOTH kcal and calories for compatibility ---
+    kcal: kcalRounded,
+    calories: kcalRounded,  // Alias for validation.js compatibility
+    // --- [END FIX] ---
     protein: Math.round(totalProtein * 10) / 10,
     fat: Math.round(totalFat * 10) / 10,
     carbs: Math.round(totalCarbs * 10) / 10
@@ -599,7 +593,7 @@ async function executePipeline(params) {
   } = params;
   
   const config = { ...DEFAULT_CONFIG, ...configOverrides };
-  const traceId = generateTraceId();
+  const traceId = config.traceId || generateTraceId();
   const log = createTracedLogger(traceId, 'pipeline');
   
   log('info', 'Pipeline execution started', { traceId, targets });
@@ -680,12 +674,24 @@ async function executePipeline(params) {
     debug.stages.push('calculate_totals');
     
     // Stage 9: Validation
+    // --- [FIX V2.1] Use property name 'dayTotals' instead of 'totals' ---
+    // validation.js expects: { meals, dayTotals, targets, ... }
+    // Previously was: { meals, totals: dayTotals, targets }
     const startValidation = Date.now();
     const dayPlan = {
       meals: dailyResult.meals,
-      totals: dayTotals,
-      targets
+      dayTotals: dayTotals,  // FIX: was 'totals: dayTotals'
+      targets: {
+        // Provide both 'kcal' and 'calories' for compatibility
+        kcal: targets.kcal,
+        calories: targets.kcal,  // Alias for validation.js
+        protein: targets.protein,
+        fat: targets.fat,
+        carbs: targets.carbs
+      }
     };
+    // --- [END FIX] ---
+    
     const validationResult = runValidation(dayPlan, getItemMacros, config, log);
     debug.timings.validation = Date.now() - startValidation;
     debug.stages.push('validation');
@@ -716,7 +722,19 @@ async function executePipeline(params) {
       meals: dailyResult.meals,
       dayTotals,
       validation: validationResult,
-      debug
+      debug,
+      // Add 'data' property for orchestrator compatibility
+      data: {
+        meals: dailyResult.meals,
+        dayTotals,
+        validation: validationResult
+      },
+      stats: {
+        traceId,
+        success: true,
+        totalDuration: Object.values(debug.timings).reduce((a, b) => a + b, 0),
+        stageDurations: debug.timings
+      }
     };
     
   } catch (error) {
