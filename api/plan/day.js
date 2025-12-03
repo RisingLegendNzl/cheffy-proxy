@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/day.js ---
 // Module 2 Refactor: Single-Day Orchestration Wrapper
-// V15.2 - Fixed executePipeline call signature
+// V15.3 - Fixed executePipeline signature + targets property mapping
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -285,12 +285,18 @@ module.exports = async (request, response) => {
         }
 
         // 7. Execute Shared Pipeline
-        // --- [FIX V15.2] Corrected executePipeline call signature ---
-        // Was: executePipeline(rawMeals, targets, llmRetryFn, config)  [positional]
-        // Now: executePipeline({ rawMeals, targets, llmRetryFn, config })  [object]
+        // --- [FIX V15.2] Object parameter pattern ---
+        // --- [FIX V15.3] Map calories → kcal for pipeline compatibility ---
+        // Pipeline expects { kcal, protein, fat, carbs }
+        // Caller provides { calories, protein, fat, carbs }
         const result = await executePipeline({
             rawMeals: rawDayPlan.meals,
-            targets: nutritionalTargets,
+            targets: {
+                kcal: nutritionalTargets.calories,    // Map calories → kcal
+                protein: nutritionalTargets.protein,
+                fat: nutritionalTargets.fat,
+                carbs: nutritionalTargets.carbs
+            },
             llmRetryFn: fetchLLMWithRetry,
             config: {
                 traceId,
