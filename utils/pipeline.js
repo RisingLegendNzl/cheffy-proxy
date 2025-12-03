@@ -2,7 +2,7 @@
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
- * V2.2 - Made INV-001 blocking with tiered response
+ * V2.3 - Fixed property name mismatch causing NaN reconciliation factors
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
@@ -17,6 +17,13 @@
  * - Items with 5-20% deviation are FLAGGED (marked with _flagged: true)
  * - If >20% of items are flagged, entire response is blocked
  * - New alert emissions for flagged items and blocked responses
+ * 
+ * V2.3 CHANGES (Reconciliation NaN Fix):
+ * - Added short property aliases (p, f, c) to computeItemMacros return object
+ *   Required by reconcileNonProtein which expects mm.p, mm.f, mm.c
+ * - Added defensive guards for undefined/NaN quantities after normalization
+ * - Added defensive guards for undefined/NaN grams_as_sold after transforms
+ * - Safe zero-macro returns with error codes prevent NaN propagation
  */
 
 const crypto = require('crypto');
@@ -275,8 +282,61 @@ function computeItemMacros(item, nutritionMap, log, config = DEFAULT_CONFIG) {
   // Step 1: Normalize quantity to grams or ml
   const normalized = normalizeToGramsOrMl(item, log);
   
+  // V2.3 FIX: Defensive guard for undefined/NaN normalized value
+  if (normalized.value === undefined || normalized.value === null || Number.isNaN(normalized.value)) {
+    log('error', 'INV-002 PREFLIGHT: Invalid quantity after normalization', {
+      itemKey: item.key,
+      normalizedKey,
+      qty_value: item.qty_value,
+      qty_unit: item.qty_unit,
+      normalized_value: normalized.value
+    });
+    emitAlert(ALERT_LEVELS.CRITICAL, 'quantity_normalization_failed', {
+      itemKey: item.key,
+      normalizedKey,
+      qty_value: item.qty_value,
+      qty_unit: item.qty_unit,
+      normalized_value: normalized.value
+    });
+    // Return safe zero macros to prevent NaN propagation
+    return {
+      kcal: 0, protein: 0, fat: 0, carbs: 0,
+      p: 0, f: 0, c: 0,  // Short aliases for reconciliation
+      grams_as_sold: 0,
+      confidence: 'none',
+      error: 'QUANTITY_INVALID',
+      _errorDetail: { qty_value: item.qty_value, normalized_value: normalized.value }
+    };
+  }
+  
   // Step 2: Convert to as-sold weight
   const asSold = toAsSold(item, normalized.value, log);
+  
+  // V2.3 FIX: Defensive guard for undefined/NaN grams_as_sold
+  if (asSold.grams_as_sold === undefined || asSold.grams_as_sold === null || Number.isNaN(asSold.grams_as_sold)) {
+    log('error', 'INV-002 PREFLIGHT: Invalid grams_as_sold after transform', {
+      itemKey: item.key,
+      normalizedKey,
+      normalized_value: normalized.value,
+      grams_as_sold: asSold.grams_as_sold,
+      stateHint: item.stateHint
+    });
+    emitAlert(ALERT_LEVELS.CRITICAL, 'grams_as_sold_invalid', {
+      itemKey: item.key,
+      normalizedKey,
+      normalized_value: normalized.value,
+      grams_as_sold: asSold.grams_as_sold
+    });
+    // Return safe zero macros to prevent NaN propagation
+    return {
+      kcal: 0, protein: 0, fat: 0, carbs: 0,
+      p: 0, f: 0, c: 0,  // Short aliases for reconciliation
+      grams_as_sold: 0,
+      confidence: 'none',
+      error: 'GRAMS_AS_SOLD_INVALID',
+      _errorDetail: { normalized_value: normalized.value, grams_as_sold: asSold.grams_as_sold }
+    };
+  }
   
   if (asSold.error === 'YIELD_UNMAPPED') {
     log('error', 'Unmapped yield factor for cooked item', {
@@ -300,10 +360,8 @@ function computeItemMacros(item, nutritionMap, log, config = DEFAULT_CONFIG) {
       normalizedKey
     });
     return {
-      kcal: 0,
-      protein: 0,
-      fat: 0,
-      carbs: 0,
+      kcal: 0, protein: 0, fat: 0, carbs: 0,
+      p: 0, f: 0, c: 0,  // Short aliases for reconciliation
       grams_as_sold: asSold.grams_as_sold,
       confidence: 'none',
       error: 'NUTRITION_NOT_FOUND'
@@ -313,11 +371,21 @@ function computeItemMacros(item, nutritionMap, log, config = DEFAULT_CONFIG) {
   // Step 4: Calculate macros based on as-sold grams
   const factor = asSold.grams_as_sold / 100;
   
+  // Calculate macro values
+  const proteinVal = Math.round(nutrition.protein * factor * 10) / 10;
+  const fatVal = Math.round(nutrition.fat * factor * 10) / 10;
+  const carbsVal = Math.round(nutrition.carbs * factor * 10) / 10;
+  
   let macros = {
     kcal: Math.round(nutrition.calories * factor),
-    protein: Math.round(nutrition.protein * factor * 10) / 10,
-    fat: Math.round(nutrition.fat * factor * 10) / 10,
-    carbs: Math.round(nutrition.carbs * factor * 10) / 10,
+    // Long property names (for pipeline consumers)
+    protein: proteinVal,
+    fat: fatVal,
+    carbs: carbsVal,
+    // V2.3 FIX: Short aliases (required by reconcileNonProtein)
+    p: proteinVal,
+    f: fatVal,
+    c: carbsVal,
     grams_as_sold: asSold.grams_as_sold,
     confidence: nutrition.confidence || 'medium',
     source: nutrition.source,
