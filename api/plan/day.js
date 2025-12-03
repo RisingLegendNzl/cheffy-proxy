@@ -1,6 +1,6 @@
 // --- Cheffy API: /api/plan/day.js ---
 // Module 2 Refactor: Single-Day Orchestration Wrapper
-// V15.1 - Removed duplicate state inference logic
+// V15.2 - Fixed executePipeline call signature
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
@@ -24,6 +24,9 @@ const kv = createClient({
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
+
+// --- Cache prefix for single-day plans ---
+const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
 
 const LLM_REQUEST_TIMEOUT_MS = 90000;
 const MAX_LLM_RETRIES = 3;
@@ -73,7 +76,6 @@ async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
             if (response.ok) {
                 const rawText = await response.text();
                 const trimmedText = rawText.trim();
-                // Basic JSON guard
                 if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
                     return {
                         ok: true,
@@ -88,76 +90,94 @@ async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
 
             if (response.status !== 429 && response.status < 500) {
                 const errorBody = await response.text();
-                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody}`);
+                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody.substring(0, 200)}`);
             }
-            log(`${attemptPrefix} Attempt ${attempt}: Retryable error ${response.status}.`, 'WARN', 'HTTP');
 
+            log(`${attemptPrefix} Attempt ${attempt} failed with status ${response.status}. Retrying...`, 'WARN', 'HTTP');
         } catch (error) {
             clearTimeout(timeout);
-            log(`${attemptPrefix} Attempt ${attempt}: Error: ${error.message}`, 'WARN', 'HTTP');
-            if (attempt === MAX_LLM_RETRIES) throw error;
+            if (error.name === 'AbortError') {
+                log(`${attemptPrefix} Attempt ${attempt} timed out after ${LLM_REQUEST_TIMEOUT_MS}ms.`, 'WARN', 'HTTP');
+            } else if (attempt === MAX_LLM_RETRIES) {
+                throw error;
+            } else {
+                log(`${attemptPrefix} Attempt ${attempt} error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
+            }
         }
 
-        const delayTime = Math.pow(2, attempt - 1) * 3000 + Math.random() * 1000;
-        await new Promise(r => setTimeout(r, delayTime));
+        if (attempt < MAX_LLM_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
     }
+
+    throw new Error(`${attemptPrefix} failed after ${MAX_LLM_RETRIES} attempts.`);
 }
 
-// --- Helper: Try Generate Plan ---
-async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, expectedJsonShape) {
-    const apiUrl = getGeminiApiUrl(modelName);
-    const response = await fetchLLMWithRetry(apiUrl, {
+// --- Helper: Try Generate LLM Plan ---
+async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, opts = {}) {
+    const url = `${getGeminiApiUrl(modelName)}?key=${GEMINI_API_KEY}`;
+    const options = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-    }, log, logPrefix);
+    };
 
-    const result = await response.json();
-    const candidate = result.candidates?.[0];
-    const content = candidate?.content;
-    
-    if (!content || !content.parts?.[0]?.text) {
-        throw new Error(`Model ${modelName} failed: Response missing content.`);
+    const response = await fetchLLMWithRetry(url, options, log, logPrefix);
+    const data = await response.json();
+
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+        throw new Error(`${logPrefix}: No text in LLM response`);
     }
 
-    const jsonText = content.parts[0].text;
-    try {
-        const parsed = JSON.parse(jsonText.trim());
-        if (!parsed || typeof parsed !== 'object') throw new Error("Parsed response is not a valid object.");
-        return parsed;
-    } catch (parseError) {
-        throw new Error(`Model ${modelName} failed: Invalid JSON. ${parseError.message}`);
-    }
+    const parsed = JSON.parse(text);
+    return parsed;
 }
 
-// --- Helper: LLM System Prompt ---
+// --- System Prompt ---
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, day, perMealTargets) => `
-You are an expert dietitian. Your SOLE task is to generate the \`meals\` for ONE day (Day ${day}).
-RULES:
-1. Generate meals ('meals') & items ('items') used TODAY.
-2. CRITICAL PROTEIN CAP: Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
-3. MEAL PORTIONS: For each meal, populate 'items' with:
-    a) 'key': (string) Generic ingredient name.
-    b) 'qty_value': (number) Portion size.
-    c) 'qty_unit': (string) 'g', 'ml', 'slice', 'egg'.
-    d) 'stateHint': (string) MANDATORY: "dry", "raw", "cooked", "as_pack".
-    e) 'methodHint': (string | null) MANDATORY if cooked.
-4. UNITS: Use 'g' or 'ml' primarily. No 'medium', 'large'.
-5. TARGETS: MAIN MEALS (~${perMealTargets.main.calories} kcal, ~${perMealTargets.main.protein}g P). SNACKS (~${perMealTargets.snack.calories} kcal, ~${perMealTargets.snack.protein}g P).
-6. SCALING: Scale protein portions to match targets.
-7. Return only valid JSON.
+You are a precision meal planner for Day ${day}. Your output is parsed by code—return ONLY valid JSON.
 
-JSON Structure:
+Target: ${calories} kcal/day for a ${weight}kg individual.
+
+JSON Schema:
 {
   "meals": [
     {
-      "type": "string", "name": "string",
+      "type": "string (e.g., 'Breakfast', 'Lunch', 'Dinner', 'Snack')",
+      "name": "string (e.g., 'Grilled Chicken Salad')",
       "items": [
-        { "key": "string", "qty_value": number, "qty_unit": "string", "stateHint": "string", "methodHint": "string|null" }
+        {
+          "key": "string (ingredient name, e.g., 'chicken breast')",
+          "qty_value": "number (portion size)",
+          "qty_unit": "string ('g', 'ml', 'piece', 'slice', 'egg', etc.)",
+          "stateHint": "string (MANDATORY: 'dry', 'raw', 'cooked', or 'as_pack')",
+          "methodHint": "string|null (MANDATORY if cooked, e.g., 'grilled', 'boiled', or null)"
+        }
       ]
     }
   ]
 }
+
+ALLOWED UNITS (qty_unit):
+- Weight: "g", "kg", "oz", "lb"
+- Volume: "ml", "L", "cup", "tbsp", "tsp"
+- Count: "piece", "slice", "egg", "can", "tin", "packet", "sachet", "clove", "stalk", "sprig", "bunch", "fillet"
+
+CRITICAL RULES:
+1. **UNITS:** Do NOT use vague units like 'medium', 'large', 'serving', 'bowl', 'plate'. Convert to 'piece' or 'g'.
+2. **PROTEIN CAP:** Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
+3. **STATE HINT:**
+   - "dry": grains, pasta, oats before cooking.
+   - "raw": meats, veg before cooking.
+   - "cooked": only if user explicitly eats pre-cooked item.
+   - "as_pack": yogurt, bread, cheese.
+4. **TARGETS:**
+   - MAIN MEALS: ~${perMealTargets.main.calories} kcal, ~${perMealTargets.main.protein}g P
+   - SNACKS: ~${perMealTargets.snack.calories} kcal, ~${perMealTargets.snack.protein}g P
+5. **SCALING:** Scale portion sizes (qty_value) to hit these targets exactly.
+
+Output ONLY the JSON.
 `;
 
 // --- Helper: Generate Meal Plan (LLM) ---
@@ -167,7 +187,6 @@ async function generateMealPlan(day, formData, nutritionalTargets, log, perMealT
 
     // Check Cache
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
-    const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     const cached = await cacheGet(cacheKey, log);
     if (cached) return { dayNumber: day, meals: cached.meals };
@@ -266,57 +285,69 @@ module.exports = async (request, response) => {
         }
 
         // 7. Execute Shared Pipeline
-        // Note: State resolution happens implicitly inside executePipeline via normalizeItemState
-        const pipelineConfig = {
-            traceId,
-            dayNumber: day,
-            store: store,
-            scaleProtein: true,
-            allowReconciliation: true,
-            generateRecipes: true
-        };
-
-        const result = await executePipeline(
-            rawDayPlan.meals,
-            nutritionalTargets,
-            fetchLLMWithRetry,
-            pipelineConfig
-        );
+        // --- [FIX V15.2] Corrected executePipeline call signature ---
+        // Was: executePipeline(rawMeals, targets, llmRetryFn, config)  [positional]
+        // Now: executePipeline({ rawMeals, targets, llmRetryFn, config })  [object]
+        const result = await executePipeline({
+            rawMeals: rawDayPlan.meals,
+            targets: nutritionalTargets,
+            llmRetryFn: fetchLLMWithRetry,
+            config: {
+                traceId,
+                dayNumber: day,
+                store: store,
+                scaleProtein: true,
+                allowReconciliation: true,
+                generateRecipes: true
+            }
+        });
+        // --- [END FIX] ---
 
         // 8. Record Stats
-        recordPipelineStats(result.stats);
+        if (result.stats) {
+            recordPipelineStats(result.stats);
+        }
 
-        // 9. Return Response
-        // Mapping to match legacy structure where possible while using new pipeline data
-        const responseData = {
+        // 9. Finalize Trace
+        completeTrace(traceId, { status: 'success' });
+
+        log(`Single-Day Plan Generation Complete for Day ${day}`, 'INFO', 'ORCHESTRATOR');
+
+        // 10. Return Response
+        return response.status(200).json({
+            success: true,
             traceId,
-            message: `Successfully generated plan for Day ${day}.`,
-            day: day,
-            mealPlanForDay: { day: day, meals: result.data.meals },
-            data: result.data, 
-            validation: result.data.validation,
-            debug: {
-                stats: result.stats,
-                timestamp: new Date().toISOString()
-            }
-        };
-
-        completeTrace(traceId, 'success', { day });
-        log('Single-day plan generation completed successfully', 'SUCCESS', 'ORCHESTRATOR');
-
-        return response.status(200).json(responseData);
+            data: result.data,
+            stats: result.stats
+        });
 
     } catch (error) {
-        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure_single', { traceId, error: error.message });
-        traceError(traceId, error);
-        log(`Pipeline Failure: ${error.message}`, 'CRITICAL', 'ORCHESTRATOR');
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorStack = error instanceof Error ? error.stack : undefined;
         
-        return response.status(500).json({
-            error: error.message,
+        log(`Single-Day Plan Generation Failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
+        
+        traceError(traceId, {
+            stage: 'ORCHESTRATOR',
+            error: errorMessage,
+            stack: errorStack
+        });
+
+        // Emit alert with correct signature
+        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
             traceId,
-            code: "PIPELINE_ERROR"
+            error: errorMessage
+        });
+
+        completeTrace(traceId, { 
+            status: 'error', 
+            error: errorMessage 
+        });
+
+        return response.status(500).json({
+            success: false,
+            traceId,
+            error: errorMessage
         });
     }
 };
-
-
