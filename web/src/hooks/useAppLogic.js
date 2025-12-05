@@ -21,50 +21,95 @@ const MOCK_PRODUCT_TEMPLATE = {
 };
 
 // --- SSE Stream Parser ---
+/**
+ * Processes an SSE chunk and extracts complete events
+ * * @param {Uint8Array} value - Chunk from reader
+ * @param {string} buffer - Accumulated buffer from previous chunks
+ * @param {TextDecoder} decoder - Text decoder instance
+ * @returns {Object} { events: Array<{eventType, data, isTerminal}>, newBuffer: string }
+ */
 function processSseChunk(value, buffer, decoder) {
+    // Decode the new chunk and append to buffer
     const chunk = decoder.decode(value, { stream: true });
     buffer += chunk;
     
     const events = [];
-    let lines = buffer.split('\n\n');
     
-    for (let i = 0; i < lines.length - 1; i++) {
-        const message = lines[i];
+    // Split on double newline (SSE event separator)
+    // This handles the SSE protocol correctly
+    const parts = buffer.split('\n\n');
+    
+    // The last part may be incomplete - keep it in buffer for next chunk
+    buffer = parts.pop() || '';
+    
+    // Process each complete message
+    for (const message of parts) {
+        // Skip empty messages
         if (message.trim().length === 0) continue;
         
-        let eventType = 'message';
+        let eventType = 'message'; // Default SSE event type
         let eventData = '';
         
-        message.split('\n').forEach(line => {
+        // Parse SSE fields line by line
+        const lines = message.split('\n');
+        for (const line of lines) {
             if (line.startsWith('event: ')) {
+                // Extract event type
                 eventType = line.substring(7).trim();
+            } else if (line.startsWith('event:')) {
+                // Handle "event:" without space
+                eventType = line.substring(6).trim();
             } else if (line.startsWith('data: ')) {
-                eventData += line.substring(6).trim();
+                // Extract data (can be multiple data lines)
+                eventData += line.substring(6);
+            } else if (line.startsWith('data:')) {
+                // Handle "data:" without space
+                eventData += line.substring(5);
             }
-        });
-
+            // Ignore other fields like 'id:', 'retry:', comments (':')
+        }
+        
+        // Only process if we have data
         if (eventData) {
             try {
                 const jsonData = JSON.parse(eventData);
-                events.push({ eventType, data: jsonData });
-            } catch (e) {
-                console.error("SSE: Failed to parse JSON data:", eventData, e);
+                
+                // Determine if this is a terminal event
+                const isTerminal = (
+                    eventType === 'plan:complete' || 
+                    eventType === 'plan:error'
+                );
+                
+                events.push({ 
+                    eventType, 
+                    data: jsonData,
+                    isTerminal
+                });
+            } catch (parseError) {
+                // JSON parse failed - log error and emit as diagnostic
+                console.error(
+                    'SSE: Failed to parse JSON data:', 
+                    eventData.substring(0, 200), 
+                    parseError
+                );
+                
+                // Emit parse failure as a log message so it's visible
                 events.push({
-                    eventType: 'log_message', 
+                    eventType: 'log_message',
                     data: {
                         timestamp: new Date().toISOString(),
                         level: 'CRITICAL',
                         tag: 'SSE_PARSE',
-                        message: 'Failed to parse incoming SSE JSON data.',
-                        data: { raw: eventData.substring(0, 100) + '...' }
-                    }
+                        message: `Failed to parse SSE JSON: ${parseError.message}`,
+                        rawData: eventData.substring(0, 500)
+                    },
+                    isTerminal: false
                 });
             }
         }
     }
     
-    let newBuffer = lines[lines.length - 1];
-    return { events, newBuffer };
+    return { events, newBuffer: buffer };
 }
 
 /**
@@ -846,109 +891,350 @@ const useAppLogic = ({
 
                 const reader = planResponse.body.getReader();
                 const decoder = new TextDecoder();
-                let buffer = '';
-                let planComplete = false;
+                
+                try {
+                    let buffer = '';
+                    let planComplete = false;
+                    let terminalEventReceived = false;
 
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) {
-                        if (!planComplete && !error) {
-                            try {
-                                const directJson = JSON.parse(buffer);
-                                if (directJson && (directJson.mealPlan || directJson.days)) {
-                                    setMealPlan(directJson.mealPlan || []);
-                                    setResults(directJson.results || {});
-                                    setUniqueIngredients(directJson.uniqueIngredients || []);
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        
+                        if (done) {
+                            // Updated end-of-stream handling
+                            if (!terminalEventReceived) {
+                                console.warn('Backend did not send a terminal event (plan:complete or plan:error)');
+                                if (!error) {
+                                    setError('Connection to server was lost during plan generation. Please try again.');
+                                    setGenerationStepKey('error');
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'CRITICAL',
+                                        tag: 'STREAM',
+                                        message: 'Stream ended without terminal event'
+                                    }]);
+                                }
+                            }
+                            break;
+                        }
+                        
+                        const { events, newBuffer } = processSseChunk(value, buffer, decoder);
+                        buffer = newBuffer;
+
+                        for (const event of events) {
+                            // Track terminal events
+                            if (event.isTerminal) {
+                                terminalEventReceived = true;
+                            }
+                            
+                            const eventData = event.data;
+                            
+                            switch (event.eventType) {
+                                // ============================================
+                                // TERMINAL EVENTS (stop processing after these)
+                                // ============================================
+                                
+                                case 'plan:complete':
+                                    planComplete = true;
+                                    
+                                    const {
+                                        mealPlan = [],
+                                        results = {},
+                                        uniqueIngredients = [],
+                                        days = [],
+                                        stats = {},
+                                        macroDebug = [],
+                                        traceId: completionTraceId
+                                    } = eventData;
+                                    
+                                    setMealPlan(mealPlan);
+                                    setResults(results);
+                                    setUniqueIngredients(uniqueIngredients);
+                                    
+                                    if (Object.keys(results).length > 0) {
+                                        recalculateTotalCost(results);
+                                    }
+                                    
+                                    if (macroDebug && macroDebug.length > 0) {
+                                        setMacroDebug(macroDebug);
+                                    }
+                                    
                                     setGenerationStepKey('complete');
                                     setGenerationStatus('Plan generation complete!');
+                                    
                                     setPlanStats([
-                                        { label: 'Days', value: formData.days, color: '#4f46e5' },
-                                        { label: 'Meals', value: (directJson.mealPlan?.length || 0) * (parseInt(formData.eatingOccasions) || 3), color: '#10b981' }
+                                        { label: 'Days', value: stats.totalDays || formData.days, color: '#4f46e5' },
+                                        { label: 'Meals', value: mealPlan.length, color: '#10b981' },
+                                        { label: 'Items', value: uniqueIngredients.length, color: '#f59e0b' }
                                     ]);
-                                    setTimeout(() => setShowSuccessModal(true), 500);
-                                    planComplete = true;
+                                    
+                                    setTimeout(() => {
+                                        setShowSuccessModal(true);
+                                        setTimeout(() => setShowSuccessModal(false), 2500);
+                                    }, 500);
+                                    
                                     break;
-                                }
-                            } catch (e) {}
-                            
-                            console.error("Stream ended unexpectedly before 'plan:complete' event.");
-                            throw new Error("Stream ended unexpectedly. The plan may be incomplete.");
-                        }
-                        break;
-                    }
-                    
-                    const { events, newBuffer } = processSseChunk(value, buffer, decoder);
-                    buffer = newBuffer;
-
-                    for (const event of events) {
-                        const eventData = event.data;
-                        
-                        switch (event.eventType) {
-                            case 'log_message':
-                                setDiagnosticLogs(prev => [...prev, eventData]);
-                                break;
-                            
-                            case 'phase:start':
-                                const phaseMap = {
-                                    'meals': 'planning', 'aggregate': 'planning',
-                                    'market': 'market', 'nutrition': 'market',
-                                    'solver': 'finalizing', 'writer': 'finalizing', 'finalize': 'finalizing'
-                                };
-                                const stepKey = phaseMap[eventData.name];
-                                if (stepKey) {
-                                    setGenerationStepKey(stepKey);
-                                    if(eventData.description) setGenerationStatus(eventData.description);
-                                }
-                                break;
-                            
-                            case 'ingredient:found':
-                                setResults(prev => ({ ...prev, [eventData.key]: eventData.data }));
-                                break;
-
-                            case 'ingredient:failed':
-                                const failedItem = {
-                                    timestamp: new Date().toISOString(),
-                                    originalIngredient: eventData.key,
-                                    error: eventData.reason,
-                                };
-                                setFailedIngredientsHistory(prev => [...prev, failedItem]);
-                                setResults(prev => ({
-                                    ...prev,
-                                    [eventData.key]: {
-                                        originalIngredient: eventData.key,
-                                        normalizedKey: eventData.key,
-                                        source: 'failed',
-                                        error: eventData.reason,
-                                        allProducts: [],
-                                        currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
+                                    
+                                case 'plan:error':
+                                    planComplete = true;
+                                    
+                                    const {
+                                        code: errorCode = 'UNKNOWN_ERROR',
+                                        message: errorMessage = 'An unknown error occurred',
+                                        traceId: errorTraceId,
+                                        stage: errorStage,
+                                        context: errorContext = {}
+                                    } = eventData;
+                                    
+                                    let userFriendlyMessage = errorMessage;
+                                    switch (errorCode) {
+                                        case 'INV_001_BLOCKING':
+                                            userFriendlyMessage = `Nutrition calculation error: ${errorMessage}`;
+                                            if (errorContext.itemKey) {
+                                                userFriendlyMessage += ` (Item: ${errorContext.itemKey})`;
+                                            }
+                                            break;
+                                        case 'INV_001_RESPONSE_BLOCKED':
+                                            userFriendlyMessage = 'Too many items have inconsistent nutrition data. Please try again.';
+                                            break;
+                                        case 'LLM_RETRY_EXHAUSTED':
+                                            userFriendlyMessage = 'Failed to generate meal plan after multiple attempts. Please try again.';
+                                            break;
+                                        case 'VALIDATION_CRITICAL':
+                                            userFriendlyMessage = 'Plan validation failed. Please adjust your requirements.';
+                                            break;
+                                        default:
+                                            userFriendlyMessage = errorMessage || 'Plan generation failed. Please try again.';
                                     }
-                                }));
-                                break;
-
-                            case 'plan:complete':
-                                planComplete = true;
-                                setMealPlan(eventData.mealPlan || []);
-                                setResults(eventData.results || {});
-                                setUniqueIngredients(eventData.uniqueIngredients || []);
-                                recalculateTotalCost(eventData.results || {});
-                                if (eventData.macroDebug) setMacroDebug(eventData.macroDebug);
-                                setGenerationStepKey('complete');
-                                setGenerationStatus('Plan generation complete!');
-                                setPlanStats([
-                                  { label: 'Days', value: formData.days, color: '#4f46e5' },
-                                  { label: 'Meals', value: eventData.mealPlan?.length * (parseInt(formData.eatingOccasions) || 3), color: '#10b981' },
-                                  { label: 'Items', value: eventData.uniqueIngredients?.length || 0, color: '#f59e0b' },
-                                ]);
-                                setTimeout(() => { setShowSuccessModal(true); setTimeout(() => setShowSuccessModal(false), 2500); }, 500);
-                                break;
-
-                            case 'error':
-                                throw new Error(eventData.message || 'Unknown backend error');
+                                    
+                                    setError(userFriendlyMessage);
+                                    setGenerationStepKey('error');
+                                    
+                                    console.error('Plan generation failed:', {
+                                        code: errorCode,
+                                        message: errorMessage,
+                                        traceId: errorTraceId,
+                                        stage: errorStage,
+                                        context: errorContext
+                                    });
+                                    
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'CRITICAL',
+                                        tag: 'PLAN_ERROR',
+                                        message: userFriendlyMessage,
+                                        data: { code: errorCode, traceId: errorTraceId, stage: errorStage }
+                                    }]);
+                                    
+                                    break;
+                                
+                                // ============================================
+                                // PHASE EVENTS
+                                // ============================================
+                                
+                                case 'phase:start':
+                                    const phaseToStepMap = {
+                                        'initialization': 'targets',
+                                        'day_generation': 'planning',
+                                        'nutrition_lookup': 'market',
+                                        'reconciliation': 'finalizing',
+                                        'validation': 'finalizing'
+                                    };
+                                    const phaseStepKey = phaseToStepMap[eventData.name];
+                                    if (phaseStepKey) {
+                                        setGenerationStepKey(phaseStepKey);
+                                    }
+                                    if (eventData.description) {
+                                        setGenerationStatus(eventData.description);
+                                    }
+                                    break;
+                                    
+                                case 'phase:end':
+                                    // Optional logging
+                                    break;
+                                    
+                                case 'phase:error':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'ERROR',
+                                        tag: 'PHASE_ERROR',
+                                        message: `Phase '${eventData.name}' failed: ${eventData.message}`
+                                    }]);
+                                    break;
+                                
+                                // ============================================
+                                // DAY EVENTS
+                                // ============================================
+                                
+                                case 'day:start':
+                                    setGenerationStatus(`Processing Day ${eventData.dayNumber} of ${eventData.totalDays}...`);
+                                    setGenerationStepKey('planning');
+                                    break;
+                                    
+                                case 'day:complete':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'SUCCESS',
+                                        tag: 'DAY_COMPLETE',
+                                        message: `Day ${eventData.dayNumber} completed`
+                                    }]);
+                                    break;
+                                    
+                                case 'day:error':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: eventData.recoverable ? 'WARN' : 'CRITICAL',
+                                        tag: 'DAY_ERROR',
+                                        message: `Day ${eventData.dayNumber}: ${eventData.message}`
+                                    }]);
+                                    if (!eventData.recoverable) {
+                                        setError(`Day ${eventData.dayNumber} failed: ${eventData.message}`);
+                                    }
+                                    break;
+                                
+                                // ============================================
+                                // INGREDIENT EVENTS
+                                // ============================================
+                                
+                                case 'ingredient:found':
+                                    setResults(prev => ({ ...prev, [eventData.key]: eventData.data }));
+                                    break;
+                                    
+                                case 'ingredient:failed':
+                                    setFailedIngredientsHistory(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        originalIngredient: eventData.key,
+                                        error: eventData.reason
+                                    }]);
+                                    setResults(prev => ({
+                                        ...prev,
+                                        [eventData.key]: {
+                                            originalIngredient: eventData.key,
+                                            normalizedKey: eventData.key,
+                                            source: 'failed',
+                                            error: eventData.reason,
+                                            allProducts: [],
+                                            currentSelectionURL: MOCK_PRODUCT_TEMPLATE.url
+                                        }
+                                    }));
+                                    break;
+                                    
+                                case 'ingredient:flagged':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'WARN',
+                                        tag: 'INV-001',
+                                        message: `Item '${eventData.key}' flagged: ${eventData.deviation_pct?.toFixed(1)}% deviation`,
+                                        data: {
+                                            expected: eventData.expected_kcal,
+                                            reported: eventData.reported_kcal
+                                        }
+                                    }]);
+                                    break;
+                                
+                                // ============================================
+                                // INVARIANT EVENTS
+                                // ============================================
+                                
+                                case 'invariant:warning':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'WARN',
+                                        tag: eventData.invariantId || 'INVARIANT',
+                                        message: eventData.message
+                                    }]);
+                                    break;
+                                    
+                                case 'invariant:violation':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'CRITICAL',
+                                        tag: eventData.invariantId || 'INVARIANT',
+                                        message: eventData.message,
+                                        data: eventData.context
+                                    }]);
+                                    break;
+                                
+                                // ============================================
+                                // VALIDATION EVENTS
+                                // ============================================
+                                
+                                case 'validation:warning':
+                                    if (eventData.warnings?.length > 0) {
+                                        setDiagnosticLogs(prev => [...prev, {
+                                            timestamp: new Date().toISOString(),
+                                            level: 'WARN',
+                                            tag: 'VALIDATION',
+                                            message: `${eventData.count} validation warning(s)`,
+                                            data: { warnings: eventData.warnings }
+                                        }]);
+                                    }
+                                    break;
+                                    
+                                case 'validation:failed':
+                                    setDiagnosticLogs(prev => [...prev, {
+                                        timestamp: new Date().toISOString(),
+                                        level: 'CRITICAL',
+                                        tag: 'VALIDATION',
+                                        message: `Critical validation issues: ${eventData.count}`,
+                                        data: { issues: eventData.issues }
+                                    }]);
+                                    break;
+                                
+                                // ============================================
+                                // LOGGING EVENTS
+                                // ============================================
+                                
+                                case 'log_message':
+                                    setDiagnosticLogs(prev => [...prev, eventData]);
+                                    
+                                    // Update step key based on tag
+                                    if (eventData?.tag === 'MARKET_RUN' || eventData?.tag === 'CHECKLIST' || eventData?.tag === 'HTTP') {
+                                        setGenerationStepKey('market');
+                                    } else if (eventData?.tag === 'LLM' || eventData?.tag === 'LLM_PROMPT') {
+                                        setGenerationStepKey('planning');
+                                    }
+                                    break;
+                                
+                                // ============================================
+                                // LEGACY / FALLBACK
+                                // ============================================
+                                
+                                case 'message':
+                                    // Generic message event (backward compatibility)
+                                    if (eventData) {
+                                        setDiagnosticLogs(prev => [...prev, eventData]);
+                                    }
+                                    break;
+                                    
+                                case 'error':
+                                    // Legacy error event
+                                    setError(eventData.message || 'Unknown backend error');
+                                    setGenerationStepKey('error');
+                                    break;
+                                    
+                                default:
+                                    console.warn('Unknown SSE event type:', event.eventType, eventData);
+                                    break;
+                            }
                         }
+                    }
+                } finally {
+                    // ALWAYS release the reader lock
+                    try {
+                        reader.releaseLock();
+                    } catch (e) {
+                        // Reader may already be released, ignore
                     }
                 }
             } catch (err) {
-                if (err.name === 'AbortError') return;
+                if (err.name === 'AbortError') {
+                    console.log('Plan generation was cancelled by user');
+                    setGenerationStatus('Generation cancelled');
+                    setLoading(false);
+                    return;
+                }
+                
                 console.error("Batched plan generation failed critically:", err);
                 setError(`Critical failure: ${err.message}`);
                 setGenerationStepKey('error');
@@ -1039,5 +1325,4 @@ const useAppLogic = ({
 };
 
 export default useAppLogic;
-
 
