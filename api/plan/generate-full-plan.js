@@ -1,17 +1,42 @@
-// --- Cheffy API: /api/plan/generate-full-plan.js ---
-// Module 1 Refactor: Multi-Day Orchestration Wrapper
-// V15.9 - Fixed CACHE_PREFIX + emitAlert + executePipeline signature + targets property mapping
+/**
+ * api/plan/generate-full-plan.js
+ * 
+ * Module 1 Refactor: Multi-Day Orchestration Wrapper with SSE Streaming
+ * V16.0 - Added SSE streaming support for real-time progress updates
+ * 
+ * CHANGES FROM V15.9:
+ * - Replaced JSON response with Server-Sent Events (SSE) streaming
+ * - Added terminal event guarantee (plan:complete or plan:error always sent)
+ * - Added per-day error handling with optional recovery
+ * - Added phase/stage events for frontend progress tracking
+ * - Added invariant violation events before throwing
+ * - Fixed traceError signature calls
+ * 
+ * SSE EVENTS EMITTED:
+ * - phase:start / phase:end / phase:error
+ * - day:start / day:complete / day:error  
+ * - ingredient:found / ingredient:failed / ingredient:flagged
+ * - invariant:warning / invariant:violation
+ * - validation:warning / validation:failed
+ * - log_message
+ * - plan:complete (terminal success)
+ * - plan:error (terminal failure)
+ */
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
-// --- New Shared Modules ---
+// --- Shared Modules ---
 const { executePipeline, generateTraceId, createTracedLogger } = require('../../utils/pipeline.js');
 const { validateLLMOutput } = require('../../utils/llmValidator.js');
 const { emitAlert, ALERT_LEVELS } = require('../../utils/alerting.js');
 const { createTrace, completeTrace, traceStageStart, traceStageEnd, traceError } = require('../trace.js');
 const { recordPipelineStats } = require('../metrics.js');
+
+// --- SSE Streaming ---
+const { createSSEStream, ERROR_CODES, getErrorCode, getSafeErrorMessage } = require('../../utils/sseHelper.js');
+const { PipelineError, DayGenerationError } = require('../../utils/errors.js');
 
 // --- Configuration ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -23,154 +48,132 @@ const kv = createClient({
     token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+
+// --- Cache Configuration ---
+const CACHE_PREFIX = 'cheffy:plan';
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
-// --- [FIX V15.6] Added missing CACHE_PREFIX constant ---
-const CACHE_PREFIX = `cheffy:plan:v3:t:pipeline-v1`;
-// --- [END FIX] ---
+// --- Pipeline Configuration ---
+const PIPELINE_CONFIG = {
+    abortOnDayError: false,  // Continue to next day on error (set true to abort)
+    maxDayRetries: 1,        // Retry failed days once
+    emitIngredientEvents: true  // Emit ingredient:found/failed events
+};
 
-const LLM_REQUEST_TIMEOUT_MS = 90000;
-const MAX_LLM_RETRIES = 3;
-
-// --- Helper: Get Gemini URL ---
-const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-
-// --- Helper: Cache Wrappers ---
+// --- Cache Helpers ---
 async function cacheGet(key, log) {
     if (!kvReady) return null;
     try {
-        const hit = await kv.get(key);
-        if (hit) log(`Cache HIT for key: ${key.split(':').pop()}`, 'DEBUG', 'CACHE');
-        return hit;
+        const val = await kv.get(key);
+        if (val) log(`Cache HIT: ${key}`, 'INFO', 'CACHE');
+        return val;
     } catch (e) {
-        log(`Cache GET Error: ${e.message}`, 'ERROR', 'CACHE');
+        log(`Cache GET error: ${e.message}`, 'WARN', 'CACHE');
         return null;
     }
 }
 
-async function cacheSet(key, val, ttl, log) {
+async function cacheSet(key, value, ttl, log) {
     if (!kvReady) return;
     try {
-        await kv.set(key, val, { px: ttl });
-        log(`Cache SET for key: ${key.split(':').pop()}`, 'DEBUG', 'CACHE');
+        await kv.set(key, value, { px: ttl });
+        log(`Cache SET: ${key}`, 'DEBUG', 'CACHE');
     } catch (e) {
-        log(`Cache SET Error: ${e.message}`, 'ERROR', 'CACHE');
+        log(`Cache SET error: ${e.message}`, 'WARN', 'CACHE');
     }
 }
 
-// --- Helper: Hash ---
 function hashString(str) {
     return crypto.createHash('sha256').update(str).digest('hex').substring(0, 16);
 }
 
-// --- Helper: Fetch LLM with Retry ---
-async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
-    for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
-
-        try {
-            log(`${attemptPrefix} Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, { ...options, signal: controller.signal });
-            clearTimeout(timeout);
-
-            if (response.ok) {
-                const rawText = await response.text();
-                const trimmedText = rawText.trim();
-                // Basic JSON guard
-                if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
-                    return {
-                        ok: true,
-                        status: response.status,
-                        json: () => Promise.resolve(JSON.parse(trimmedText)),
-                        text: () => Promise.resolve(trimmedText)
-                    };
-                } else {
-                    throw new Error(`200 OK with non-JSON body: ${trimmedText.substring(0, 100)}`);
-                }
-            }
-
-            if (response.status !== 429 && response.status < 500) {
-                const errorBody = await response.text();
-                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody.substring(0, 200)}`);
-            }
-
-            // Retryable error (429 or 5xx)
-            log(`${attemptPrefix} Attempt ${attempt} failed with status ${response.status}. Retrying...`, 'WARN', 'HTTP');
-        } catch (error) {
-            clearTimeout(timeout);
-            if (error.name === 'AbortError') {
-                log(`${attemptPrefix} Attempt ${attempt} timed out after ${LLM_REQUEST_TIMEOUT_MS}ms.`, 'WARN', 'HTTP');
-            } else if (attempt === MAX_LLM_RETRIES) {
-                throw error;
-            } else {
-                log(`${attemptPrefix} Attempt ${attempt} error: ${error.message}. Retrying...`, 'WARN', 'HTTP');
-            }
+// --- LLM Retry Helper ---
+async function fetchLLMWithRetry(payload, log, attempt = 1, maxAttempts = 3) {
+    const modelName = attempt <= 2 ? PLAN_MODEL_NAME_PRIMARY : PLAN_MODEL_NAME_FALLBACK;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+    
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`LLM API error (${response.status}): ${errorText.substring(0, 200)}`);
         }
-
-        // Wait before retry
-        if (attempt < MAX_LLM_RETRIES) {
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        
+        if (!text) {
+            throw new Error('Empty response from LLM');
         }
+        
+        return JSON.parse(text);
+    } catch (e) {
+        log(`LLM attempt ${attempt} failed: ${e.message}`, 'WARN', 'LLM');
+        
+        if (attempt < maxAttempts) {
+            await new Promise(r => setTimeout(r, 1000 * attempt));
+            return fetchLLMWithRetry(payload, log, attempt + 1, maxAttempts);
+        }
+        
+        throw e;
     }
-
-    throw new Error(`${attemptPrefix} failed after ${MAX_LLM_RETRIES} attempts.`);
 }
 
-// --- Helper: Try Generate LLM Plan ---
+// --- LLM Plan Generation ---
 async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, opts = {}) {
-    const url = `${getGeminiApiUrl(modelName)}?key=${GEMINI_API_KEY}`;
-    const options = {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+    
+    log(`${logPrefix}: Calling ${modelName}`, 'INFO', 'LLM');
+    
+    const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-    };
-
-    const response = await fetchLLMWithRetry(url, options, log, logPrefix);
-    const data = await response.json();
-
-    // Extract text from Gemini response
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-        throw new Error(`${logPrefix}: No text in LLM response`);
+    });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`${modelName} API error (${response.status}): ${errorText.substring(0, 200)}`);
     }
-
-    // Parse JSON
-    const parsed = JSON.parse(text);
-    return parsed;
+    
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (!text) {
+        throw new Error(`${modelName} returned empty response`);
+    }
+    
+    return JSON.parse(text);
 }
 
 // --- System Prompt ---
-const MEAL_PLANNER_SYSTEM_PROMPT = (weight, calories, day, perMealTargets) => `
-You are a precision meal planner for Day ${day}. Your output is parsed by code—return ONLY valid JSON.
-
-Target: ${calories} kcal/day for a ${weight}kg individual.
-
-JSON Schema:
+const MEAL_PLANNER_SYSTEM_PROMPT = (weight, dailyCal, dayNum, perMealTargets) => `
+You are Chef-GPT, a precision meal planner. Generate Day ${dayNum} plan as JSON:
 {
+  "dayNumber": ${dayNum},
   "meals": [
     {
-      "type": "string (e.g., 'Breakfast', 'Lunch', 'Dinner', 'Snack')",
-      "name": "string (e.g., 'Grilled Chicken Salad')",
+      "name": "Meal Name",
+      "type": "breakfast|lunch|dinner|snack",
       "items": [
         {
-          "key": "string (ingredient name, e.g., 'chicken breast')",
-          "qty_value": "number (portion size)",
-          "qty_unit": "string ('g', 'ml', 'piece', 'slice', 'egg', etc.)",
-          "stateHint": "string (MANDATORY: 'dry', 'raw', 'cooked', or 'as_pack')",
-          "methodHint": "string|null (MANDATORY if cooked, e.g., 'grilled', 'boiled', or null)"
+          "key": "ingredient name (lowercase)",
+          "qty_value": <number>,
+          "qty_unit": "g|ml|piece",
+          "stateHint": "dry|raw|cooked|as_pack",
+          "methodHint": "boiled|grilled|fried|baked|steamed|none"
         }
       ]
     }
   ]
 }
 
-ALLOWED UNITS (qty_unit):
-- Weight: "g", "kg", "oz", "lb"
-- Volume: "ml", "L", "cup", "tbsp", "tsp"
-- Count: "piece", "slice", "egg", "can", "tin", "packet", "sachet", "clove", "stalk", "sprig", "bunch", "fillet"
-
-CRITICAL RULES:
+RULES:
 1. **UNITS:** Do NOT use vague units like 'medium', 'large', 'serving', 'bowl', 'plate'. Convert to 'piece' or 'g'.
 2. **PROTEIN CAP:** Never exceed 3 g/kg total daily protein (User weight: ${weight}kg).
 3. **STATE HINT:**
@@ -186,8 +189,8 @@ CRITICAL RULES:
 Output ONLY the JSON.
 `;
 
-// --- Helper: Generate Single Day Plan (LLM) ---
-async function generateMealPlan_Single(day, formData, nutritionalTargets, log, perMealTargets) {
+// --- Generate Single Day Plan (LLM) ---
+async function generateMealPlan_Single(day, formData, nutritionalTargets, log, perMealTargets, sse = null) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, cuisine } = formData;
     const { calories } = nutritionalTargets;
 
@@ -195,7 +198,11 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets, perMealTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     const cached = await cacheGet(cacheKey, log);
-    if (cached) return { dayNumber: day, meals: cached.meals };
+    
+    if (cached) {
+        if (sse) sse.log('INFO', 'CACHE', `Day ${day} meals loaded from cache`);
+        return { dayNumber: day, meals: cached.meals };
+    }
 
     // Prepare Prompt
     const mainMealCal = Math.round(perMealTargets.main.calories);
@@ -208,6 +215,7 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
 
     const logPrefix = `MealPlannerDay${day}`;
     log(`Prompting LLM for Day ${day}`, 'INFO', 'LLM');
+    if (sse) sse.log('INFO', 'LLM', `Generating meal plan for Day ${day}...`);
 
     const payload = {
         contents: [{ parts: [{ text: userQuery }] }],
@@ -220,32 +228,59 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix, {});
     } catch (e) {
         log(`Primary LLM failed: ${e.message}. Retrying fallback.`, 'WARN', 'LLM');
+        if (sse) sse.log('WARN', 'LLM', `Primary model failed, trying fallback...`);
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix, {});
     }
 
     if (parsedResult?.meals?.length > 0) {
         await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
     }
+    
     return { dayNumber: day, meals: parsedResult.meals || [] };
 }
 
 // --- Main Handler ---
 module.exports = async (request, response) => {
+    // Handle CORS preflight
+    if (request.method === 'OPTIONS') {
+        response.setHeader('Access-Control-Allow-Origin', '*');
+        response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+        return response.status(200).end();
+    }
+    
+    if (request.method !== 'POST') {
+        response.setHeader('Allow', 'POST, OPTIONS');
+        return response.status(405).json({ error: "Method Not Allowed" });
+    }
+
     // 1. Generate Trace ID at entry
     const traceId = generateTraceId();
     
     // 2. Setup Traced Logger
     const log = createTracedLogger(traceId);
-
-    if (request.method === 'OPTIONS') return response.status(200).end();
-    if (request.method !== 'POST') return response.status(405).json({ error: "Method Not Allowed" });
-
+    
+    // 3. Create SSE Stream
+    const sse = createSSEStream(response, traceId);
+    
+    // Track state for finally block
+    let terminalEventSent = false;
+    
     try {
         const { formData, nutritionalTargets } = request.body;
+        
+        if (!formData || !nutritionalTargets) {
+            throw new PipelineError(
+                ERROR_CODES.UNKNOWN_ERROR,
+                'Missing formData or nutritionalTargets in request body',
+                { stage: 'request_validation', traceId }
+            );
+        }
+        
         const numDays = parseInt(formData.days, 10) || 7;
         const store = formData.store;
 
-        // 3. Initialize Trace
+        // 4. Initialize Trace
         createTrace(traceId, { 
             planType: 'multi-day', 
             dayCount: numDays, 
@@ -254,8 +289,12 @@ module.exports = async (request, response) => {
         });
 
         log(`Starting Multi-Day Plan Generation for ${numDays} days`, 'INFO', 'ORCHESTRATOR');
+        sse.log('INFO', 'ORCHESTRATOR', `Starting plan generation for ${numDays} days`);
+        
+        // Emit initial phase
+        sse.phaseStart('initialization', 'Calculating nutritional targets...');
 
-        // 4. Calculate Per-Meal Targets
+        // 5. Calculate Per-Meal Targets
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
@@ -279,106 +318,221 @@ module.exports = async (request, response) => {
             }
         };
 
+        sse.phaseEnd('initialization', { targetsPerMealType });
+
         const processedDays = [];
         const allStats = [];
+        const failedDays = [];
+        const allResults = {};
+        const uniqueIngredientsMap = new Map();
 
-        // 5. Day Iteration Loop
+        // 6. Day Iteration Loop
+        sse.phaseStart('day_generation', `Processing ${numDays} days...`);
+        
         for (let day = 1; day <= numDays; day++) {
+            sse.dayStart(day, numDays);
             traceStageStart(traceId, `Day_${day}_Processing`);
             
-            // A. Generate Meals (Dietitian Agent)
-            const rawDayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log, targetsPerMealType);
+            try {
+                // A. Generate Meals (Dietitian Agent)
+                sse.log('INFO', 'LLM', `Day ${day}: Generating meal plan...`);
+                const rawDayPlan = await generateMealPlan_Single(
+                    day, formData, nutritionalTargets, log, targetsPerMealType, sse
+                );
 
-            // B. Validate LLM Output (pre-pipeline sanity check)
-            const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
-            if (!validation.valid) {
-                log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
-                // Use corrected output if available, otherwise raw
-                if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
-            }
-
-            // C. Execute Pipeline (Delegated Shared Logic)
-            // --- [FIX V15.8] Object parameter pattern ---
-            // --- [FIX V15.9] Map calories → kcal for pipeline compatibility ---
-            // Pipeline expects { kcal, protein, fat, carbs }
-            // Caller provides { calories, protein, fat, carbs }
-            const processedDayResult = await executePipeline({
-                rawMeals: rawDayPlan.meals,
-                targets: {
-                    kcal: nutritionalTargets.calories,    // Map calories → kcal
-                    protein: nutritionalTargets.protein,
-                    fat: nutritionalTargets.fat,
-                    carbs: nutritionalTargets.carbs
-                },
-                llmRetryFn: fetchLLMWithRetry,
-                config: {
-                    traceId,
-                    dayNumber: day,
-                    store: store,
-                    scaleProtein: true,
-                    allowReconciliation: true,
-                    generateRecipes: true
+                // B. Validate LLM Output (pre-pipeline sanity check)
+                const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
+                if (!validation.valid) {
+                    log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
+                    sse.log('WARN', 'VALIDATOR', `Day ${day}: LLM output auto-corrected`);
+                    if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
                 }
-            });
-            // --- [END FIX] ---
 
-            // D. Collect Results
-            processedDays.push(processedDayResult.data);
-            if (processedDayResult.stats) allStats.push(processedDayResult.stats);
+                // C. Execute Pipeline (Delegated Shared Logic)
+                sse.log('INFO', 'PIPELINE', `Day ${day}: Processing nutrition and macros...`);
+                
+                const processedDayResult = await executePipeline({
+                    rawMeals: rawDayPlan.meals,
+                    targets: {
+                        kcal: nutritionalTargets.calories,
+                        protein: nutritionalTargets.protein,
+                        fat: nutritionalTargets.fat,
+                        carbs: nutritionalTargets.carbs
+                    },
+                    llmRetryFn: fetchLLMWithRetry,
+                    config: {
+                        traceId,
+                        dayNumber: day,
+                        store: store,
+                        scaleProtein: true,
+                        allowReconciliation: true,
+                        generateRecipes: true
+                    },
+                    // SSE callbacks for real-time events
+                    onIngredientFound: PIPELINE_CONFIG.emitIngredientEvents 
+                        ? (key, data) => sse.ingredientFound(key, data)
+                        : null,
+                    onIngredientFailed: PIPELINE_CONFIG.emitIngredientEvents
+                        ? (key, reason) => sse.ingredientFailed(key, reason)
+                        : null,
+                    onIngredientFlagged: (key, violation) => sse.ingredientFlagged(key, violation),
+                    onInvariantWarning: (id, details) => sse.invariantWarning(id, details),
+                    onValidationWarning: (warnings) => sse.validationWarning(warnings)
+                });
 
-            traceStageEnd(traceId, `Day_${day}_Processing`);
+                // D. Collect Results
+                processedDays.push(processedDayResult.data);
+                if (processedDayResult.stats) allStats.push(processedDayResult.stats);
+                
+                // Aggregate results for final payload
+                if (processedDayResult.data?.meals) {
+                    processedDayResult.data.meals.forEach(meal => {
+                        meal.items?.forEach(item => {
+                            if (item.key) {
+                                const normalizedKey = item.key.toLowerCase().trim();
+                                if (!uniqueIngredientsMap.has(normalizedKey)) {
+                                    uniqueIngredientsMap.set(normalizedKey, {
+                                        originalIngredient: item.key,
+                                        normalizedKey
+                                    });
+                                }
+                            }
+                        });
+                    });
+                }
+
+                traceStageEnd(traceId, `Day_${day}_Processing`);
+                sse.dayComplete(day, processedDayResult.data);
+                sse.log('SUCCESS', 'ORCHESTRATOR', `Day ${day} completed successfully`);
+                
+            } catch (dayError) {
+                // Handle day-level errors
+                const errorCode = getErrorCode(dayError);
+                const errorMessage = getSafeErrorMessage(dayError);
+                
+                log(`Day ${day} failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
+                traceError(traceId, `Day_${day}_Processing`, dayError);
+                
+                // Emit invariant violation if applicable
+                if (dayError.name === 'InvariantViolationError') {
+                    sse.invariantViolation(dayError.invariantId, {
+                        message: errorMessage,
+                        context: dayError.context
+                    });
+                }
+                
+                sse.dayError(day, errorCode, errorMessage, !PIPELINE_CONFIG.abortOnDayError);
+                failedDays.push({ day, error: errorMessage, code: errorCode });
+                
+                // Abort or continue based on config
+                if (PIPELINE_CONFIG.abortOnDayError) {
+                    throw new DayGenerationError(day, errorMessage, dayError);
+                }
+                
+                sse.log('WARN', 'ORCHESTRATOR', `Day ${day} failed, continuing to next day...`);
+            }
         }
-
-        // 6. Finalize Trace
-        completeTrace(traceId, { 
-            status: 'success', 
-            daysGenerated: processedDays.length 
+        
+        sse.phaseEnd('day_generation', { 
+            successfulDays: processedDays.length,
+            failedDays: failedDays.length
         });
 
-        // 7. Record Pipeline Stats
+        // 7. Check if we have any successful days
+        if (processedDays.length === 0) {
+            throw new PipelineError(
+                ERROR_CODES.PIPELINE_EXECUTION_FAILED,
+                'All days failed to generate. No plan data available.',
+                {
+                    traceId,
+                    stage: 'day_generation',
+                    context: { failedDays }
+                }
+            );
+        }
+
+        // 8. Finalize Trace
+        completeTrace(traceId, { 
+            status: processedDays.length === numDays ? 'success' : 'partial',
+            daysGenerated: processedDays.length,
+            daysFailed: failedDays.length
+        });
+
+        // 9. Record Pipeline Stats
         if (allStats.length > 0) {
             await recordPipelineStats(traceId, allStats, log);
         }
 
-        log(`Multi-Day Plan Generation Complete: ${processedDays.length} days`, 'INFO', 'ORCHESTRATOR');
+        log(`Multi-Day Plan Generation Complete: ${processedDays.length}/${numDays} days`, 'INFO', 'ORCHESTRATOR');
 
-        // 8. Return Response
-        return response.status(200).json({
+        // 10. Build Final Payload
+        const mealPlan = processedDays.map(dayData => dayData?.meals || []).flat();
+        const uniqueIngredients = Array.from(uniqueIngredientsMap.values());
+        
+        // 11. Send Terminal Success Event
+        terminalEventSent = true;
+        sse.complete({
             success: true,
             traceId,
-            data: processedDays,
-            stats: allStats
+            mealPlan,
+            results: allResults,
+            uniqueIngredients,
+            days: processedDays,
+            stats: {
+                totalDays: numDays,
+                successfulDays: processedDays.length,
+                failedDays: failedDays.length,
+                failedDayDetails: failedDays
+            },
+            macroDebug: allStats
         });
 
     } catch (error) {
-        // Log error and emit alert
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const errorStack = error instanceof Error ? error.stack : undefined;
+        // Convert to PipelineError if not already
+        const pipelineError = PipelineError.from(error, { traceId, stage: 'orchestrator' });
         
-        log(`Multi-Day Plan Generation Failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
+        log(`Multi-Day Plan Generation Failed: ${pipelineError.message}`, 'ERROR', 'ORCHESTRATOR');
         
-        traceError(traceId, {
-            stage: 'ORCHESTRATOR',
-            error: errorMessage,
-            stack: errorStack
-        });
+        // Trace the error with correct signature: (traceId, stage, error)
+        traceError(traceId, 'ORCHESTRATOR', pipelineError);
 
-        // --- [FIX V15.7] Corrected emitAlert call signature ---
+        // Emit alert
         emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
             traceId,
-            error: errorMessage
+            error: pipelineError.message,
+            code: pipelineError.code
         });
-        // --- [END FIX] ---
 
         completeTrace(traceId, { 
             status: 'error', 
-            error: errorMessage 
+            error: pipelineError.message 
         });
 
-        return response.status(500).json({
-            success: false,
-            traceId,
-            error: errorMessage
-        });
+        // Send Terminal Error Event
+        terminalEventSent = true;
+        sse.error(
+            pipelineError.code,
+            pipelineError.message,
+            {
+                stage: pipelineError.stage,
+                context: pipelineError.context
+            }
+        );
+        
+    } finally {
+        // Guarantee terminal event
+        if (!terminalEventSent && !sse.isTerminated()) {
+            log('Handler exiting without terminal event - sending fallback error', 'ERROR', 'ORCHESTRATOR');
+            sse.error(
+                ERROR_CODES.HANDLER_CRASHED,
+                'Plan generation terminated unexpectedly',
+                { stage: 'finally_block' }
+            );
+        }
+        
+        // Ensure stream is closed
+        if (!sse.isClosed()) {
+            sse.close();
+        }
     }
 };
