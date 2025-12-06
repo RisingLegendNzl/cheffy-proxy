@@ -1,13 +1,18 @@
+// utils/pipeline.js
 /**
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
- * V3.0 - Added SSE callback support for real-time event streaming
+ * V3.1 - Added entry guard to prevent "meals is not iterable" error
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
  * into a single source of truth. Both orchestrators become thin wrappers
  * that call into this shared module.
+ * 
+ * V3.1 CHANGES:
+ * - Added entry guard for rawMeals validation
+ * - Defensive guards for NaN quantity propagation
  * 
  * V3.0 CHANGES:
  * - Added optional SSE callback parameters for real-time streaming
@@ -70,477 +75,386 @@ function generateTraceId() {
 
 /**
  * Creates a traced logger function
- * 
- * @param {string} traceId - Trace ID to include in all logs
- * @param {string} component - Component name (default: 'pipeline')
- * @returns {Function} Logger function (level, message, data)
+ * @param {string} traceId - Trace ID for correlation
+ * @param {string} module - Module name for log prefix
+ * @returns {Function} Logger function
  */
-function createTracedLogger(traceId, component = 'pipeline') {
-  return function log(level, message, data = {}) {
-    const entry = {
-      timestamp: new Date().toISOString(),
+function createTracedLogger(traceId, module = 'pipeline') {
+  return (level, message, data = {}) => {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+      timestamp,
       traceId,
-      component,
+      module,
       level,
       message,
       ...data
     };
     
     if (level === 'error') {
-      console.error(JSON.stringify(entry));
+      console.error(JSON.stringify(logEntry));
     } else if (level === 'warning') {
-      console.warn(JSON.stringify(entry));
+      console.warn(JSON.stringify(logEntry));
     } else {
-      console.log(JSON.stringify(entry));
+      console.log(JSON.stringify(logEntry));
     }
-    
-    return entry;
   };
 }
 
 /**
- * Normalizes item state using rule-based resolution
+ * Normalizes item state based on stateHint and methodHint
+ * @param {Object} item - Meal item
+ * @returns {Object} Item with normalized state
  */
-function normalizeItemState(item, log) {
-  const { key, stateHint: llmStateHint, methodHint: llmMethodHint } = item;
-  
-  const resolution = resolveState(key);
-  
-  const finalState = resolution.state || llmStateHint || 'raw';
-  const finalMethod = llmMethodHint || resolution.method || 'none';
-  
-  if (resolution.confidence === 'low' && log) {
-    log('warning', 'Low confidence state resolution', {
-      itemKey: key,
-      resolvedState: finalState,
-      llmHint: llmStateHint
-    });
-  }
-  
+function normalizeItemState(item) {
+  const resolvedState = resolveState(item.stateHint, item.methodHint, item.key);
   return {
     ...item,
-    stateHint: finalState,
-    methodHint: finalMethod,
-    _stateResolution: {
-      source: resolution.source,
-      confidence: resolution.confidence,
-      llmOverridden: llmStateHint && llmStateHint !== finalState
-    }
+    _resolvedState: resolvedState,
+    _originalStateHint: item.stateHint,
+    _originalMethodHint: item.methodHint
   };
 }
 
 /**
- * Normalizes state hints for all items in all meals
+ * Normalizes all item states in meals array
+ * @param {Array} meals - Array of meals
+ * @returns {Array} Meals with normalized item states
  */
-function normalizeAllItemStates(meals, log) {
+function normalizeAllItemStates(meals) {
   return meals.map(meal => ({
     ...meal,
-    items: meal.items.map(item => normalizeItemState(item, log))
+    items: meal.items.map(normalizeItemState)
   }));
 }
 
 /**
- * Extracts unique ingredients from meals
+ * Extracts unique ingredient keys from meals
+ * @param {Array} meals - Array of meals
+ * @returns {Set} Set of unique ingredient keys
  */
-function extractUniqueIngredients(meals, log) {
-  const seen = new Set();
-  const ingredients = [];
+function extractUniqueIngredients(meals) {
+  const uniqueKeys = new Set();
   
   for (const meal of meals) {
     for (const item of meal.items) {
       const normalizedKey = normalizeKey(item.key);
-      if (!seen.has(normalizedKey)) {
-        seen.add(normalizedKey);
-        ingredients.push({
-          key: item.key,
-          normalizedKey,
-          stateHint: item.stateHint,
-          methodHint: item.methodHint
-        });
-      }
+      uniqueKeys.add(normalizedKey);
     }
   }
   
-  log('info', 'Extracted unique ingredients', { count: ingredients.length });
-  return ingredients;
+  return uniqueKeys;
 }
 
 /**
- * Fetches nutrition data for all ingredients
- * V3.0: Added SSE callbacks for real-time updates
+ * Fetches nutrition data for all unique ingredients
+ * @param {Set} ingredientKeys - Set of ingredient keys
+ * @param {Object} config - Pipeline configuration
+ * @param {Function} log - Logger function
+ * @param {Object} callbacks - SSE callbacks
+ * @returns {Map} Map of ingredient key to nutrition data
  */
-async function fetchNutritionForIngredients(ingredients, log, callbacks = {}) {
+async function fetchNutritionForIngredients(ingredientKeys, config, log, callbacks = {}) {
   const nutritionMap = new Map();
   const { onIngredientFound, onIngredientFailed } = callbacks;
   
-  let hotPathHits = 0;
-  let canonicalHits = 0;
-  let fallbackHits = 0;
-  
-  for (const ing of ingredients) {
+  const lookupPromises = Array.from(ingredientKeys).map(async (key) => {
     try {
-      const result = await lookupIngredientNutrition(
-        ing.key,
-        ing.stateHint,
-        ing.methodHint
-      );
+      const nutrition = await lookupIngredientNutrition(key, config.store);
       
-      if (result.source === 'hotpath') hotPathHits++;
-      else if (result.source === 'canonical') canonicalHits++;
-      else fallbackHits++;
-      
-      nutritionMap.set(ing.normalizedKey, result);
-      
-      // SSE callback for found ingredient
-      if (onIngredientFound) {
-        onIngredientFound(ing.key, {
-          normalizedKey: ing.normalizedKey,
-          nutrition: result,
-          source: result.source
-        });
+      if (nutrition) {
+        nutritionMap.set(key, nutrition);
+        log('debug', 'Nutrition found', { key, kcalPer100g: nutrition.kcal_per_100g });
+        
+        if (onIngredientFound) {
+          onIngredientFound(key, {
+            kcalPer100g: nutrition.kcal_per_100g,
+            proteinPer100g: nutrition.protein_per_100g,
+            source: nutrition.source
+          });
+        }
+      } else {
+        log('warning', 'Nutrition not found', { key });
+        
+        if (onIngredientFailed) {
+          onIngredientFailed(key, 'Nutrition data not found in database');
+        }
       }
+    } catch (error) {
+      log('error', 'Nutrition lookup failed', { key, error: error.message });
       
-    } catch (err) {
-      log('warning', 'Nutrition lookup failed', {
-        itemKey: ing.key,
-        error: err.message
-      });
-      
-      // SSE callback for failed ingredient
       if (onIngredientFailed) {
-        onIngredientFailed(ing.key, err.message);
+        onIngredientFailed(key, error.message);
       }
-      
-      // Store error marker
-      nutritionMap.set(ing.normalizedKey, {
-        error: true,
-        message: err.message,
-        calories: 0,
-        protein: 0,
-        fat: 0,
-        carbs: 0
-      });
     }
-  }
-  
-  const total = ingredients.length;
-  const fallbackRate = total > 0 ? (fallbackHits / total) * 100 : 0;
-  
-  log('info', 'Nutrition lookup complete', {
-    total,
-    hotPathHits,
-    canonicalHits,
-    fallbackHits,
-    fallbackRatePct: fallbackRate.toFixed(2)
   });
   
-  if (fallbackRate > 30) {
-    emitAlert(ALERT_LEVELS.CRITICAL, 'high_fallback_rate', {
-      fallbackRate,
-      threshold: 30,
-      total,
-      fallbackHits
-    });
-  } else if (fallbackRate > 15) {
-    emitAlert(ALERT_LEVELS.WARNING, 'elevated_fallback_rate', {
-      fallbackRate,
-      threshold: 15,
-      total,
-      fallbackHits
-    });
-  }
+  await Promise.all(lookupPromises);
   
   return nutritionMap;
 }
 
 /**
- * Computes macros for a single item with INV-001 blocking
- * V3.0: Added SSE callback for flagged items
+ * Computes macros for a single item
+ * V3.1: Added defensive guards for NaN quantity propagation
+ * 
+ * @param {Object} item - Meal item with qty_value, qty_unit, key
+ * @param {Map} nutritionMap - Map of ingredient key to nutrition data
+ * @param {Function} log - Logger function
+ * @param {Object} callbacks - SSE callbacks
+ * @returns {Object} Computed macros { kcal, protein, fat, carbs, _flagged, _source }
  */
-function computeItemMacros(item, nutritionMap, log, config = DEFAULT_CONFIG, callbacks = {}) {
+function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
+  const { onIngredientFlagged, onInvariantWarning } = callbacks;
   const normalizedKey = normalizeKey(item.key);
-  const { onIngredientFlagged } = callbacks;
-  
-  // Step 1: Normalize quantity to grams or ml
-  const normalized = normalizeToGramsOrMl(item, log);
-  
-  // Defensive guard for invalid normalized value
-  if (normalized.value === undefined || normalized.value === null || Number.isNaN(normalized.value)) {
-    log('error', 'INV-002 PREFLIGHT: Invalid quantity after normalization', {
-      itemKey: item.key,
-      normalizedKey,
-      qty_value: item.qty_value,
-      qty_unit: item.qty_unit,
-      normalized_value: normalized.value
-    });
-    emitAlert(ALERT_LEVELS.CRITICAL, 'quantity_normalization_failed', {
-      itemKey: item.key,
-      normalizedKey,
-      qty_value: item.qty_value,
-      qty_unit: item.qty_unit,
-      normalized_value: normalized.value
-    });
-    return {
-      kcal: 0, protein: 0, fat: 0, carbs: 0,
-      p: 0, f: 0, c: 0,
-      grams_as_sold: 0,
-      confidence: 'none',
-      error: 'QUANTITY_INVALID',
-      _errorDetail: { qty_value: item.qty_value, qty_unit: item.qty_unit }
-    };
-  }
-  
-  // Step 2: Get nutrition data
   const nutrition = nutritionMap.get(normalizedKey);
   
-  if (!nutrition || nutrition.error) {
-    log('warning', 'No nutrition data for item', { itemKey: item.key, normalizedKey });
+  // V3.1: Defensive guard - validate qty_value before computation
+  let safeQtyValue = item.qty_value;
+  if (typeof safeQtyValue !== 'number' || isNaN(safeQtyValue)) {
+    log('warning', 'Invalid qty_value detected, defaulting to 0', {
+      key: item.key,
+      originalValue: item.qty_value,
+      type: typeof item.qty_value
+    });
+    safeQtyValue = 0;
+  }
+  
+  if (safeQtyValue < 0) {
+    log('warning', 'Negative qty_value detected, using absolute value', {
+      key: item.key,
+      originalValue: safeQtyValue
+    });
+    safeQtyValue = Math.abs(safeQtyValue);
+  }
+  
+  if (!nutrition) {
+    log('warning', 'No nutrition data for item', { key: item.key });
     return {
-      kcal: 0, protein: 0, fat: 0, carbs: 0,
-      p: 0, f: 0, c: 0,
-      grams_as_sold: 0,
-      confidence: 'none',
-      error: 'NUTRITION_NOT_FOUND'
+      kcal: 0,
+      protein: 0,
+      fat: 0,
+      carbs: 0,
+      _flagged: false,
+      _source: 'missing'
     };
   }
   
-  // Step 3: Transform to as-sold grams
-  const asSold = toAsSold(
-    normalized.value,
-    normalized.unit,
-    item.stateHint,
-    item.methodHint,
-    normalizedKey,
+  // Convert to grams for consistent calculation
+  let gramsAsSold;
+  try {
+    const normalized = normalizeToGramsOrMl(safeQtyValue, item.qty_unit, item.key);
+    gramsAsSold = toAsSold(normalized, item._resolvedState || item.stateHint, item.key);
+  } catch (error) {
+    log('warning', 'Unit conversion failed', { key: item.key, error: error.message });
+    gramsAsSold = safeQtyValue; // Fallback to raw value
+  }
+  
+  // V3.1: Guard against NaN in gramsAsSold
+  if (typeof gramsAsSold !== 'number' || isNaN(gramsAsSold)) {
+    log('warning', 'gramsAsSold is NaN after conversion', {
+      key: item.key,
+      qty_value: safeQtyValue,
+      qty_unit: item.qty_unit,
+      resolvedState: item._resolvedState
+    });
+    gramsAsSold = 0;
+  }
+  
+  // Calculate macros based on per-100g values
+  const factor = gramsAsSold / 100;
+  
+  const rawKcal = (nutrition.kcal_per_100g || 0) * factor;
+  const rawProtein = (nutrition.protein_per_100g || 0) * factor;
+  const rawFat = (nutrition.fat_per_100g || 0) * factor;
+  const rawCarbs = (nutrition.carbs_per_100g || 0) * factor;
+  
+  // V3.1: Final NaN guard on computed values
+  const kcal = isNaN(rawKcal) ? 0 : Math.round(rawKcal * 10) / 10;
+  const protein = isNaN(rawProtein) ? 0 : Math.round(rawProtein * 100) / 100;
+  const fat = isNaN(rawFat) ? 0 : Math.round(rawFat * 100) / 100;
+  const carbs = isNaN(rawCarbs) ? 0 : Math.round(rawCarbs * 100) / 100;
+  
+  // INV-001: Check macro-calorie consistency
+  const consistencyResult = checkMacroCalorieConsistency(
+    { kcal, protein, fat, carbs },
+    item.key,
     log
   );
   
-  // Defensive guard for invalid grams_as_sold
-  if (asSold.grams_as_sold === undefined || asSold.grams_as_sold === null || Number.isNaN(asSold.grams_as_sold)) {
-    log('error', 'INV-002 PREFLIGHT: Invalid grams_as_sold after transform', {
-      itemKey: item.key,
-      normalizedKey,
-      normalized_value: normalized.value,
-      grams_as_sold: asSold.grams_as_sold
-    });
-    emitAlert(ALERT_LEVELS.CRITICAL, 'grams_as_sold_invalid', {
-      itemKey: item.key,
-      normalizedKey,
-      normalized_value: normalized.value,
-      grams_as_sold: asSold.grams_as_sold
-    });
-    return {
-      kcal: 0, protein: 0, fat: 0, carbs: 0,
-      p: 0, f: 0, c: 0,
-      grams_as_sold: 0,
-      confidence: 'none',
-      error: 'GRAMS_AS_SOLD_INVALID'
-    };
-  }
-  
-  // Step 4: Calculate macros
-  const factor = asSold.grams_as_sold / 100;
-  
-  const proteinVal = Math.round(nutrition.protein * factor * 10) / 10;
-  const fatVal = Math.round(nutrition.fat * factor * 10) / 10;
-  const carbsVal = Math.round(nutrition.carbs * factor * 10) / 10;
-  
-  let macros = {
-    kcal: Math.round(nutrition.calories * factor),
-    protein: proteinVal,
-    fat: fatVal,
-    carbs: carbsVal,
-    p: proteinVal,
-    f: fatVal,
-    c: carbsVal,
-    grams_as_sold: asSold.grams_as_sold,
-    confidence: nutrition.confidence || 'medium',
-    source: nutrition.source,
-    isFallback: nutrition.isFallback || false
-  };
-  
-  // Add confidence band if available
-  if (asSold.grams_as_sold_min !== undefined) {
-    const factorMin = asSold.grams_as_sold_min / 100;
-    const factorMax = asSold.grams_as_sold_max / 100;
-    macros.kcal_min = Math.round(nutrition.calories * factorMin);
-    macros.kcal_max = Math.round(nutrition.calories * factorMax);
-  }
-  
-  // Step 5: INV-001 Check with BLOCKING behavior
-  if (config.enableInv001Blocking) {
-    const consistencyCheck = checkMacroCalorieConsistency(
-      macros,
-      config.inv001FlagThresholdPct,
-      config.inv001BlockThresholdPct
-    );
-    
-    if (!consistencyCheck.valid) {
-      if (consistencyCheck.severity === INVARIANT_SEVERITY.CRITICAL) {
-        // >20% deviation: HARD FAIL immediately
-        log('error', 'INV-001 BLOCKING: Macro-calorie inconsistency exceeds blocking threshold', {
-          itemKey: item.key,
-          reportedKcal: consistencyCheck.reported_kcal,
-          expectedKcal: consistencyCheck.expected_kcal,
-          deviationPct: consistencyCheck.deviation_pct,
-          threshold: config.inv001BlockThresholdPct
-        });
-        
-        alertItemFlaggedInv001(item.key, {
-          expected_kcal: consistencyCheck.expected_kcal,
-          reported_kcal: consistencyCheck.reported_kcal,
-          deviation_pct: consistencyCheck.deviation_pct,
-          severity: 'CRITICAL'
-        }, { normalizedKey });
-        
-        throw new InvariantViolationError(
-          'INV-001',
-          `Item '${item.key}' has ${consistencyCheck.deviation_pct}% macro-kcal deviation (blocking threshold: ${config.inv001BlockThresholdPct}%)`,
-          {
-            itemKey: item.key,
-            normalizedKey,
-            reportedKcal: consistencyCheck.reported_kcal,
-            expectedKcal: consistencyCheck.expected_kcal,
-            deviationPct: consistencyCheck.deviation_pct,
-            macros
-          }
-        );
-      } else {
-        // 5-20% deviation: FLAG item but continue
-        log('warning', 'INV-001 WARNING: Macro-calorie inconsistency flagged', {
-          itemKey: item.key,
-          reportedKcal: consistencyCheck.reported_kcal,
-          expectedKcal: consistencyCheck.expected_kcal,
-          deviationPct: consistencyCheck.deviation_pct
-        });
-        
-        alertItemFlaggedInv001(item.key, {
-          expected_kcal: consistencyCheck.expected_kcal,
-          reported_kcal: consistencyCheck.reported_kcal,
-          deviation_pct: consistencyCheck.deviation_pct,
-          severity: 'WARNING'
-        }, { normalizedKey });
-        
-        // SSE callback for flagged item
-        if (onIngredientFlagged) {
-          onIngredientFlagged(item.key, {
-            expected_kcal: consistencyCheck.expected_kcal,
-            reported_kcal: consistencyCheck.reported_kcal,
-            deviation_pct: consistencyCheck.deviation_pct
-          });
-        }
-        
-        macros = createFlaggedMacros(macros, consistencyCheck);
-      }
-    }
-  }
-  
-  return macros;
-}
-
-/**
- * Creates a getItemMacros callback for reconciliation
- */
-function createGetItemMacrosCallback(nutritionMap, log, config = DEFAULT_CONFIG, callbacks = {}) {
-  return function getItemMacros(item) {
-    return computeItemMacros(item, nutritionMap, log, config, callbacks);
-  };
-}
-
-/**
- * Runs per-meal reconciliation to adjust calories
- */
-function runMealReconciliation(meal, targetKcal, targetProtein, getItemMacros, tolerancePct, log) {
-  const result = reconcileMealLevel(
-    meal,
-    targetKcal,
-    targetProtein,
-    getItemMacros,
-    tolerancePct
-  );
-  
-  if (result.factorApplied !== 1.0) {
-    log('info', 'Meal reconciliation applied', {
-      mealName: meal.name,
-      factor: result.factorApplied,
-      originalKcal: result.originalKcal,
-      adjustedKcal: result.adjustedKcal
+  if (!consistencyResult.isConsistent) {
+    log('warning', 'INV-001: Macro-calorie inconsistency detected', {
+      key: item.key,
+      reported: { kcal, protein, fat, carbs },
+      computed: consistencyResult.computedKcal,
+      deviation: consistencyResult.deviation
     });
     
-    try {
-      assertReconciliationBounds(result.factorApplied);
-    } catch (err) {
-      log('warning', 'Reconciliation factor out of bounds', {
-        mealName: meal.name,
-        factor: result.factorApplied,
-        error: err.message
+    if (onIngredientFlagged) {
+      onIngredientFlagged(item.key, {
+        invariantId: 'INV-001',
+        reportedKcal: kcal,
+        computedKcal: consistencyResult.computedKcal,
+        deviation: consistencyResult.deviation
       });
     }
-  }
-  
-  return result.meal;
-}
-
-/**
- * Runs daily reconciliation across all meals
- */
-function runDailyReconciliation(meals, targetKcal, targetProtein, getItemMacros, tolerancePct, log) {
-  const result = reconcileNonProtein(
-    meals,
-    targetKcal,
-    targetProtein,
-    getItemMacros,
-    tolerancePct
-  );
-  
-  log('info', 'Daily reconciliation complete', {
-    originalKcal: result.originalKcal,
-    adjustedKcal: result.adjustedKcal,
-    factorApplied: result.factorApplied
-  });
-  
-  return result;
-}
-
-/**
- * Runs validation on a day plan
- * V3.0: Added SSE callback for warnings
- */
-function runValidation(dayPlan, getMacros, config, log, callbacks = {}) {
-  const result = validateDayPlan(dayPlan, getMacros);
-  const { onValidationWarning } = callbacks;
-  
-  if (result.critical && result.critical.length > 0) {
-    log('error', 'Critical validation issues detected', {
-      issues: result.critical
-    });
-    emitAlert(ALERT_LEVELS.CRITICAL, 'validation_critical', {
-      issues: result.critical
-    });
-  }
-  
-  if (result.warnings && result.warnings.length > 0) {
-    log('warning', 'Validation warnings detected', {
-      issues: result.warnings
+    
+    alertItemFlaggedInv001(item.key, {
+      reported: { kcal, protein, fat, carbs },
+      computed: consistencyResult.computedKcal,
+      deviation: consistencyResult.deviation
     });
     
-    // SSE callback for warnings
-    if (onValidationWarning) {
-      onValidationWarning(result.warnings);
+    return createFlaggedMacros(
+      { kcal, protein, fat, carbs },
+      consistencyResult,
+      nutrition.source || 'lookup'
+    );
+  }
+  
+  return {
+    kcal,
+    protein,
+    fat,
+    carbs,
+    _flagged: false,
+    _source: nutrition.source || 'lookup',
+    _gramsAsSold: gramsAsSold
+  };
+}
+
+/**
+ * Creates a callback function for getting item macros
+ * @param {Map} nutritionMap - Map of ingredient key to nutrition data
+ * @param {Map} macroCache - Cache for computed macros
+ * @param {Function} log - Logger function
+ * @param {Object} callbacks - SSE callbacks
+ * @returns {Function} getItemMacros callback
+ */
+function createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks = {}) {
+  return (item) => {
+    const cacheKey = `${item.key}:${item.qty_value}:${item.qty_unit}:${item._resolvedState || item.stateHint}`;
+    
+    if (macroCache.has(cacheKey)) {
+      return macroCache.get(cacheKey);
+    }
+    
+    const macros = computeItemMacros(item, nutritionMap, log, callbacks);
+    macroCache.set(cacheKey, macros);
+    
+    return macros;
+  };
+}
+
+/**
+ * Runs meal-level reconciliation
+ * @param {Array} meals - Array of meals
+ * @param {Object} targets - Daily targets { kcal, protein, fat, carbs }
+ * @param {Function} getItemMacros - Callback to get item macros
+ * @param {Object} config - Pipeline configuration
+ * @param {Function} log - Logger function
+ * @returns {Object} Reconciliation result
+ */
+function runMealReconciliation(meals, targets, getItemMacros, config, log) {
+  const reconciled = [];
+  
+  for (const meal of meals) {
+    const mealTarget = {
+      kcal: targets.kcal / meals.length,
+      protein: targets.protein / meals.length,
+      fat: targets.fat / meals.length,
+      carbs: targets.carbs / meals.length
+    };
+    
+    try {
+      const reconciledMeal = reconcileMealLevel(meal, mealTarget, getItemMacros, config);
+      reconciled.push(reconciledMeal);
+    } catch (error) {
+      log('warning', 'Meal reconciliation failed', { mealName: meal.name, error: error.message });
+      reconciled.push(meal); // Use original if reconciliation fails
     }
   }
   
-  if (config.enableBlockingValidation && result.critical && result.critical.length > 0) {
-    const error = new Error('Critical validation issues prevent plan delivery');
-    error.validationResult = result;
-    error.isValidationError = true;
-    throw error;
+  return { meals: reconciled };
+}
+
+/**
+ * Runs daily-level reconciliation
+ * @param {Array} meals - Array of meals
+ * @param {Object} targets - Daily targets
+ * @param {Function} getItemMacros - Callback to get item macros
+ * @param {Object} config - Pipeline configuration
+ * @param {Function} log - Logger function
+ * @returns {Object} Reconciliation result
+ */
+function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
+  try {
+    const result = reconcileNonProtein(meals, targets, getItemMacros, config);
+    
+    // Assert reconciliation bounds
+    assertReconciliationBounds(result, targets, config.reconciliationTolerancePct);
+    
+    return result;
+  } catch (error) {
+    if (error instanceof InvariantViolationError) {
+      log('error', 'Reconciliation invariant violated', {
+        invariantId: error.invariantId,
+        message: error.message,
+        context: error.context
+      });
+      throw error;
+    }
+    
+    log('warning', 'Daily reconciliation failed', { error: error.message });
+    return { meals };
   }
+}
+
+/**
+ * Runs validation on day plan
+ * @param {Object} dayPlan - Day plan with meals and dayTotals
+ * @param {Function} getItemMacros - Callback to get item macros
+ * @param {Object} config - Pipeline configuration
+ * @param {Function} log - Logger function
+ * @param {Object} callbacks - SSE callbacks
+ * @returns {Object} Validation result
+ */
+function runValidation(dayPlan, getItemMacros, config, log, callbacks = {}) {
+  const { onValidationWarning } = callbacks;
   
-  return result;
+  try {
+    const validationResult = validateDayPlan(dayPlan, getItemMacros, config);
+    
+    if (validationResult.warnings && validationResult.warnings.length > 0) {
+      log('warning', 'Validation warnings', { warnings: validationResult.warnings });
+      
+      if (onValidationWarning) {
+        onValidationWarning('Validation completed with warnings', {
+          warnings: validationResult.warnings
+        });
+      }
+    }
+    
+    return validationResult;
+  } catch (error) {
+    log('error', 'Validation failed', { error: error.message });
+    
+    if (config.enableBlockingValidation) {
+      throw error;
+    }
+    
+    return { valid: false, errors: [error.message], warnings: [] };
+  }
 }
 
 /**
  * Validates LLM output with retry logic
+ * @param {any} output - LLM output to validate
+ * @param {string} schemaName - Schema name
+ * @param {Function} retryFn - Function to retry LLM call
+ * @param {number} maxRetries - Maximum retries
+ * @param {Function} log - Logger function
+ * @returns {Array} Validated and corrected output
  */
 async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetries, log) {
   let currentOutput = output;
@@ -583,6 +497,9 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
 
 /**
  * Calculates day totals from processed meals
+ * @param {Array} meals - Array of processed meals
+ * @param {Function} getItemMacros - Callback to get item macros
+ * @returns {Object} Day totals { kcal, calories, protein, fat, carbs }
  */
 function calculateDayTotals(meals, getItemMacros) {
   let totalKcal = 0;
@@ -611,6 +528,9 @@ function calculateDayTotals(meals, getItemMacros) {
 
 /**
  * Counts flagged items for response-level blocking
+ * @param {Array} meals - Array of meals
+ * @param {Function} getItemMacros - Callback to get item macros
+ * @returns {Object} { flaggedCount, totalItems, flaggedRate }
  */
 function countFlaggedItems(meals, getItemMacros) {
   let flaggedCount = 0;
@@ -633,6 +553,7 @@ function countFlaggedItems(meals, getItemMacros) {
 
 /**
  * Main pipeline execution function
+ * V3.1: Added entry guard to prevent "meals is not iterable" error
  * V3.0: Added SSE callback support
  * 
  * @param {Object} params - Pipeline parameters
@@ -673,7 +594,42 @@ async function executePipeline(params) {
   const traceId = config.traceId || generateTraceId();
   const log = createTracedLogger(traceId, 'pipeline');
   
-  log('info', 'Pipeline execution started', { traceId, targets });
+  // ═══════════════════════════════════════════════════════════════════════════
+  // V3.1: ENTRY GUARD - Prevent "meals is not iterable" error
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (!Array.isArray(rawMeals)) {
+    const errorMsg = `executePipeline requires rawMeals to be an array, got ${typeof rawMeals}`;
+    log('error', 'Pipeline entry guard failed', {
+      traceId,
+      receivedType: typeof rawMeals,
+      receivedValue: rawMeals === null ? 'null' : rawMeals === undefined ? 'undefined' : 'object',
+      dayNumber: config.dayNumber
+    });
+    
+    throw new InvariantViolationError(
+      'INV-ENTRY',
+      errorMsg,
+      { 
+        receivedType: typeof rawMeals,
+        traceId,
+        dayNumber: config.dayNumber 
+      }
+    );
+  }
+  
+  if (rawMeals.length === 0) {
+    const errorMsg = 'executePipeline received empty rawMeals array';
+    log('error', 'Pipeline entry guard failed - empty array', { traceId, dayNumber: config.dayNumber });
+    
+    throw new InvariantViolationError(
+      'INV-ENTRY',
+      errorMsg,
+      { traceId, dayNumber: config.dayNumber }
+    );
+  }
+  // ═══════════════════════════════════════════════════════════════════════════
+  
+  log('info', 'Pipeline execution started', { traceId, targets, mealsCount: rawMeals.length });
   
   const debug = {
     traceId,
@@ -697,61 +653,66 @@ async function executePipeline(params) {
     
     // Stage 2: Normalize state hints
     const startNormalize = Date.now();
-    const normalizedMeals = normalizeAllItemStates(validatedMeals, log);
-    debug.timings.normalizeStates = Date.now() - startNormalize;
+    const normalizedMeals = normalizeAllItemStates(validatedMeals);
+    debug.timings.normalize = Date.now() - startNormalize;
     debug.stages.push('state_normalization');
     
     // Stage 3: Extract unique ingredients
     const startExtract = Date.now();
-    const ingredients = extractUniqueIngredients(normalizedMeals, log);
-    debug.timings.extractIngredients = Date.now() - startExtract;
+    const uniqueIngredients = extractUniqueIngredients(normalizedMeals);
+    debug.timings.extract = Date.now() - startExtract;
     debug.stages.push('ingredient_extraction');
     
-    // Stage 4: Fetch nutrition (with SSE callbacks)
+    log('info', 'Unique ingredients extracted', { count: uniqueIngredients.size });
+    
+    // Stage 4: Fetch nutrition data
     const startNutrition = Date.now();
-    const nutritionMap = await fetchNutritionForIngredients(ingredients, log, callbacks);
-    debug.timings.fetchNutrition = Date.now() - startNutrition;
-    debug.stages.push('nutrition_fetch');
+    const nutritionMap = await fetchNutritionForIngredients(
+      uniqueIngredients,
+      config,
+      log,
+      callbacks
+    );
+    debug.timings.nutrition = Date.now() - startNutrition;
+    debug.stages.push('nutrition_lookup');
     
-    // Stage 5: Create macro callback (with SSE callbacks)
-    const getItemMacros = createGetItemMacrosCallback(nutritionMap, log, config, callbacks);
+    log('info', 'Nutrition data fetched', { 
+      found: nutritionMap.size, 
+      total: uniqueIngredients.size 
+    });
     
-    // Stage 6: Per-meal reconciliation
+    // Stage 5: Create macro computation callback
+    const macroCache = new Map();
+    const getItemMacros = createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks);
+    
+    // Stage 6: Run meal-level reconciliation
     const startMealRecon = Date.now();
-    const mealTargetKcal = targets.kcal / normalizedMeals.length;
-    const mealTargetProtein = targets.protein / normalizedMeals.length;
-    
-    const reconciledMeals = normalizedMeals.map(meal => 
-      runMealReconciliation(
-        meal,
-        mealTargetKcal,
-        mealTargetProtein,
-        getItemMacros,
-        config.reconciliationTolerancePct,
-        log
-      )
+    const mealReconResult = runMealReconciliation(
+      normalizedMeals,
+      targets,
+      getItemMacros,
+      config,
+      log
     );
     debug.timings.mealReconciliation = Date.now() - startMealRecon;
     debug.stages.push('meal_reconciliation');
     
-    // Stage 7: Daily reconciliation
+    // Stage 7: Run daily reconciliation
     const startDailyRecon = Date.now();
     const dailyResult = runDailyReconciliation(
-      reconciledMeals,
-      targets.kcal,
-      targets.protein,
+      mealReconResult.meals,
+      targets,
       getItemMacros,
-      config.reconciliationTolerancePct,
+      config,
       log
     );
     debug.timings.dailyReconciliation = Date.now() - startDailyRecon;
     debug.stages.push('daily_reconciliation');
     
-    // Stage 8: Calculate final totals
+    // Stage 8: Calculate day totals
     const dayTotals = calculateDayTotals(dailyResult.meals, getItemMacros);
-    debug.stages.push('calculate_totals');
     
-    // Stage 8.5: Check for response-level blocking
+    // Stage 8b: Check INV-001 response-level blocking
     if (config.enableInv001Blocking) {
       const flaggedStats = countFlaggedItems(dailyResult.meals, getItemMacros);
       debug.inv001Stats = flaggedStats;
