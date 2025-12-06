@@ -2,7 +2,11 @@
  * api/plan/day.js
  * 
  * Single-Day Orchestration Wrapper
- * V15.4 - Fixed "meals is not iterable" bug from stale cache schema
+ * V15.5 - Fixed extractMealsFromCache to validate ALL meals, not just first
+ * 
+ * CHANGES V15.5:
+ * - extractMealsFromCache now validates every meal has items array
+ * - Prevents "meal.items is not iterable" error from malformed cache entries
  * 
  * CHANGES V15.4:
  * - Added extractMealsFromCache() to handle old/new cache formats
@@ -34,8 +38,8 @@ const kv = createClient({
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 
-// V15.4: Bumped version to invalidate stale cache
-const CACHE_VERSION = 'v2';
+// V15.5: Bumped version to invalidate stale cache
+const CACHE_VERSION = 'v3';
 const CACHE_PREFIX = `cheffy:plan:${CACHE_VERSION}:day`;
 const TTL_PLAN_MS = 1000 * 60 * 60 * 24;
 
@@ -43,46 +47,77 @@ const LLM_REQUEST_TIMEOUT_MS = 90000;
 const MAX_LLM_RETRIES = 3;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V15.4: CACHE EXTRACTION HELPER (same as generate-full-plan.js)
+// V15.5: CACHE EXTRACTION HELPER - Validates ALL meals
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Validates that a single meal object has required structure
+ */
+function validateSingleMeal(meal, index) {
+    if (!meal) {
+        return { valid: false, reason: `meal_${index}_is_null_or_undefined` };
+    }
+    if (typeof meal !== 'object') {
+        return { valid: false, reason: `meal_${index}_is_not_object` };
+    }
+    if (!Array.isArray(meal.items)) {
+        return { valid: false, reason: `meal_${index}_items_is_not_array` };
+    }
+    if (meal.items.length === 0) {
+        return { valid: false, reason: `meal_${index}_items_is_empty` };
+    }
+    return { valid: true, reason: 'valid' };
+}
+
+/**
  * Safely extracts meals array from cached data regardless of schema version.
+ * V15.5: Now validates ALL meals, not just the first one.
  */
 function extractMealsFromCache(cached, log) {
     if (cached === null || cached === undefined) {
-        return { valid: false, meals: [], reason: 'cache_miss' };
+        return { valid: false, meals: [], reason: 'cache_miss', invalidMeals: [] };
     }
+    
+    let mealsArray = null;
+    let formatReason = '';
     
     if (Array.isArray(cached)) {
-        if (cached.length > 0 && Array.isArray(cached[0]?.items)) {
-            log(`Cache contains legacy direct array format`, 'DEBUG', 'CACHE');
-            return { valid: true, meals: cached, reason: 'legacy_direct_array' };
-        }
-        log(`Cache array invalid: missing items property`, 'WARN', 'CACHE');
-        return { valid: false, meals: [], reason: 'array_missing_items' };
+        mealsArray = cached;
+        formatReason = 'legacy_direct_array';
+    } else if (typeof cached === 'object' && Array.isArray(cached.meals)) {
+        mealsArray = cached.meals;
+        formatReason = 'standard_object';
+    } else {
+        const keys = typeof cached === 'object' ? Object.keys(cached).slice(0, 5).join(', ') : 'N/A';
+        log(`Cache object has unexpected structure. Keys: [${keys}]`, 'WARN', 'CACHE');
+        return { valid: false, meals: [], reason: 'invalid_structure', invalidMeals: [] };
     }
     
-    if (typeof cached === 'object') {
-        if (Array.isArray(cached.meals)) {
-            if (cached.meals.length > 0 && Array.isArray(cached.meals[0]?.items)) {
-                return { valid: true, meals: cached.meals, reason: 'standard_object' };
-            }
-            if (cached.meals.length === 0) {
-                log(`Cache meals array is empty`, 'WARN', 'CACHE');
-                return { valid: false, meals: [], reason: 'meals_empty' };
-            }
-            log(`Cache meals[0] missing items array`, 'WARN', 'CACHE');
-            return { valid: false, meals: [], reason: 'meals_items_missing' };
-        }
-        
-        const keys = Object.keys(cached).slice(0, 5).join(', ');
-        log(`Cache object has no meals array. Keys: [${keys}]`, 'WARN', 'CACHE');
-        return { valid: false, meals: [], reason: 'object_no_meals' };
+    if (mealsArray.length === 0) {
+        log(`Cache meals array is empty`, 'WARN', 'CACHE');
+        return { valid: false, meals: [], reason: 'meals_empty', invalidMeals: [] };
     }
     
-    log(`Cache contains unexpected type: ${typeof cached}`, 'ERROR', 'CACHE');
-    return { valid: false, meals: [], reason: 'invalid_type' };
+    // V15.5: Validate ALL meals, not just first one
+    const invalidMeals = [];
+    for (let i = 0; i < mealsArray.length; i++) {
+        const validation = validateSingleMeal(mealsArray[i], i);
+        if (!validation.valid) {
+            invalidMeals.push({
+                index: i,
+                mealName: mealsArray[i]?.name || mealsArray[i]?.type || `meal_${i}`,
+                reason: validation.reason
+            });
+        }
+    }
+    
+    if (invalidMeals.length > 0) {
+        log(`Cache contains ${invalidMeals.length} invalid meals: ${invalidMeals.map(m => m.reason).join(', ')}`, 'WARN', 'CACHE');
+        return { valid: false, meals: [], reason: 'some_meals_invalid', invalidMeals };
+    }
+    
+    log(`Cache valid (${formatReason}), ${mealsArray.length} meals`, 'DEBUG', 'CACHE');
+    return { valid: true, meals: mealsArray, reason: formatReason, invalidMeals: [] };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -233,18 +268,16 @@ Output ONLY the JSON.
 `;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MEAL GENERATION (V15.4 - fixed cache extraction)
+// MEAL GENERATION (V15.5 - fixed cache extraction)
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function generateMealPlan(day, formData, nutritionalTargets, log, perMealTargets) {
     const { name, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, cuisine } = formData;
     const { calories } = nutritionalTargets;
 
-    // Build cache key with version prefix
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     
-    // V15.4: Try cache with defensive extraction
     const cached = await cacheGet(cacheKey, log);
     const extraction = extractMealsFromCache(cached, log);
     
@@ -253,12 +286,13 @@ async function generateMealPlan(day, formData, nutritionalTargets, log, perMealT
         return { dayNumber: day, meals: extraction.meals };
     }
     
-    // Cache miss or invalid - regenerate
     if (cached !== null) {
         log(`Day ${day} cache invalid (${extraction.reason}), regenerating...`, 'WARN', 'CACHE');
+        if (extraction.invalidMeals && extraction.invalidMeals.length > 0) {
+            log(`Invalid meals: ${JSON.stringify(extraction.invalidMeals)}`, 'DEBUG', 'CACHE');
+        }
     }
 
-    // Prepare LLM prompt
     const mainMealCal = Math.round(perMealTargets.main.calories);
     const mainMealP = Math.round(perMealTargets.main.protein);
     const snackCal = Math.round(perMealTargets.snack.calories);
@@ -284,21 +318,19 @@ async function generateMealPlan(day, formData, nutritionalTargets, log, perMealT
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix);
     }
 
-    // V15.4: Extract meals from LLM result
     const llmExtraction = extractMealsFromCache(parsedResult, log);
     
     if (!llmExtraction.valid) {
         throw new Error(`LLM returned invalid structure for Day ${day}: ${llmExtraction.reason}`);
     }
     
-    // Cache with consistent schema
     await cacheSet(cacheKey, { meals: llmExtraction.meals }, TTL_PLAN_MS, log);
     
     return { dayNumber: day, meals: llmExtraction.meals };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAIN HANDLER (V15.4)
+// MAIN HANDLER (V15.5)
 // ═══════════════════════════════════════════════════════════════════════════
 
 module.exports = async (request, response) => {
@@ -322,7 +354,6 @@ module.exports = async (request, response) => {
 
         log(`Starting Single-Day Plan Generation for Day ${day}`, 'INFO', 'ORCHESTRATOR');
 
-        // Calculate Per-Meal Targets
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
@@ -346,10 +377,9 @@ module.exports = async (request, response) => {
             }
         };
 
-        // Generate Plan
         const rawDayPlan = await generateMealPlan(day, formData, nutritionalTargets, log, targetsPerMealType);
 
-        // V15.4: PRE-PIPELINE GUARD
+        // V15.5: PRE-PIPELINE GUARD
         if (!rawDayPlan || !Array.isArray(rawDayPlan.meals)) {
             throw new Error(`Day ${day} meals is not an array: got ${typeof rawDayPlan?.meals}`);
         }
@@ -358,7 +388,6 @@ module.exports = async (request, response) => {
             throw new Error(`Day ${day} meals array is empty`);
         }
 
-        // V15.4: Validate the ARRAY, not the wrapper object
         const validation = validateLLMOutput(rawDayPlan.meals, 'MEALS_ARRAY');
         if (!validation.valid) {
             log(`LLM Output validation issues: ${validation.errors.join(', ')}`, 'WARN', 'VALIDATOR');
@@ -367,7 +396,6 @@ module.exports = async (request, response) => {
             }
         }
 
-        // Execute Pipeline
         const result = await executePipeline({
             rawMeals: rawDayPlan.meals,
             targets: {
