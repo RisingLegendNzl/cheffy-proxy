@@ -1,5 +1,5 @@
 /**
- * api/plan/generate-full-plan.js
+ * api/plan/generate-full-plan.j
  * 
  * Multi-Day Orchestration Wrapper with SSE Streaming
  * V16.4 - Fixed extractMealsFromCache to validate ALL meals, not just first
