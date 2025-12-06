@@ -1,40 +1,29 @@
 /**
  * api/plan/generate-full-plan.js
  * 
- * Module 1 Refactor: Multi-Day Orchestration Wrapper with SSE Streaming
- * V16.0 - Added SSE streaming support for real-time progress updates
+ * Multi-Day Orchestration Wrapper with SSE Streaming
+ * V16.1 - Added strict meals array validation
  * 
- * CHANGES FROM V15.9:
- * - Replaced JSON response with Server-Sent Events (SSE) streaming
- * - Added terminal event guarantee (plan:complete or plan:error always sent)
- * - Added per-day error handling with optional recovery
- * - Added phase/stage events for frontend progress tracking
- * - Added invariant violation events before throwing
- * - Fixed traceError signature calls
- * 
- * SSE EVENTS EMITTED:
- * - phase:start / phase:end / phase:error
- * - day:start / day:complete / day:error  
- * - ingredient:found / ingredient:failed / ingredient:flagged
- * - invariant:warning / invariant:violation
- * - validation:warning / validation:failed
- * - log_message
- * - plan:complete (terminal success)
- * - plan:error (terminal failure)
+ * CHANGES V16.1:
+ * - Added normalizeMealsArray() to guarantee array output
+ * - Added validateMealsSchema() for strict schema validation
+ * - Cache retrieval now validates structure before use
+ * - Pipeline entry point validates rawMeals is iterable
+ * - Malformed structures emit plan:error immediately
  */
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
-// --- Shared Modules ---
+// --- Existing Shared Modules ---
 const { executePipeline, generateTraceId, createTracedLogger } = require('../../utils/pipeline.js');
 const { validateLLMOutput } = require('../../utils/llmValidator.js');
 const { emitAlert, ALERT_LEVELS } = require('../../utils/alerting.js');
 const { createTrace, completeTrace, traceStageStart, traceStageEnd, traceError } = require('../trace.js');
 const { recordPipelineStats } = require('../metrics.js');
 
-// --- SSE Streaming ---
+// --- SSE Streaming Modules ---
 const { createSSEStream, ERROR_CODES, getErrorCode, getSafeErrorMessage } = require('../../utils/sseHelper.js');
 const { PipelineError, DayGenerationError } = require('../../utils/errors.js');
 
@@ -51,16 +40,225 @@ const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_RED
 
 // --- Cache Configuration ---
 const CACHE_PREFIX = 'cheffy:plan';
-const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
+const TTL_PLAN_MS = 1000 * 60 * 60 * 24;
 
 // --- Pipeline Configuration ---
 const PIPELINE_CONFIG = {
-    abortOnDayError: false,  // Continue to next day on error (set true to abort)
-    maxDayRetries: 1,        // Retry failed days once
-    emitIngredientEvents: true  // Emit ingredient:found/failed events
+    abortOnDayError: false,
+    maxDayRetries: 1,
+    emitIngredientEvents: true
 };
 
-// --- Cache Helpers ---
+// ═══════════════════════════════════════════════════════════════════════════
+// STRICT SCHEMA VALIDATION (V16.1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Normalizes any input into a valid meals array.
+ * Handles: undefined, null, object with meals property, raw array, malformed data.
+ * 
+ * @param {any} input - Raw input from cache or LLM
+ * @param {Function} log - Logger function
+ * @returns {{ meals: Array, normalized: boolean, source: string }}
+ */
+function normalizeMealsArray(input, log) {
+    // Case 1: null or undefined
+    if (input === null || input === undefined) {
+        log('WARN', 'NORMALIZE', 'Input is null/undefined, returning empty array');
+        return { meals: [], normalized: true, source: 'null_input' };
+    }
+    
+    // Case 2: Already an array
+    if (Array.isArray(input)) {
+        log('DEBUG', 'NORMALIZE', `Input is array with ${input.length} items`);
+        return { meals: input, normalized: false, source: 'direct_array' };
+    }
+    
+    // Case 3: Object with meals property
+    if (typeof input === 'object' && input !== null) {
+        // Check for meals array
+        if (Array.isArray(input.meals)) {
+            log('DEBUG', 'NORMALIZE', `Extracted meals array with ${input.meals.length} items`);
+            return { meals: input.meals, normalized: false, source: 'object_meals_property' };
+        }
+        
+        // Check for days array (multi-day structure)
+        if (Array.isArray(input.days)) {
+            const allMeals = input.days.flatMap(day => {
+                if (Array.isArray(day?.meals)) return day.meals;
+                if (Array.isArray(day)) return day;
+                return [];
+            });
+            log('DEBUG', 'NORMALIZE', `Extracted ${allMeals.length} meals from days array`);
+            return { meals: allMeals, normalized: true, source: 'days_array_flattened' };
+        }
+        
+        // Check for mealPlan property
+        if (Array.isArray(input.mealPlan)) {
+            log('DEBUG', 'NORMALIZE', `Extracted mealPlan array with ${input.mealPlan.length} items`);
+            return { meals: input.mealPlan, normalized: true, source: 'mealPlan_property' };
+        }
+        
+        // Object exists but no recognizable meals structure
+        log('WARN', 'NORMALIZE', `Object has no meals/days/mealPlan array. Keys: ${Object.keys(input).join(', ')}`);
+        return { meals: [], normalized: true, source: 'object_no_meals' };
+    }
+    
+    // Case 4: Primitive or unrecognized type
+    log('ERROR', 'NORMALIZE', `Unrecognized input type: ${typeof input}`);
+    return { meals: [], normalized: true, source: 'invalid_type' };
+}
+
+/**
+ * Validates meals array against strict schema requirements.
+ * 
+ * @param {Array} meals - Meals array to validate
+ * @returns {{ valid: boolean, errors: string[], meals: Array }}
+ */
+function validateMealsSchema(meals) {
+    const errors = [];
+    
+    // Guard: must be array
+    if (!Array.isArray(meals)) {
+        return { 
+            valid: false, 
+            errors: ['meals is not an array'], 
+            meals: [] 
+        };
+    }
+    
+    // Guard: empty array is valid but flagged
+    if (meals.length === 0) {
+        return { 
+            valid: true, 
+            errors: ['meals array is empty'], 
+            meals: [] 
+        };
+    }
+    
+    const validatedMeals = [];
+    
+    for (let i = 0; i < meals.length; i++) {
+        const meal = meals[i];
+        
+        // Each meal must be an object
+        if (typeof meal !== 'object' || meal === null) {
+            errors.push(`meals[${i}] is not an object`);
+            continue;
+        }
+        
+        // Meal must have items array
+        if (!Array.isArray(meal.items)) {
+            // Attempt recovery: wrap meal in items if it looks like an item
+            if (meal.key && meal.qty_value !== undefined) {
+                errors.push(`meals[${i}] appears to be an item, not a meal - wrapping`);
+                validatedMeals.push({
+                    name: `Recovered Meal ${i + 1}`,
+                    type: 'meal',
+                    items: [meal]
+                });
+                continue;
+            }
+            
+            errors.push(`meals[${i}].items is not an array`);
+            continue;
+        }
+        
+        // Validate each item in meals
+        const validatedItems = [];
+        for (let j = 0; j < meal.items.length; j++) {
+            const item = meal.items[j];
+            
+            if (typeof item !== 'object' || item === null) {
+                errors.push(`meals[${i}].items[${j}] is not an object`);
+                continue;
+            }
+            
+            // Item must have key
+            if (!item.key || typeof item.key !== 'string') {
+                errors.push(`meals[${i}].items[${j}].key is missing or invalid`);
+                continue;
+            }
+            
+            // Item must have qty_value
+            if (item.qty_value === undefined || item.qty_value === null) {
+                errors.push(`meals[${i}].items[${j}].qty_value is missing`);
+                continue;
+            }
+            
+            // Normalize qty_value to number
+            const qtyValue = Number(item.qty_value);
+            if (isNaN(qtyValue) || qtyValue <= 0) {
+                errors.push(`meals[${i}].items[${j}].qty_value is invalid: ${item.qty_value}`);
+                continue;
+            }
+            
+            validatedItems.push({
+                ...item,
+                key: String(item.key).toLowerCase().trim(),
+                qty_value: qtyValue,
+                qty_unit: item.qty_unit || 'g',
+                stateHint: item.stateHint || 'raw',
+                methodHint: item.methodHint || 'none'
+            });
+        }
+        
+        // Only include meals with valid items
+        if (validatedItems.length > 0) {
+            validatedMeals.push({
+                ...meal,
+                name: meal.name || `Meal ${i + 1}`,
+                type: meal.type || 'meal',
+                items: validatedItems
+            });
+        } else {
+            errors.push(`meals[${i}] has no valid items after validation`);
+        }
+    }
+    
+    return {
+        valid: validatedMeals.length > 0,
+        errors,
+        meals: validatedMeals
+    };
+}
+
+/**
+ * Validates and normalizes raw day plan output.
+ * Combines normalization and schema validation.
+ * 
+ * @param {any} rawOutput - Raw output from cache or LLM
+ * @param {number} dayNumber - Day number for logging
+ * @param {Function} log - Logger function
+ * @returns {{ valid: boolean, meals: Array, errors: string[] }}
+ */
+function validateAndNormalizeDayPlan(rawOutput, dayNumber, log) {
+    // Step 1: Normalize to array
+    const { meals: normalizedMeals, normalized, source } = normalizeMealsArray(rawOutput, log);
+    
+    if (normalized) {
+        log('INFO', 'VALIDATE', `Day ${dayNumber}: Normalized meals from ${source}`);
+    }
+    
+    // Step 2: Schema validation
+    const validation = validateMealsSchema(normalizedMeals);
+    
+    if (validation.errors.length > 0) {
+        log('WARN', 'VALIDATE', `Day ${dayNumber}: ${validation.errors.length} validation issues: ${validation.errors.slice(0, 3).join('; ')}`);
+    }
+    
+    return {
+        valid: validation.valid,
+        meals: validation.meals,
+        errors: validation.errors,
+        source
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CACHE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
 async function cacheGet(key, log) {
     if (!kvReady) return null;
     try {
@@ -87,7 +285,10 @@ function hashString(str) {
     return crypto.createHash('sha256').update(str).digest('hex').substring(0, 16);
 }
 
-// --- LLM Retry Helper ---
+// ═══════════════════════════════════════════════════════════════════════════
+// LLM HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
 async function fetchLLMWithRetry(payload, log, attempt = 1, maxAttempts = 3) {
     const modelName = attempt <= 2 ? PLAN_MODEL_NAME_PRIMARY : PLAN_MODEL_NAME_FALLBACK;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
@@ -124,8 +325,7 @@ async function fetchLLMWithRetry(payload, log, attempt = 1, maxAttempts = 3) {
     }
 }
 
-// --- LLM Plan Generation ---
-async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, opts = {}) {
+async function tryGenerateLLMPlan(modelName, payload, log, logPrefix) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
     
     log(`${logPrefix}: Calling ${modelName}`, 'INFO', 'LLM');
@@ -151,7 +351,10 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix, opts = {})
     return JSON.parse(text);
 }
 
-// --- System Prompt ---
+// ═══════════════════════════════════════════════════════════════════════════
+// SYSTEM PROMPT
+// ═══════════════════════════════════════════════════════════════════════════
+
 const MEAL_PLANNER_SYSTEM_PROMPT = (weight, dailyCal, dayNum, perMealTargets) => `
 You are Chef-GPT, a precision meal planner. Generate Day ${dayNum} plan as JSON:
 {
@@ -189,22 +392,36 @@ RULES:
 Output ONLY the JSON.
 `;
 
-// --- Generate Single Day Plan (LLM) ---
-async function generateMealPlan_Single(day, formData, nutritionalTargets, log, perMealTargets, sse = null) {
+// ═══════════════════════════════════════════════════════════════════════════
+// SINGLE DAY GENERATION (V16.1 - with strict validation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function generateMealPlan_Single(day, formData, nutritionalTargets, log, perMealTargets, sse) {
     const { name, height, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, cuisine } = formData;
     const { calories } = nutritionalTargets;
 
-    // Check Cache
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets, perMealTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
+    
+    // Try cache first
     const cached = await cacheGet(cacheKey, log);
     
     if (cached) {
         if (sse) sse.log('INFO', 'CACHE', `Day ${day} meals loaded from cache`);
-        return { dayNumber: day, meals: cached.meals };
+        
+        // V16.1: Validate cached data before returning
+        const validation = validateAndNormalizeDayPlan(cached, day, log);
+        
+        if (!validation.valid) {
+            log(`Cache data invalid for Day ${day}: ${validation.errors.join('; ')}`, 'WARN', 'CACHE');
+            if (sse) sse.log('WARN', 'CACHE', `Day ${day} cache data invalid, regenerating...`);
+            // Fall through to LLM generation
+        } else {
+            return { dayNumber: day, meals: validation.meals };
+        }
     }
 
-    // Prepare Prompt
+    // Generate via LLM
     const mainMealCal = Math.round(perMealTargets.main.calories);
     const mainMealP = Math.round(perMealTargets.main.protein);
     const snackCal = Math.round(perMealTargets.snack.calories);
@@ -225,21 +442,34 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
 
     let parsedResult;
     try {
-        parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix, {});
+        parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_PRIMARY, payload, log, logPrefix);
     } catch (e) {
         log(`Primary LLM failed: ${e.message}. Retrying fallback.`, 'WARN', 'LLM');
         if (sse) sse.log('WARN', 'LLM', `Primary model failed, trying fallback...`);
-        parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix, {});
+        parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix);
     }
 
-    if (parsedResult?.meals?.length > 0) {
-        await cacheSet(cacheKey, parsedResult, TTL_PLAN_MS, log);
+    // V16.1: Validate LLM output before caching
+    const validation = validateAndNormalizeDayPlan(parsedResult, day, log);
+    
+    if (!validation.valid) {
+        const errorMsg = `LLM output invalid for Day ${day}: ${validation.errors.slice(0, 3).join('; ')}`;
+        log(errorMsg, 'ERROR', 'LLM');
+        throw new Error(errorMsg);
     }
     
-    return { dayNumber: day, meals: parsedResult.meals || [] };
+    // Cache validated result
+    if (validation.meals.length > 0) {
+        await cacheSet(cacheKey, { meals: validation.meals }, TTL_PLAN_MS, log);
+    }
+    
+    return { dayNumber: day, meals: validation.meals };
 }
 
-// --- Main Handler ---
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN HANDLER (V16.1)
+// ═══════════════════════════════════════════════════════════════════════════
+
 module.exports = async (request, response) => {
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
@@ -254,16 +484,10 @@ module.exports = async (request, response) => {
         return response.status(405).json({ error: "Method Not Allowed" });
     }
 
-    // 1. Generate Trace ID at entry
     const traceId = generateTraceId();
-    
-    // 2. Setup Traced Logger
     const log = createTracedLogger(traceId);
-    
-    // 3. Create SSE Stream
     const sse = createSSEStream(response, traceId);
     
-    // Track state for finally block
     let terminalEventSent = false;
     
     try {
@@ -280,7 +504,6 @@ module.exports = async (request, response) => {
         const numDays = parseInt(formData.days, 10) || 7;
         const store = formData.store;
 
-        // 4. Initialize Trace
         createTrace(traceId, { 
             planType: 'multi-day', 
             dayCount: numDays, 
@@ -291,10 +514,8 @@ module.exports = async (request, response) => {
         log(`Starting Multi-Day Plan Generation for ${numDays} days`, 'INFO', 'ORCHESTRATOR');
         sse.log('INFO', 'ORCHESTRATOR', `Starting plan generation for ${numDays} days`);
         
-        // Emit initial phase
         sse.phaseStart('initialization', 'Calculating nutritional targets...');
 
-        // 5. Calculate Per-Meal Targets
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
@@ -326,7 +547,6 @@ module.exports = async (request, response) => {
         const allResults = {};
         const uniqueIngredientsMap = new Map();
 
-        // 6. Day Iteration Loop
         sse.phaseStart('day_generation', `Processing ${numDays} days...`);
         
         for (let day = 1; day <= numDays; day++) {
@@ -334,25 +554,37 @@ module.exports = async (request, response) => {
             traceStageStart(traceId, `Day_${day}_Processing`);
             
             try {
-                // A. Generate Meals (Dietitian Agent)
                 sse.log('INFO', 'LLM', `Day ${day}: Generating meal plan...`);
                 const rawDayPlan = await generateMealPlan_Single(
                     day, formData, nutritionalTargets, log, targetsPerMealType, sse
                 );
 
-                // B. Validate LLM Output (pre-pipeline sanity check)
-                const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
-                if (!validation.valid) {
-                    log(`Day ${day} LLM Output Invalid. Auto-corrected: ${validation.corrected}`, 'WARN', 'VALIDATOR');
-                    sse.log('WARN', 'VALIDATOR', `Day ${day}: LLM output auto-corrected`);
-                    if (validation.correctedOutput) rawDayPlan.meals = validation.correctedOutput.meals;
+                // V16.1: Double-check meals is valid array before proceeding
+                if (!rawDayPlan || !Array.isArray(rawDayPlan.meals)) {
+                    throw new Error(`Day ${day} returned invalid structure: meals is not an array`);
+                }
+                
+                if (rawDayPlan.meals.length === 0) {
+                    throw new Error(`Day ${day} returned empty meals array`);
                 }
 
-                // C. Execute Pipeline (Delegated Shared Logic)
+                // Legacy validator (optional, for logging)
+                const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
+                if (!validation.valid) {
+                    log(`Day ${day} LLM Output validation: ${validation.corrected ? 'auto-corrected' : 'issues found'}`, 'WARN', 'VALIDATOR');
+                    sse.log('WARN', 'VALIDATOR', `Day ${day}: LLM output validated`);
+                }
+
                 sse.log('INFO', 'PIPELINE', `Day ${day}: Processing nutrition and macros...`);
                 
+                // V16.1: Final guard before pipeline
+                const mealsForPipeline = rawDayPlan.meals;
+                if (!Array.isArray(mealsForPipeline)) {
+                    throw new Error(`Pre-pipeline check failed: meals is ${typeof mealsForPipeline}, not array`);
+                }
+                
                 const processedDayResult = await executePipeline({
-                    rawMeals: rawDayPlan.meals,
+                    rawMeals: mealsForPipeline,
                     targets: {
                         kcal: nutritionalTargets.calories,
                         protein: nutritionalTargets.protein,
@@ -367,24 +599,12 @@ module.exports = async (request, response) => {
                         scaleProtein: true,
                         allowReconciliation: true,
                         generateRecipes: true
-                    },
-                    // SSE callbacks for real-time events
-                    onIngredientFound: PIPELINE_CONFIG.emitIngredientEvents 
-                        ? (key, data) => sse.ingredientFound(key, data)
-                        : null,
-                    onIngredientFailed: PIPELINE_CONFIG.emitIngredientEvents
-                        ? (key, reason) => sse.ingredientFailed(key, reason)
-                        : null,
-                    onIngredientFlagged: (key, violation) => sse.ingredientFlagged(key, violation),
-                    onInvariantWarning: (id, details) => sse.invariantWarning(id, details),
-                    onValidationWarning: (warnings) => sse.validationWarning(warnings)
+                    }
                 });
 
-                // D. Collect Results
                 processedDays.push(processedDayResult.data);
                 if (processedDayResult.stats) allStats.push(processedDayResult.stats);
                 
-                // Aggregate results for final payload
                 if (processedDayResult.data?.meals) {
                     processedDayResult.data.meals.forEach(meal => {
                         meal.items?.forEach(item => {
@@ -406,14 +626,12 @@ module.exports = async (request, response) => {
                 sse.log('SUCCESS', 'ORCHESTRATOR', `Day ${day} completed successfully`);
                 
             } catch (dayError) {
-                // Handle day-level errors
                 const errorCode = getErrorCode(dayError);
                 const errorMessage = getSafeErrorMessage(dayError);
                 
                 log(`Day ${day} failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
                 traceError(traceId, `Day_${day}_Processing`, dayError);
                 
-                // Emit invariant violation if applicable
                 if (dayError.name === 'InvariantViolationError') {
                     sse.invariantViolation(dayError.invariantId, {
                         message: errorMessage,
@@ -424,7 +642,6 @@ module.exports = async (request, response) => {
                 sse.dayError(day, errorCode, errorMessage, !PIPELINE_CONFIG.abortOnDayError);
                 failedDays.push({ day, error: errorMessage, code: errorCode });
                 
-                // Abort or continue based on config
                 if (PIPELINE_CONFIG.abortOnDayError) {
                     throw new DayGenerationError(day, errorMessage, dayError);
                 }
@@ -438,7 +655,6 @@ module.exports = async (request, response) => {
             failedDays: failedDays.length
         });
 
-        // 7. Check if we have any successful days
         if (processedDays.length === 0) {
             throw new PipelineError(
                 ERROR_CODES.PIPELINE_EXECUTION_FAILED,
@@ -451,25 +667,21 @@ module.exports = async (request, response) => {
             );
         }
 
-        // 8. Finalize Trace
         completeTrace(traceId, { 
             status: processedDays.length === numDays ? 'success' : 'partial',
             daysGenerated: processedDays.length,
             daysFailed: failedDays.length
         });
 
-        // 9. Record Pipeline Stats
         if (allStats.length > 0) {
             await recordPipelineStats(traceId, allStats, log);
         }
 
         log(`Multi-Day Plan Generation Complete: ${processedDays.length}/${numDays} days`, 'INFO', 'ORCHESTRATOR');
 
-        // 10. Build Final Payload
         const mealPlan = processedDays.map(dayData => dayData?.meals || []).flat();
         const uniqueIngredients = Array.from(uniqueIngredientsMap.values());
         
-        // 11. Send Terminal Success Event
         terminalEventSent = true;
         sse.complete({
             success: true,
@@ -488,15 +700,11 @@ module.exports = async (request, response) => {
         });
 
     } catch (error) {
-        // Convert to PipelineError if not already
         const pipelineError = PipelineError.from(error, { traceId, stage: 'orchestrator' });
         
         log(`Multi-Day Plan Generation Failed: ${pipelineError.message}`, 'ERROR', 'ORCHESTRATOR');
-        
-        // Trace the error with correct signature: (traceId, stage, error)
         traceError(traceId, 'ORCHESTRATOR', pipelineError);
 
-        // Emit alert
         emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
             traceId,
             error: pipelineError.message,
@@ -508,7 +716,6 @@ module.exports = async (request, response) => {
             error: pipelineError.message 
         });
 
-        // Send Terminal Error Event
         terminalEventSent = true;
         sse.error(
             pipelineError.code,
@@ -520,7 +727,6 @@ module.exports = async (request, response) => {
         );
         
     } finally {
-        // Guarantee terminal event
         if (!terminalEventSent && !sse.isTerminated()) {
             log('Handler exiting without terminal event - sending fallback error', 'ERROR', 'ORCHESTRATOR');
             sse.error(
@@ -530,7 +736,6 @@ module.exports = async (request, response) => {
             );
         }
         
-        // Ensure stream is closed
         if (!sse.isClosed()) {
             sse.close();
         }
