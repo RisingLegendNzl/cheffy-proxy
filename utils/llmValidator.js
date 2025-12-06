@@ -1,7 +1,12 @@
 /**
  * utils/llmValidator.js
- * * LLM Output Validator for Cheffy
- * V15.3 - Robust Unit Fallbacks
+ * 
+ * LLM Output Validator for Cheffy
+ * V15.4 - Fixed MEALS_ARRAY validation to explicitly reject non-arrays
+ * 
+ * CHANGES V15.4:
+ * - Added explicit type check: MEALS_ARRAY schema now rejects non-arrays immediately
+ * - This prevents cache objects like { dayNumber, meals: undefined } from passing validation
  */
 
 /**
@@ -132,6 +137,7 @@ const VALID_METHOD_HINTS = [
   'boiled', 'fried', 'baked', 'steamed', 'grilled', 'roasted', 
   'sauteed', 'sautéed', 'poached', 'braised', 'pan-fried', 
   'stir-fried', 'deep-fried', 'seared', 'simmered', 'stewed',
+  'none',
   null, undefined, ''
 ];
 
@@ -386,7 +392,6 @@ function validateUnit(unit) {
     if (SIZE_DESCRIPTORS.includes(normalizedUnit)) {
       return { valid: false, error: `qty_unit '${unit}' is a size descriptor` };
     }
-    // Strict validation fails here, but autocorrect will catch it
     return { valid: false, error: `qty_unit '${unit}' is not in allowed units list` };
   }
   
@@ -397,7 +402,6 @@ function validateUnit(unit) {
 
 function autocorrectQtyValueToNumber(item) {
   if (typeof item.qty_value === 'string') {
-    // Handle ranges like "10-12" -> 11
     if (item.qty_value.includes('-')) {
         const parts = item.qty_value.split('-').map(parseFloat);
         if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
@@ -428,81 +432,81 @@ function autocorrectQtyValueToNumber(item) {
 }
 
 function autocorrectSizeDescriptor(item) {
-  const unit = item.qty_unit?.toLowerCase().trim();
-  if (!SIZE_DESCRIPTORS.includes(unit)) {
+  const { key, qty_unit, qty_value } = item;
+  if (!qty_unit || typeof qty_unit !== 'string') return { corrected: false, item, correction: null };
+  
+  const normalizedUnit = qty_unit.toLowerCase().trim();
+  
+  if (!SIZE_DESCRIPTORS.includes(normalizedUnit)) {
     return { corrected: false, item, correction: null };
   }
   
-  const key = item.key.toLowerCase();
-  const sizeKey = `${unit} ${key}`;
-  let gramsPerUnit = SIZE_DEFAULTS[sizeKey];
+  const sizeKey = `${normalizedUnit} ${key?.toLowerCase() || 'item'}`;
+  const genericKey = normalizedUnit;
   
-  if (!gramsPerUnit) {
-    for (const [defaultKey, defaultGrams] of Object.entries(SIZE_DEFAULTS)) {
-      if (defaultKey.startsWith(unit + ' ') && key.includes(defaultKey.split(' ').slice(1).join(' '))) {
-        gramsPerUnit = defaultGrams;
-        break;
-      }
-    }
-  }
-  if (!gramsPerUnit) gramsPerUnit = SIZE_DEFAULTS[unit] || 100;
+  const defaultGrams = SIZE_DEFAULTS[sizeKey] || SIZE_DEFAULTS[genericKey] || 100;
+  const totalGrams = defaultGrams * (qty_value || 1);
   
-  const totalGrams = item.qty_value * gramsPerUnit;
   return {
     corrected: true,
     item: { ...item, qty_value: totalGrams, qty_unit: 'g' },
     correction: {
       field: 'qty_unit',
-      originalValue: `${item.qty_value} ${item.qty_unit}`,
-      correctedValue: `${totalGrams}g`,
+      originalValue: qty_unit,
+      correctedValue: 'g',
       rule: 'SIZE_DESCRIPTOR_TO_GRAMS',
-      details: { gramsPerUnit }
+      details: { originalQty: qty_value, gramsPerUnit: defaultGrams, totalGrams }
     }
   };
 }
 
 function autocorrectNormalizeUnit(item) {
-  const unit = item.qty_unit?.toLowerCase().trim();
-  const canonical = UNIT_NORMALIZATION[unit];
+  if (!item.qty_unit || typeof item.qty_unit !== 'string') {
+    return { corrected: false, item, correction: null };
+  }
   
-  if (canonical && canonical !== unit) {
+  const normalized = item.qty_unit.toLowerCase().trim();
+  const canonicalUnit = UNIT_NORMALIZATION[normalized];
+  
+  if (canonicalUnit && canonicalUnit !== item.qty_unit) {
     return {
       corrected: true,
-      item: { ...item, qty_unit: canonical },
+      item: { ...item, qty_unit: canonicalUnit },
       correction: {
         field: 'qty_unit',
         originalValue: item.qty_unit,
-        correctedValue: canonical,
+        correctedValue: canonicalUnit,
         rule: 'UNIT_NORMALIZATION'
       }
     };
   }
+  
   return { corrected: false, item, correction: null };
 }
 
-/**
- * Fallback correction for unknown units
- * Converts unknown units (e.g. "box", "tub", "handful") to "piece"
- * so the pipeline can continue with heuristic weighting.
- */
 function autocorrectUnknownUnit(item) {
-    const unit = item.qty_unit?.toLowerCase().trim();
-    const allowedLower = ALLOWED_UNITS.map(u => u.toLowerCase());
-    
-    if (unit && !allowedLower.includes(unit)) {
-        // Safe fallback: treat as 'piece' (count)
-        return {
-            corrected: true,
-            item: { ...item, qty_unit: 'piece' },
-            correction: {
-                field: 'qty_unit',
-                originalValue: item.qty_unit,
-                correctedValue: 'piece',
-                rule: 'UNKNOWN_UNIT_FALLBACK'
-            }
-        };
-    }
+  if (!item.qty_unit || typeof item.qty_unit !== 'string') {
     return { corrected: false, item, correction: null };
+  }
+  
+  const normalized = item.qty_unit.toLowerCase().trim();
+  const allowedLower = ALLOWED_UNITS.map(u => u.toLowerCase());
+  
+  if (allowedLower.includes(normalized)) {
+    return { corrected: false, item, correction: null };
+  }
+  
+  // Unknown unit - default to 'piece' as fallback
+  return {
+    corrected: true,
+    item: { ...item, qty_unit: 'piece' },
+    correction: {
+      field: 'qty_unit',
+      originalValue: item.qty_unit,
+      correctedValue: 'piece',
+      rule: 'UNKNOWN_UNIT_FALLBACK'
+    }
+  };
 }
 
 function autocorrectStateHint(item) {
@@ -512,7 +516,15 @@ function autocorrectStateHint(item) {
   const normalized = item.stateHint.toLowerCase().trim();
   const validStates = ['dry', 'raw', 'cooked', 'as_pack'];
   const stateMapping = {
-    'dried': 'dry', 'uncooked': 'raw', 'fresh': 'raw', 'packaged': 'as_pack', 'packed': 'as_pack', 'as-pack': 'as_pack'
+    'uncooked': 'raw',
+    'fresh': 'raw',
+    'dried': 'dry',
+    'dehydrated': 'dry',
+    'packaged': 'as_pack',
+    'processed': 'as_pack',
+    'ready': 'as_pack',
+    'pre-cooked': 'cooked',
+    'precooked': 'cooked'
   };
   
   let correctedState = stateMapping[normalized] || (validStates.includes(normalized) ? normalized : null);
@@ -604,7 +616,7 @@ function applyItemAutocorrections(item) {
     autocorrectQtyValueToNumber,
     autocorrectSizeDescriptor,
     autocorrectNormalizeUnit,
-    autocorrectUnknownUnit, // Add the fallback corrector
+    autocorrectUnknownUnit,
     autocorrectStateHint,
     autocorrectMethodHint,
     autocorrectQuantityBounds
@@ -637,26 +649,72 @@ function validateItemConstraints(item) {
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Main validation function for LLM output
+ * 
+ * V15.4: Added explicit type check for MEALS_ARRAY schema
+ * - Previously: non-arrays would skip correction block but return valid: true
+ * - Now: non-arrays are immediately rejected with explicit error
+ */
 function validateLLMOutput(output, schemaName) {
   const result = { valid: true, errors: [], corrections: [], correctedOutput: null };
   const schema = SCHEMAS[schemaName];
-  if (!schema) { result.valid = false; result.errors.push(`Unknown schema: ${schemaName}`); return result; }
-  if (output === null || output === undefined) { result.valid = false; result.errors.push('Output is null'); return result; }
+  
+  if (!schema) { 
+    result.valid = false; 
+    result.errors.push(`Unknown schema: ${schemaName}`); 
+    return result; 
+  }
+  
+  if (output === null || output === undefined) { 
+    result.valid = false; 
+    result.errors.push('Output is null or undefined'); 
+    return result; 
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════════════
+  // V15.4: EXPLICIT TYPE CHECK FOR MEALS_ARRAY
+  // ═══════════════════════════════════════════════════════════════════════════
+  // This prevents cache objects like { dayNumber: 1, meals: undefined } from
+  // passing validation. Previously, the code would only apply corrections if
+  // output was already an array, but wouldn't reject non-arrays.
+  if (schemaName === 'MEALS_ARRAY' && !Array.isArray(output)) {
+    result.valid = false;
+    result.errors.push(`MEALS_ARRAY schema requires array input, got ${typeof output}`);
+    
+    // Provide diagnostic info
+    if (typeof output === 'object') {
+      const keys = Object.keys(output).slice(0, 5).join(', ');
+      result.errors.push(`Object keys: [${keys}]`);
+    }
+    
+    return result;
+  }
+  // ═══════════════════════════════════════════════════════════════════════════
   
   const schemaErrors = validateSchema(output, schema);
-  if (schemaErrors.length > 0) { result.valid = false; result.errors.push(...schemaErrors); }
+  if (schemaErrors.length > 0) { 
+    result.valid = false; 
+    result.errors.push(...schemaErrors); 
+  }
   
   let correctedOutput = output;
   
   if (schemaName === 'MEALS_ARRAY' && Array.isArray(output)) {
     correctedOutput = [];
     for (const meal of output) {
-      if (!meal || typeof meal !== 'object') { correctedOutput.push(meal); continue; }
+      if (!meal || typeof meal !== 'object') { 
+        correctedOutput.push(meal); 
+        continue; 
+      }
       const correctedMeal = { ...meal };
       if (Array.isArray(meal.items)) {
         correctedMeal.items = [];
         for (const item of meal.items) {
-          if (!item || typeof item !== 'object') { correctedMeal.items.push(item); continue; }
+          if (!item || typeof item !== 'object') { 
+            correctedMeal.items.push(item); 
+            continue; 
+          }
           const { item: correctedItem, corrections } = applyItemAutocorrections(item);
           result.corrections.push(...corrections);
           const constraintValidation = validateItemConstraints(correctedItem);
@@ -677,7 +735,10 @@ function validateLLMOutput(output, schemaName) {
 
 function validateGroceryQuery(query) {
   const result = validateLLMOutput(query, 'GROCERY_QUERY_SCHEMA');
-  if (query.normalQuery && query.normalQuery.length < 2) { result.valid = false; result.errors.push('normalQuery too short'); }
+  if (query.normalQuery && query.normalQuery.length < 2) { 
+    result.valid = false; 
+    result.errors.push('normalQuery too short'); 
+  }
   return result;
 }
 
@@ -700,4 +761,3 @@ module.exports = {
   QUANTITY_CONSTRAINTS,
   UNIT_NORMALIZATION
 };
-
