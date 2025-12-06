@@ -2,28 +2,27 @@
  * api/plan/generate-full-plan.js
  * 
  * Multi-Day Orchestration Wrapper with SSE Streaming
- * V16.1 - Added strict meals array validation
+ * V16.2 - Fixed stale cache handling for "meals is not iterable"
  * 
- * CHANGES V16.1:
- * - Added normalizeMealsArray() to guarantee array output
- * - Added validateMealsSchema() for strict schema validation
- * - Cache retrieval now validates structure before use
- * - Pipeline entry point validates rawMeals is iterable
- * - Malformed structures emit plan:error immediately
+ * CHANGES V16.2:
+ * - Added extractMealsArray() defensive guard for cache retrieval
+ * - Cache data validated before use; invalid cache triggers regeneration
+ * - Pipeline entry validates rawMeals is array with items
+ * - Consistent cache schema: always store { meals: [...] }
  */
 
 const fetch = require('node-fetch');
 const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
-// --- Existing Shared Modules ---
+// --- Shared Modules ---
 const { executePipeline, generateTraceId, createTracedLogger } = require('../../utils/pipeline.js');
 const { validateLLMOutput } = require('../../utils/llmValidator.js');
 const { emitAlert, ALERT_LEVELS } = require('../../utils/alerting.js');
 const { createTrace, completeTrace, traceStageStart, traceStageEnd, traceError } = require('../trace.js');
 const { recordPipelineStats } = require('../metrics.js');
 
-// --- SSE Streaming Modules ---
+// --- SSE Streaming ---
 const { createSSEStream, ERROR_CODES, getErrorCode, getSafeErrorMessage } = require('../../utils/sseHelper.js');
 const { PipelineError, DayGenerationError } = require('../../utils/errors.js');
 
@@ -50,209 +49,77 @@ const PIPELINE_CONFIG = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// STRICT SCHEMA VALIDATION (V16.1)
+// V16.2: DEFENSIVE CACHE EXTRACTION - CORE FIX
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Normalizes any input into a valid meals array.
- * Handles: undefined, null, object with meals property, raw array, malformed data.
+ * Safely extracts meals array from any cached structure.
+ * Handles: null, undefined, raw array, { meals }, { dayNumber, meals }, double-wrapped.
  * 
- * @param {any} input - Raw input from cache or LLM
+ * @param {any} cached - Raw value from KV cache
  * @param {Function} log - Logger function
- * @returns {{ meals: Array, normalized: boolean, source: string }}
+ * @returns {{ valid: boolean, meals: Array, reason: string }}
  */
-function normalizeMealsArray(input, log) {
-    // Case 1: null or undefined
-    if (input === null || input === undefined) {
-        log('WARN', 'NORMALIZE', 'Input is null/undefined, returning empty array');
-        return { meals: [], normalized: true, source: 'null_input' };
+function extractMealsArray(cached, log) {
+    // Case 1: null/undefined
+    if (cached === null || cached === undefined) {
+        return { valid: false, meals: [], reason: 'cache_null' };
     }
     
-    // Case 2: Already an array
-    if (Array.isArray(input)) {
-        log('DEBUG', 'NORMALIZE', `Input is array with ${input.length} items`);
-        return { meals: input, normalized: false, source: 'direct_array' };
+    // Case 2: Direct array (old schema) - must have meal objects with items
+    if (Array.isArray(cached)) {
+        if (cached.length > 0 && typeof cached[0] === 'object' && Array.isArray(cached[0]?.items)) {
+            log('Cache contains direct meals array (legacy schema)', 'DEBUG', 'CACHE');
+            return { valid: true, meals: cached, reason: 'direct_array' };
+        }
+        return { valid: false, meals: [], reason: 'array_no_items' };
     }
     
     // Case 3: Object with meals property
-    if (typeof input === 'object' && input !== null) {
-        // Check for meals array
-        if (Array.isArray(input.meals)) {
-            log('DEBUG', 'NORMALIZE', `Extracted meals array with ${input.meals.length} items`);
-            return { meals: input.meals, normalized: false, source: 'object_meals_property' };
+    if (typeof cached === 'object') {
+        // Standard structure: { meals: [...] } or { dayNumber, meals: [...] }
+        if (Array.isArray(cached.meals)) {
+            if (cached.meals.length > 0 && typeof cached.meals[0] === 'object' && Array.isArray(cached.meals[0]?.items)) {
+                return { valid: true, meals: cached.meals, reason: 'object_meals' };
+            }
+            if (cached.meals.length === 0) {
+                return { valid: false, meals: [], reason: 'meals_empty' };
+            }
+            return { valid: false, meals: [], reason: 'meals_no_items' };
         }
         
-        // Check for days array (multi-day structure)
-        if (Array.isArray(input.days)) {
-            const allMeals = input.days.flatMap(day => {
-                if (Array.isArray(day?.meals)) return day.meals;
-                if (Array.isArray(day)) return day;
-                return [];
-            });
-            log('DEBUG', 'NORMALIZE', `Extracted ${allMeals.length} meals from days array`);
-            return { meals: allMeals, normalized: true, source: 'days_array_flattened' };
+        // Alternate schema: { mealPlan: [...] }
+        if (Array.isArray(cached.mealPlan) && cached.mealPlan.length > 0) {
+            log('Cache contains mealPlan property (alternate schema)', 'DEBUG', 'CACHE');
+            return { valid: true, meals: cached.mealPlan, reason: 'object_mealPlan' };
         }
         
-        // Check for mealPlan property
-        if (Array.isArray(input.mealPlan)) {
-            log('DEBUG', 'NORMALIZE', `Extracted mealPlan array with ${input.mealPlan.length} items`);
-            return { meals: input.mealPlan, normalized: true, source: 'mealPlan_property' };
+        // Double-wrapped: { data: { meals: [...] } }
+        if (cached.data && Array.isArray(cached.data.meals) && cached.data.meals.length > 0) {
+            log('Cache contains double-wrapped data.meals', 'DEBUG', 'CACHE');
+            return { valid: true, meals: cached.data.meals, reason: 'double_wrapped' };
         }
         
         // Object exists but no recognizable meals structure
-        log('WARN', 'NORMALIZE', `Object has no meals/days/mealPlan array. Keys: ${Object.keys(input).join(', ')}`);
-        return { meals: [], normalized: true, source: 'object_no_meals' };
+        const keys = Object.keys(cached).slice(0, 5).join(', ');
+        log(`Cache object has no valid meals array. Keys: ${keys}`, 'WARN', 'CACHE');
+        return { valid: false, meals: [], reason: 'object_no_meals' };
     }
     
     // Case 4: Primitive or unrecognized type
-    log('ERROR', 'NORMALIZE', `Unrecognized input type: ${typeof input}`);
-    return { meals: [], normalized: true, source: 'invalid_type' };
+    log(`Cache contains unrecognized type: ${typeof cached}`, 'ERROR', 'CACHE');
+    return { valid: false, meals: [], reason: 'invalid_type' };
 }
 
 /**
- * Validates meals array against strict schema requirements.
- * 
- * @param {Array} meals - Meals array to validate
- * @returns {{ valid: boolean, errors: string[], meals: Array }}
+ * Validates that meals array has proper structure for pipeline.
  */
-function validateMealsSchema(meals) {
-    const errors = [];
-    
-    // Guard: must be array
-    if (!Array.isArray(meals)) {
-        return { 
-            valid: false, 
-            errors: ['meals is not an array'], 
-            meals: [] 
-        };
-    }
-    
-    // Guard: empty array is valid but flagged
-    if (meals.length === 0) {
-        return { 
-            valid: true, 
-            errors: ['meals array is empty'], 
-            meals: [] 
-        };
-    }
-    
-    const validatedMeals = [];
-    
-    for (let i = 0; i < meals.length; i++) {
-        const meal = meals[i];
-        
-        // Each meal must be an object
-        if (typeof meal !== 'object' || meal === null) {
-            errors.push(`meals[${i}] is not an object`);
-            continue;
-        }
-        
-        // Meal must have items array
-        if (!Array.isArray(meal.items)) {
-            // Attempt recovery: wrap meal in items if it looks like an item
-            if (meal.key && meal.qty_value !== undefined) {
-                errors.push(`meals[${i}] appears to be an item, not a meal - wrapping`);
-                validatedMeals.push({
-                    name: `Recovered Meal ${i + 1}`,
-                    type: 'meal',
-                    items: [meal]
-                });
-                continue;
-            }
-            
-            errors.push(`meals[${i}].items is not an array`);
-            continue;
-        }
-        
-        // Validate each item in meals
-        const validatedItems = [];
-        for (let j = 0; j < meal.items.length; j++) {
-            const item = meal.items[j];
-            
-            if (typeof item !== 'object' || item === null) {
-                errors.push(`meals[${i}].items[${j}] is not an object`);
-                continue;
-            }
-            
-            // Item must have key
-            if (!item.key || typeof item.key !== 'string') {
-                errors.push(`meals[${i}].items[${j}].key is missing or invalid`);
-                continue;
-            }
-            
-            // Item must have qty_value
-            if (item.qty_value === undefined || item.qty_value === null) {
-                errors.push(`meals[${i}].items[${j}].qty_value is missing`);
-                continue;
-            }
-            
-            // Normalize qty_value to number
-            const qtyValue = Number(item.qty_value);
-            if (isNaN(qtyValue) || qtyValue <= 0) {
-                errors.push(`meals[${i}].items[${j}].qty_value is invalid: ${item.qty_value}`);
-                continue;
-            }
-            
-            validatedItems.push({
-                ...item,
-                key: String(item.key).toLowerCase().trim(),
-                qty_value: qtyValue,
-                qty_unit: item.qty_unit || 'g',
-                stateHint: item.stateHint || 'raw',
-                methodHint: item.methodHint || 'none'
-            });
-        }
-        
-        // Only include meals with valid items
-        if (validatedItems.length > 0) {
-            validatedMeals.push({
-                ...meal,
-                name: meal.name || `Meal ${i + 1}`,
-                type: meal.type || 'meal',
-                items: validatedItems
-            });
-        } else {
-            errors.push(`meals[${i}] has no valid items after validation`);
-        }
-    }
-    
-    return {
-        valid: validatedMeals.length > 0,
-        errors,
-        meals: validatedMeals
-    };
-}
-
-/**
- * Validates and normalizes raw day plan output.
- * Combines normalization and schema validation.
- * 
- * @param {any} rawOutput - Raw output from cache or LLM
- * @param {number} dayNumber - Day number for logging
- * @param {Function} log - Logger function
- * @returns {{ valid: boolean, meals: Array, errors: string[] }}
- */
-function validateAndNormalizeDayPlan(rawOutput, dayNumber, log) {
-    // Step 1: Normalize to array
-    const { meals: normalizedMeals, normalized, source } = normalizeMealsArray(rawOutput, log);
-    
-    if (normalized) {
-        log('INFO', 'VALIDATE', `Day ${dayNumber}: Normalized meals from ${source}`);
-    }
-    
-    // Step 2: Schema validation
-    const validation = validateMealsSchema(normalizedMeals);
-    
-    if (validation.errors.length > 0) {
-        log('WARN', 'VALIDATE', `Day ${dayNumber}: ${validation.errors.length} validation issues: ${validation.errors.slice(0, 3).join('; ')}`);
-    }
-    
-    return {
-        valid: validation.valid,
-        meals: validation.meals,
-        errors: validation.errors,
-        source
-    };
+function isValidMealsArray(meals) {
+    if (!Array.isArray(meals) || meals.length === 0) return false;
+    const firstMeal = meals[0];
+    if (!firstMeal || typeof firstMeal !== 'object') return false;
+    if (!Array.isArray(firstMeal.items)) return false;
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -308,26 +175,21 @@ async function fetchLLMWithRetry(payload, log, attempt = 1, maxAttempts = 3) {
         const data = await response.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
         
-        if (!text) {
-            throw new Error('Empty response from LLM');
-        }
+        if (!text) throw new Error('Empty response from LLM');
         
         return JSON.parse(text);
     } catch (e) {
         log(`LLM attempt ${attempt} failed: ${e.message}`, 'WARN', 'LLM');
-        
         if (attempt < maxAttempts) {
             await new Promise(r => setTimeout(r, 1000 * attempt));
             return fetchLLMWithRetry(payload, log, attempt + 1, maxAttempts);
         }
-        
         throw e;
     }
 }
 
 async function tryGenerateLLMPlan(modelName, payload, log, logPrefix) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
-    
     log(`${logPrefix}: Calling ${modelName}`, 'INFO', 'LLM');
     
     const response = await fetch(url, {
@@ -343,10 +205,7 @@ async function tryGenerateLLMPlan(modelName, payload, log, logPrefix) {
     
     const data = await response.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    
-    if (!text) {
-        throw new Error(`${modelName} returned empty response`);
-    }
+    if (!text) throw new Error(`${modelName} returned empty response`);
     
     return JSON.parse(text);
 }
@@ -393,7 +252,7 @@ Output ONLY the JSON.
 `;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SINGLE DAY GENERATION (V16.1 - with strict validation)
+// SINGLE DAY GENERATION (V16.2 - with stale cache handling)
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function generateMealPlan_Single(day, formData, nutritionalTargets, log, perMealTargets, sse) {
@@ -403,21 +262,20 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets, perMealTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     
-    // Try cache first
+    // V16.2: Try cache with defensive extraction
     const cached = await cacheGet(cacheKey, log);
     
-    if (cached) {
-        if (sse) sse.log('INFO', 'CACHE', `Day ${day} meals loaded from cache`);
+    if (cached !== null) {
+        const extraction = extractMealsArray(cached, log);
         
-        // V16.1: Validate cached data before returning
-        const validation = validateAndNormalizeDayPlan(cached, day, log);
-        
-        if (!validation.valid) {
-            log(`Cache data invalid for Day ${day}: ${validation.errors.join('; ')}`, 'WARN', 'CACHE');
-            if (sse) sse.log('WARN', 'CACHE', `Day ${day} cache data invalid, regenerating...`);
-            // Fall through to LLM generation
+        if (extraction.valid && isValidMealsArray(extraction.meals)) {
+            if (sse) sse.log('INFO', 'CACHE', `Day ${day} meals loaded from cache`);
+            return { dayNumber: day, meals: extraction.meals };
         } else {
-            return { dayNumber: day, meals: validation.meals };
+            // Stale/invalid cache - log and regenerate
+            log(`Cache invalid for Day ${day} (reason: ${extraction.reason}), regenerating...`, 'WARN', 'CACHE');
+            if (sse) sse.log('WARN', 'CACHE', `Day ${day} cache stale (${extraction.reason}), regenerating...`);
+            // Fall through to LLM generation
         }
     }
 
@@ -449,29 +307,26 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix);
     }
 
-    // V16.1: Validate LLM output before caching
-    const validation = validateAndNormalizeDayPlan(parsedResult, day, log);
+    // V16.2: Validate LLM output structure before caching
+    const llmExtraction = extractMealsArray(parsedResult, log);
     
-    if (!validation.valid) {
-        const errorMsg = `LLM output invalid for Day ${day}: ${validation.errors.slice(0, 3).join('; ')}`;
+    if (!llmExtraction.valid || !isValidMealsArray(llmExtraction.meals)) {
+        const errorMsg = `LLM returned invalid meals structure for Day ${day}: ${llmExtraction.reason}`;
         log(errorMsg, 'ERROR', 'LLM');
         throw new Error(errorMsg);
     }
     
-    // Cache validated result
-    if (validation.meals.length > 0) {
-        await cacheSet(cacheKey, { meals: validation.meals }, TTL_PLAN_MS, log);
-    }
+    // V16.2: Cache with consistent schema - always { meals: [...] }
+    await cacheSet(cacheKey, { meals: llmExtraction.meals }, TTL_PLAN_MS, log);
     
-    return { dayNumber: day, meals: validation.meals };
+    return { dayNumber: day, meals: llmExtraction.meals };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAIN HANDLER (V16.1)
+// MAIN HANDLER (V16.2)
 // ═══════════════════════════════════════════════════════════════════════════
 
 module.exports = async (request, response) => {
-    // Handle CORS preflight
     if (request.method === 'OPTIONS') {
         response.setHeader('Access-Control-Allow-Origin', '*');
         response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -494,26 +349,15 @@ module.exports = async (request, response) => {
         const { formData, nutritionalTargets } = request.body;
         
         if (!formData || !nutritionalTargets) {
-            throw new PipelineError(
-                ERROR_CODES.UNKNOWN_ERROR,
-                'Missing formData or nutritionalTargets in request body',
-                { stage: 'request_validation', traceId }
-            );
+            throw new PipelineError(ERROR_CODES.UNKNOWN_ERROR, 'Missing formData or nutritionalTargets in request body', { stage: 'request_validation', traceId });
         }
         
         const numDays = parseInt(formData.days, 10) || 7;
         const store = formData.store;
 
-        createTrace(traceId, { 
-            planType: 'multi-day', 
-            dayCount: numDays, 
-            store, 
-            targets: nutritionalTargets 
-        });
-
+        createTrace(traceId, { planType: 'multi-day', dayCount: numDays, store, targets: nutritionalTargets });
         log(`Starting Multi-Day Plan Generation for ${numDays} days`, 'INFO', 'ORCHESTRATOR');
         sse.log('INFO', 'ORCHESTRATOR', `Starting plan generation for ${numDays} days`);
-        
         sse.phaseStart('initialization', 'Calculating nutritional targets...');
 
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
@@ -555,36 +399,26 @@ module.exports = async (request, response) => {
             
             try {
                 sse.log('INFO', 'LLM', `Day ${day}: Generating meal plan...`);
-                const rawDayPlan = await generateMealPlan_Single(
-                    day, formData, nutritionalTargets, log, targetsPerMealType, sse
-                );
+                const rawDayPlan = await generateMealPlan_Single(day, formData, nutritionalTargets, log, targetsPerMealType, sse);
 
-                // V16.1: Double-check meals is valid array before proceeding
-                if (!rawDayPlan || !Array.isArray(rawDayPlan.meals)) {
-                    throw new Error(`Day ${day} returned invalid structure: meals is not an array`);
-                }
-                
-                if (rawDayPlan.meals.length === 0) {
-                    throw new Error(`Day ${day} returned empty meals array`);
+                // V16.2: Final guard - ensure meals is valid array before pipeline
+                if (!rawDayPlan || !Array.isArray(rawDayPlan.meals) || rawDayPlan.meals.length === 0) {
+                    throw new Error(`Day ${day} returned invalid structure: meals=${typeof rawDayPlan?.meals}`);
                 }
 
-                // Legacy validator (optional, for logging)
                 const validation = validateLLMOutput(rawDayPlan, 'MEALS_ARRAY');
                 if (!validation.valid) {
-                    log(`Day ${day} LLM Output validation: ${validation.corrected ? 'auto-corrected' : 'issues found'}`, 'WARN', 'VALIDATOR');
+                    log(`Day ${day} LLM Output validation issues`, 'WARN', 'VALIDATOR');
                     sse.log('WARN', 'VALIDATOR', `Day ${day}: LLM output validated`);
+                    if (validation.correctedOutput?.meals) {
+                        rawDayPlan.meals = validation.correctedOutput.meals;
+                    }
                 }
 
                 sse.log('INFO', 'PIPELINE', `Day ${day}: Processing nutrition and macros...`);
                 
-                // V16.1: Final guard before pipeline
-                const mealsForPipeline = rawDayPlan.meals;
-                if (!Array.isArray(mealsForPipeline)) {
-                    throw new Error(`Pre-pipeline check failed: meals is ${typeof mealsForPipeline}, not array`);
-                }
-                
                 const processedDayResult = await executePipeline({
-                    rawMeals: mealsForPipeline,
+                    rawMeals: rawDayPlan.meals,
                     targets: {
                         kcal: nutritionalTargets.calories,
                         protein: nutritionalTargets.protein,
@@ -611,10 +445,7 @@ module.exports = async (request, response) => {
                             if (item.key) {
                                 const normalizedKey = item.key.toLowerCase().trim();
                                 if (!uniqueIngredientsMap.has(normalizedKey)) {
-                                    uniqueIngredientsMap.set(normalizedKey, {
-                                        originalIngredient: item.key,
-                                        normalizedKey
-                                    });
+                                    uniqueIngredientsMap.set(normalizedKey, { originalIngredient: item.key, normalizedKey });
                                 }
                             }
                         });
@@ -633,10 +464,7 @@ module.exports = async (request, response) => {
                 traceError(traceId, `Day_${day}_Processing`, dayError);
                 
                 if (dayError.name === 'InvariantViolationError') {
-                    sse.invariantViolation(dayError.invariantId, {
-                        message: errorMessage,
-                        context: dayError.context
-                    });
+                    sse.invariantViolation(dayError.invariantId, { message: errorMessage, context: dayError.context });
                 }
                 
                 sse.dayError(day, errorCode, errorMessage, !PIPELINE_CONFIG.abortOnDayError);
@@ -650,28 +478,13 @@ module.exports = async (request, response) => {
             }
         }
         
-        sse.phaseEnd('day_generation', { 
-            successfulDays: processedDays.length,
-            failedDays: failedDays.length
-        });
+        sse.phaseEnd('day_generation', { successfulDays: processedDays.length, failedDays: failedDays.length });
 
         if (processedDays.length === 0) {
-            throw new PipelineError(
-                ERROR_CODES.PIPELINE_EXECUTION_FAILED,
-                'All days failed to generate. No plan data available.',
-                {
-                    traceId,
-                    stage: 'day_generation',
-                    context: { failedDays }
-                }
-            );
+            throw new PipelineError(ERROR_CODES.PIPELINE_EXECUTION_FAILED, 'All days failed to generate. No plan data available.', { traceId, stage: 'day_generation', context: { failedDays } });
         }
 
-        completeTrace(traceId, { 
-            status: processedDays.length === numDays ? 'success' : 'partial',
-            daysGenerated: processedDays.length,
-            daysFailed: failedDays.length
-        });
+        completeTrace(traceId, { status: processedDays.length === numDays ? 'success' : 'partial', daysGenerated: processedDays.length, daysFailed: failedDays.length });
 
         if (allStats.length > 0) {
             await recordPipelineStats(traceId, allStats, log);
@@ -690,12 +503,7 @@ module.exports = async (request, response) => {
             results: allResults,
             uniqueIngredients,
             days: processedDays,
-            stats: {
-                totalDays: numDays,
-                successfulDays: processedDays.length,
-                failedDays: failedDays.length,
-                failedDayDetails: failedDays
-            },
+            stats: { totalDays: numDays, successfulDays: processedDays.length, failedDays: failedDays.length, failedDayDetails: failedDays },
             macroDebug: allStats
         });
 
@@ -704,38 +512,17 @@ module.exports = async (request, response) => {
         
         log(`Multi-Day Plan Generation Failed: ${pipelineError.message}`, 'ERROR', 'ORCHESTRATOR');
         traceError(traceId, 'ORCHESTRATOR', pipelineError);
-
-        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
-            traceId,
-            error: pipelineError.message,
-            code: pipelineError.code
-        });
-
-        completeTrace(traceId, { 
-            status: 'error', 
-            error: pipelineError.message 
-        });
+        emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', { traceId, error: pipelineError.message, code: pipelineError.code });
+        completeTrace(traceId, { status: 'error', error: pipelineError.message });
 
         terminalEventSent = true;
-        sse.error(
-            pipelineError.code,
-            pipelineError.message,
-            {
-                stage: pipelineError.stage,
-                context: pipelineError.context
-            }
-        );
+        sse.error(pipelineError.code, pipelineError.message, { stage: pipelineError.stage, context: pipelineError.context });
         
     } finally {
         if (!terminalEventSent && !sse.isTerminated()) {
             log('Handler exiting without terminal event - sending fallback error', 'ERROR', 'ORCHESTRATOR');
-            sse.error(
-                ERROR_CODES.HANDLER_CRASHED,
-                'Plan generation terminated unexpectedly',
-                { stage: 'finally_block' }
-            );
+            sse.error(ERROR_CODES.HANDLER_CRASHED, 'Plan generation terminated unexpectedly', { stage: 'finally_block' });
         }
-        
         if (!sse.isClosed()) {
             sse.close();
         }
