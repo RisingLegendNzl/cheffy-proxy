@@ -3,17 +3,22 @@
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
- * V3.3.1 - Fixed log parameter for lookupIngredientNutrition
+ * V3.3.2 - Fixed function signature mismatches causing "log is not a function"
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
  * into a single source of truth. Both orchestrators become thin wrappers
  * that call into this shared module.
  * 
+ * V3.3.2 CHANGES:
+ * - CRITICAL FIX: lookupIngredientNutrition takes (key, log) - removed erroneous store param
+ * - CRITICAL FIX: normalizeToGramsOrMl takes (item, log) - pass full item object
+ * - CRITICAL FIX: toAsSold takes (item, gramsOrMl, log) - correct parameter order
+ * - Fixed createOrchestratorLog to properly adapt pipeline log format
+ * - Added defensive safeLog guards in all functions
+ * 
  * V3.3.1 CHANGES:
- * - CRITICAL FIX: Pass log function to lookupIngredientNutrition (was causing "log is not a function")
- * - Added createLogAdapter() to bridge pipeline log format (level, message, data) 
- *   with orchestrator format (message, level, module)
+ * - Added createLogAdapter() to bridge log formats (had wrong direction)
  * 
  * V3.3 CHANGES:
  * - CRITICAL FIX: computeItemMacros() now returns BOTH formats:
@@ -44,8 +49,6 @@
  * - onIngredientFlagged(key, violation) - Called when INV-001 flags an item
  * - onInvariantWarning(id, details) - Called for invariant warnings
  * - onValidationWarning(warnings) - Called for validation warnings
- * - Improved error context propagation
- * - Better integration with PipelineError class
  */
 
 const crypto = require('crypto');
@@ -96,7 +99,9 @@ function generateTraceId() {
 }
 
 /**
- * Creates a traced logger function
+ * Creates a traced logger function (pipeline format)
+ * Format: (level, message, data)
+ * 
  * @param {string} traceId - Trace ID for correlation
  * @param {string} module - Module name for log prefix
  * @returns {Function} Logger function
@@ -121,6 +126,44 @@ function createTracedLogger(traceId, module = 'pipeline') {
       console.log(JSON.stringify(logEntry));
     }
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3.3.2: LOG FORMAT ADAPTERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Creates an orchestrator-style log function from a pipeline-style log.
+ * 
+ * Pipeline format:    log(level, message, data)     - e.g. log('info', 'Found item', {key})
+ * Orchestrator format: log(message, level, module)  - e.g. log('Found item', 'INFO', 'NUTRI')
+ * 
+ * @param {Function} pipelineLog - Pipeline-style logger (level, message, data)
+ * @returns {Function} Orchestrator-style logger (message, level, module)
+ */
+function createOrchestratorLog(pipelineLog) {
+  if (typeof pipelineLog !== 'function') {
+    // Return a no-op if no valid log provided
+    return () => {};
+  }
+  
+  return function orchestratorLog(message, level = 'INFO', module = 'PIPELINE') {
+    // Convert orchestrator format to pipeline format
+    const normalizedLevel = (level || 'info').toLowerCase();
+    pipelineLog(normalizedLevel, message, { module });
+  };
+}
+
+/**
+ * Creates a safe logger that never throws
+ * @param {Function} log - Logger function (any format)
+ * @returns {Function} Safe logger
+ */
+function createSafeLog(log) {
+  if (typeof log === 'function') {
+    return log;
+  }
+  return () => {}; // No-op fallback
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -193,6 +236,7 @@ function validateMealStructure(meal) {
  * @returns {Object} { valid: boolean, invalidMeals: Array, validMeals: Array }
  */
 function validateAllMealStructures(meals, log) {
+  const safeLog = createSafeLog(log);
   const invalidMeals = [];
   const validMeals = [];
   
@@ -209,15 +253,13 @@ function validateAllMealStructures(meals, log) {
         reason: validation.reason
       });
       
-      if (log) {
-        log('warning', 'Invalid meal structure detected', {
-          index: i,
-          mealName: meal?.name || meal?.type || `meal_${i}`,
-          reason: validation.reason,
-          hasItems: 'items' in (meal || {}),
-          itemsType: meal?.items === null ? 'null' : typeof meal?.items
-        });
-      }
+      safeLog('warning', 'Invalid meal structure detected', {
+        index: i,
+        mealName: meal?.name || meal?.type || `meal_${i}`,
+        reason: validation.reason,
+        hasItems: 'items' in (meal || {}),
+        itemsType: meal?.items === null ? 'null' : typeof meal?.items
+      });
     }
   }
   
@@ -263,25 +305,25 @@ function normalizeItemState(item) {
  * @returns {Array} Meals with normalized item states
  */
 function normalizeAllItemStates(meals, log = null) {
+  const safeLog = createSafeLog(log);
+  
   if (!Array.isArray(meals)) {
-    if (log) log('error', 'normalizeAllItemStates received non-array', { type: typeof meals });
+    safeLog('error', 'normalizeAllItemStates received non-array', { type: typeof meals });
     return [];
   }
   
   return meals.map((meal, index) => {
     if (!meal || typeof meal !== 'object') {
-      if (log) log('warning', 'Skipping invalid meal object', { index, type: typeof meal });
+      safeLog('warning', 'Skipping invalid meal object', { index, type: typeof meal });
       return meal;
     }
     
     if (!Array.isArray(meal.items)) {
-      if (log) {
-        log('warning', 'meal.items is not an array, defaulting to empty', {
-          index,
-          mealName: meal.name || meal.type || `meal_${index}`,
-          itemsType: meal.items === null ? 'null' : typeof meal.items
-        });
-      }
+      safeLog('warning', 'meal.items is not an array, defaulting to empty', {
+        index,
+        mealName: meal.name || meal.type || `meal_${index}`,
+        itemsType: meal.items === null ? 'null' : typeof meal.items
+      });
       return {
         ...meal,
         items: []
@@ -292,13 +334,11 @@ function normalizeAllItemStates(meals, log = null) {
       ...meal,
       items: meal.items.map((item, itemIndex) => {
         if (!item || typeof item !== 'object') {
-          if (log) {
-            log('warning', 'Skipping invalid item object', {
-              mealIndex: index,
-              itemIndex,
-              type: typeof item
-            });
-          }
+          safeLog('warning', 'Skipping invalid item object', {
+            mealIndex: index,
+            itemIndex,
+            type: typeof item
+          });
           return item;
         }
         return normalizeItemState(item);
@@ -320,10 +360,11 @@ function normalizeAllItemStates(meals, log = null) {
  * @returns {Set} Set of unique ingredient keys
  */
 function extractUniqueIngredients(meals, log = null) {
+  const safeLog = createSafeLog(log);
   const uniqueKeys = new Set();
   
   if (!Array.isArray(meals)) {
-    if (log) log('error', 'extractUniqueIngredients received non-array', { type: typeof meals });
+    safeLog('error', 'extractUniqueIngredients received non-array', { type: typeof meals });
     return uniqueKeys;
   }
   
@@ -331,18 +372,16 @@ function extractUniqueIngredients(meals, log = null) {
     const meal = meals[mealIndex];
     
     if (!meal || typeof meal !== 'object') {
-      if (log) log('warning', 'Skipping invalid meal in extractUniqueIngredients', { mealIndex });
+      safeLog('warning', 'Skipping invalid meal in extractUniqueIngredients', { mealIndex });
       continue;
     }
     
     if (!Array.isArray(meal.items)) {
-      if (log) {
-        log('warning', 'meal.items not iterable in extractUniqueIngredients', {
-          mealIndex,
-          mealName: meal.name || meal.type || `meal_${mealIndex}`,
-          itemsType: meal.items === null ? 'null' : typeof meal.items
-        });
-      }
+      safeLog('warning', 'meal.items not iterable in extractUniqueIngredients', {
+        mealIndex,
+        mealName: meal.name || meal.type || `meal_${mealIndex}`,
+        itemsType: meal.items === null ? 'null' : typeof meal.items
+      });
       continue;
     }
     
@@ -359,76 +398,62 @@ function extractUniqueIngredients(meals, log = null) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NUTRITION FETCHING
+// V3.3.2: NUTRITION FETCHING - FIXED SIGNATURE
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Creates a log adapter that works with both logging conventions:
- * - Pipeline format: (level, message, data)
- * - Orchestrator format: (message, level, module)
- * 
- * @param {Function} pipelineLog - Pipeline-style logger
- * @returns {Function} Adapter that works with orchestrator-style calls
- */
-function createLogAdapter(pipelineLog) {
-  return function adaptedLog(messageOrLevel, levelOrMessage, dataOrModule) {
-    // Detect which format is being used
-    const knownLevels = ['debug', 'info', 'warning', 'warn', 'error', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
-    
-    if (knownLevels.includes(messageOrLevel)) {
-      // Pipeline format: (level, message, data)
-      pipelineLog(messageOrLevel, levelOrMessage, dataOrModule || {});
-    } else if (knownLevels.includes(levelOrMessage)) {
-      // Orchestrator format: (message, level, module)
-      const level = levelOrMessage.toLowerCase();
-      pipelineLog(level, messageOrLevel, { module: dataOrModule || 'nutrition' });
-    } else {
-      // Fallback: treat as info message
-      pipelineLog('info', String(messageOrLevel), { context: levelOrMessage });
-    }
-  };
-}
-
-/**
  * Fetches nutrition data for all unique ingredients
+ * 
+ * V3.3.2 FIX: lookupIngredientNutrition signature is (ingredientKey, log)
+ * - Does NOT take a store parameter
+ * - log format is orchestrator style: (message, level, module)
+ * 
  * @param {Set} ingredientKeys - Set of ingredient keys
- * @param {Object} config - Pipeline configuration
- * @param {Function} log - Logger function
+ * @param {Object} config - Pipeline configuration (not used for nutrition lookup)
+ * @param {Function} log - Pipeline-style logger function
  * @param {Object} callbacks - SSE callbacks
  * @returns {Map} Map of ingredient key to nutrition data
  */
 async function fetchNutritionForIngredients(ingredientKeys, config, log, callbacks = {}) {
   const nutritionMap = new Map();
   const { onIngredientFound, onIngredientFailed } = callbacks;
+  const safeLog = createSafeLog(log);
   
-  // V3.3.1: Create log adapter for lookupIngredientNutrition which uses orchestrator format
-  const nutritionLog = createLogAdapter(log);
+  // V3.3.2: Create orchestrator-style logger for lookupIngredientNutrition
+  // lookupIngredientNutrition expects: log(message, level, module)
+  const orchestratorLog = createOrchestratorLog(log);
   
   const lookupPromises = Array.from(ingredientKeys).map(async (key) => {
     try {
-      // V3.3.1: Pass log adapter as third parameter
-      const nutrition = await lookupIngredientNutrition(key, config.store, nutritionLog);
+      // V3.3.2 FIX: lookupIngredientNutrition takes only (key, log)
+      // NO store parameter - it uses internal hotpath/canonical/fallback
+      const nutrition = await lookupIngredientNutrition(key, orchestratorLog);
       
-      if (nutrition) {
+      if (nutrition && !nutrition.error) {
         nutritionMap.set(key, nutrition);
-        log('debug', 'Nutrition found', { key, kcalPer100g: nutrition.kcal_per_100g });
+        safeLog('debug', 'Nutrition found', { 
+          key, 
+          calories: nutrition.calories,
+          protein: nutrition.protein,
+          source: nutrition.source 
+        });
         
         if (onIngredientFound) {
           onIngredientFound(key, {
-            kcalPer100g: nutrition.kcal_per_100g,
-            proteinPer100g: nutrition.protein_per_100g,
+            calories: nutrition.calories,
+            protein: nutrition.protein,
             source: nutrition.source
           });
         }
       } else {
-        log('warning', 'Nutrition not found', { key });
+        safeLog('warning', 'Nutrition not found or error', { key, error: nutrition?.error });
         
         if (onIngredientFailed) {
-          onIngredientFailed(key, 'Nutrition data not found in database');
+          onIngredientFailed(key, nutrition?.message || 'Nutrition data not found');
         }
       }
     } catch (error) {
-      log('error', 'Nutrition lookup failed', { key, error: error.message });
+      safeLog('error', 'Nutrition lookup failed', { key, error: error.message });
       
       if (onIngredientFailed) {
         onIngredientFailed(key, error.message);
@@ -438,36 +463,50 @@ async function fetchNutritionForIngredients(ingredientKeys, config, log, callbac
   
   await Promise.all(lookupPromises);
   
+  safeLog('info', 'Nutrition lookup complete', {
+    total: ingredientKeys.size,
+    found: nutritionMap.size,
+    missing: ingredientKeys.size - nutritionMap.size
+  });
+  
   return nutritionMap;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V3.3: MACRO COMPUTATION - DUAL FORMAT OUTPUT
+// V3.3.2: MACRO COMPUTATION - FIXED SIGNATURES
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Computes macros for a single item
+ * 
+ * V3.3.2 FIXES:
+ * - normalizeToGramsOrMl takes (item, log) - full item object
+ * - toAsSold takes (item, gramsOrMl, log) - item first, then grams, then log
+ * - Log format for transforms is orchestrator style: (message, level, module)
+ * 
  * V3.3: Returns BOTH formats for compatibility:
  *   - {protein, fat, carbs} for frontend
  *   - {p, f, c} for reconciliation module
- * V3.1: Added defensive guards for NaN quantity propagation
  * 
  * @param {Object} item - Meal item with qty_value, qty_unit, key
  * @param {Map} nutritionMap - Map of ingredient key to nutrition data
- * @param {Function} log - Logger function
+ * @param {Function} log - Pipeline-style logger function
  * @param {Object} callbacks - SSE callbacks
  * @returns {Object} Computed macros with both formats
  */
 function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
-  const { onIngredientFlagged, onInvariantWarning } = callbacks;
+  const { onIngredientFlagged } = callbacks;
+  const safeLog = createSafeLog(log);
   
-  // V3.3: Default return with both formats (all zeros)
+  // V3.3.2: Create orchestrator-style logger for transforms
+  const transformLog = createOrchestratorLog(log);
+  
+  // Default return with both formats (all zeros)
   const defaultMacros = {
     kcal: 0,
     protein: 0,
     fat: 0,
     carbs: 0,
-    // Aliases for reconciliation module
     p: 0,
     f: 0,
     c: 0,
@@ -476,56 +515,65 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
   };
   
   if (!item || typeof item !== 'object') {
-    log('warning', 'computeItemMacros received invalid item', { type: typeof item });
+    safeLog('warning', 'computeItemMacros received invalid item', { type: typeof item });
     return { ...defaultMacros, _source: 'invalid_item' };
   }
   
   const normalizedKey = normalizeKey(item.key || '');
   const nutrition = nutritionMap.get(normalizedKey);
   
-  // V3.1: Sanitize qty_value
-  let safeQtyValue = sanitizeNumber(item.qty_value, 0);
-  
-  // V3.3: Also check for 'qty' field (reconciliation uses this)
-  if (safeQtyValue === 0) {
-    safeQtyValue = sanitizeNumber(item.qty, 0);
-  }
-  
-  if (safeQtyValue < 0) {
-    log('warning', 'Negative qty_value detected, using absolute value', {
-      key: item.key,
-      originalValue: safeQtyValue
-    });
-    safeQtyValue = Math.abs(safeQtyValue);
-  }
-  
-  if (!nutrition) {
-    log('warning', 'No nutrition data for item', { key: item.key });
+  if (!nutrition || nutrition.error) {
+    safeLog('warning', 'No nutrition data for item', { key: item.key, normalizedKey });
     return { ...defaultMacros, _source: 'missing' };
   }
   
-  // Convert to grams for consistent calculation
-  let gramsAsSold;
-  try {
-    const normalized = normalizeToGramsOrMl(safeQtyValue, item.qty_unit || item.unit, item.key);
-    gramsAsSold = toAsSold(normalized, item._resolvedState || item.stateHint, item.key);
-  } catch (error) {
-    log('warning', 'Unit conversion failed', { key: item.key, error: error.message });
-    gramsAsSold = safeQtyValue;
+  // V3.3.2 FIX: normalizeToGramsOrMl takes (item, log) - pass full item object
+  // Item must have: qty_value, qty_unit, key
+  const normalized = normalizeToGramsOrMl(item, transformLog);
+  
+  if (!normalized || normalized.value === undefined || normalized.value === null || Number.isNaN(normalized.value)) {
+    safeLog('warning', 'Quantity normalization failed', {
+      key: item.key,
+      qty_value: item.qty_value,
+      qty_unit: item.qty_unit,
+      normalized
+    });
+    return { ...defaultMacros, _source: 'normalization_failed' };
   }
   
-  // V3.1: Guard against NaN in gramsAsSold
-  gramsAsSold = sanitizeNumber(gramsAsSold, 0);
+  const gramsOrMl = sanitizeNumber(normalized.value, 0);
+  
+  if (gramsOrMl <= 0) {
+    safeLog('warning', 'Zero or negative quantity after normalization', {
+      key: item.key,
+      gramsOrMl
+    });
+    return { ...defaultMacros, _source: 'zero_quantity' };
+  }
+  
+  // V3.3.2 FIX: toAsSold takes (item, gramsOrMl, log)
+  // Item must have: key, stateHint, methodHint (or normalizedKey)
+  const itemForTransform = {
+    key: item.key,
+    normalizedKey: normalizedKey,
+    stateHint: item._resolvedState || item.stateHint,
+    methodHint: item.methodHint
+  };
+  
+  const asSoldResult = toAsSold(itemForTransform, gramsOrMl, transformLog);
+  
+  const gramsAsSold = sanitizeNumber(asSoldResult?.grams_as_sold, gramsOrMl);
   
   // Calculate macros based on per-100g values
+  // Nutrition data uses: calories, protein, fat, carbs (per 100g serving)
   const factor = gramsAsSold / 100;
   
-  const rawKcal = sanitizeNumber(nutrition.kcal_per_100g, 0) * factor;
-  const rawProtein = sanitizeNumber(nutrition.protein_per_100g, 0) * factor;
-  const rawFat = sanitizeNumber(nutrition.fat_per_100g, 0) * factor;
-  const rawCarbs = sanitizeNumber(nutrition.carbs_per_100g, 0) * factor;
+  const rawKcal = sanitizeNumber(nutrition.calories, 0) * factor;
+  const rawProtein = sanitizeNumber(nutrition.protein, 0) * factor;
+  const rawFat = sanitizeNumber(nutrition.fat, 0) * factor;
+  const rawCarbs = sanitizeNumber(nutrition.carbs, 0) * factor;
   
-  // V3.3: Round and ensure valid numbers
+  // Round and ensure valid numbers
   const kcal = roundTo(rawKcal, 1);
   const protein = roundTo(rawProtein, 2);
   const fat = roundTo(rawFat, 2);
@@ -535,11 +583,11 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
   const consistencyResult = checkMacroCalorieConsistency(
     { kcal, protein, fat, carbs },
     item.key,
-    log
+    safeLog
   );
   
-  if (!consistencyResult.isConsistent) {
-    log('warning', 'INV-001: Macro-calorie inconsistency detected', {
+  if (consistencyResult && !consistencyResult.isConsistent) {
+    safeLog('warning', 'INV-001: Macro-calorie inconsistency detected', {
       key: item.key,
       reported: { kcal, protein, fat, carbs },
       computed: consistencyResult.computedKcal,
@@ -567,7 +615,7 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
       nutrition.source || 'lookup'
     );
     
-    // V3.3: Add aliases for reconciliation
+    // Add aliases for reconciliation
     return {
       ...flaggedMacros,
       p: sanitizeNumber(flaggedMacros.protein, 0),
@@ -577,7 +625,7 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
     };
   }
   
-  // V3.3: Return both formats
+  // Return both formats
   return {
     kcal,
     protein,
@@ -604,6 +652,8 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
  * @returns {Function} getItemMacros callback
  */
 function createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks = {}) {
+  const safeLog = createSafeLog(log);
+  
   return (item) => {
     if (!item || typeof item !== 'object') {
       return {
@@ -625,7 +675,7 @@ function createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks = 
       return macroCache.get(cacheKey);
     }
     
-    const macros = computeItemMacros(item, nutritionMap, log, callbacks);
+    const macros = computeItemMacros(item, nutritionMap, safeLog, callbacks);
     macroCache.set(cacheKey, macros);
     
     return macros;
@@ -646,19 +696,21 @@ function createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks = 
  * @returns {Array} Meals with macros attached to each item
  */
 function enhanceItemsWithMacros(meals, getItemMacros, log) {
+  const safeLog = createSafeLog(log);
+  
   if (!Array.isArray(meals)) {
-    log('error', 'enhanceItemsWithMacros received non-array', { type: typeof meals });
+    safeLog('error', 'enhanceItemsWithMacros received non-array', { type: typeof meals });
     return [];
   }
   
   return meals.map((meal, mealIndex) => {
     if (!meal || typeof meal !== 'object') {
-      log('warning', 'Skipping invalid meal in enhanceItemsWithMacros', { mealIndex });
+      safeLog('warning', 'Skipping invalid meal in enhanceItemsWithMacros', { mealIndex });
       return meal;
     }
     
     if (!Array.isArray(meal.items)) {
-      log('warning', 'meal.items not iterable in enhanceItemsWithMacros', {
+      safeLog('warning', 'meal.items not iterable in enhanceItemsWithMacros', {
         mealIndex,
         mealName: meal.name || meal.type || `meal_${mealIndex}`
       });
@@ -670,7 +722,7 @@ function enhanceItemsWithMacros(meals, getItemMacros, log) {
     
     const enhancedItems = meal.items.map((item, itemIndex) => {
       if (!item || typeof item !== 'object') {
-        log('warning', 'Skipping invalid item in enhanceItemsWithMacros', {
+        safeLog('warning', 'Skipping invalid item in enhanceItemsWithMacros', {
           mealIndex,
           itemIndex
         });
@@ -679,15 +731,13 @@ function enhanceItemsWithMacros(meals, getItemMacros, log) {
       
       const macros = getItemMacros(item);
       
-      // V3.3: Merge item with macros, ensuring frontend-required fields exist
+      // Merge item with macros, ensuring frontend-required fields exist
       return {
         ...item,
-        // Overwrite/add macro fields from computed values
         kcal: sanitizeNumber(macros.kcal, 0),
         protein: sanitizeNumber(macros.protein, 0),
         fat: sanitizeNumber(macros.fat, 0),
         carbs: sanitizeNumber(macros.carbs, 0),
-        // Preserve internal fields
         _flagged: macros._flagged || false,
         _source: macros._source || 'unknown'
       };
@@ -711,6 +761,8 @@ function enhanceItemsWithMacros(meals, getItemMacros, log) {
  * @returns {Object} Sanitized item
  */
 function sanitizeItem(item, log) {
+  const safeLog = createSafeLog(log);
+  
   if (!item || typeof item !== 'object') {
     return null;
   }
@@ -729,7 +781,7 @@ function sanitizeItem(item, log) {
   
   // Warn if macros are all zero (might indicate a problem)
   if (sanitized.kcal === 0 && sanitized.protein === 0 && sanitized.fat === 0 && sanitized.carbs === 0) {
-    log('warning', 'Item has all-zero macros after sanitization', {
+    safeLog('warning', 'Item has all-zero macros after sanitization', {
       key: sanitized.key,
       qty_value: sanitized.qty_value
     });
@@ -745,6 +797,8 @@ function sanitizeItem(item, log) {
  * @returns {Object} { meals: Array, stats: Object }
  */
 function sanitizeOutputMeals(meals, log) {
+  const safeLog = createSafeLog(log);
+  
   const stats = {
     totalMeals: 0,
     totalItems: 0,
@@ -753,20 +807,20 @@ function sanitizeOutputMeals(meals, log) {
   };
   
   if (!Array.isArray(meals)) {
-    log('error', 'sanitizeOutputMeals received non-array', { type: typeof meals });
+    safeLog('error', 'sanitizeOutputMeals received non-array', { type: typeof meals });
     return { meals: [], stats };
   }
   
   const sanitizedMeals = meals.map((meal, mealIndex) => {
     if (!meal || typeof meal !== 'object') {
-      log('warning', 'Removing invalid meal in sanitizeOutputMeals', { mealIndex });
+      safeLog('warning', 'Removing invalid meal in sanitizeOutputMeals', { mealIndex });
       return null;
     }
     
     stats.totalMeals++;
     
     if (!Array.isArray(meal.items)) {
-      log('warning', 'Meal has no items array', {
+      safeLog('warning', 'Meal has no items array', {
         mealIndex,
         mealName: meal.name || meal.type
       });
@@ -780,7 +834,7 @@ function sanitizeOutputMeals(meals, log) {
     
     const sanitizedItems = meal.items
       .map(item => {
-        const sanitized = sanitizeItem(item, log);
+        const sanitized = sanitizeItem(item, safeLog);
         if (sanitized) {
           stats.totalItems++;
           if (sanitized.kcal === 0 && sanitized.protein === 0) {
@@ -801,7 +855,7 @@ function sanitizeOutputMeals(meals, log) {
     };
   }).filter(meal => meal !== null);
   
-  log('info', 'Output sanitization complete', stats);
+  safeLog('info', 'Output sanitization complete', stats);
   
   return { meals: sanitizedMeals, stats };
 }
@@ -822,8 +876,10 @@ function sanitizeOutputMeals(meals, log) {
  * @returns {Object} Reconciliation result
  */
 function runMealReconciliation(meals, targets, getItemMacros, config, log) {
+  const safeLog = createSafeLog(log);
+  
   if (!Array.isArray(meals)) {
-    log('error', 'runMealReconciliation received non-array meals', { type: typeof meals });
+    safeLog('error', 'runMealReconciliation received non-array meals', { type: typeof meals });
     return { meals: [] };
   }
   
@@ -834,12 +890,12 @@ function runMealReconciliation(meals, targets, getItemMacros, config, log) {
     const meal = meals[i];
     
     if (!meal || typeof meal !== 'object') {
-      log('warning', 'Skipping invalid meal in reconciliation', { index: i });
+      safeLog('warning', 'Skipping invalid meal in reconciliation', { index: i });
       continue;
     }
     
     if (!Array.isArray(meal.items)) {
-      log('warning', 'meal.items not iterable in reconciliation, skipping', {
+      safeLog('warning', 'meal.items not iterable in reconciliation, skipping', {
         index: i,
         mealName: meal.name || meal.type || `meal_${i}`,
         itemsType: meal.items === null ? 'null' : typeof meal.items
@@ -852,7 +908,7 @@ function runMealReconciliation(meals, targets, getItemMacros, config, log) {
     }
     
     if (meal.items.length === 0) {
-      log('warning', 'meal.items is empty array in reconciliation', {
+      safeLog('warning', 'meal.items is empty array in reconciliation', {
         index: i,
         mealName: meal.name || meal.type || `meal_${i}`
       });
@@ -864,19 +920,22 @@ function runMealReconciliation(meals, targets, getItemMacros, config, log) {
     const mealTargetKcal = targets.kcal / divisor;
     const mealTargetProtein = targets.protein / divisor;
     
+    // Create orchestrator-style log for reconciliation module
+    const reconLog = createOrchestratorLog(log);
+    
     try {
       const result = reconcileMealLevel({
         meal,
         targetKcal: mealTargetKcal,
         targetProtein: mealTargetProtein,
         getItemMacros,
-        log,
+        log: reconLog,
         tolPct: (config.reconciliationTolerancePct || 0.15) * 100
       });
       
       reconciled.push(result.meal || meal);
     } catch (error) {
-      log('warning', 'Meal reconciliation failed', { mealName: meal.name, error: error.message });
+      safeLog('warning', 'Meal reconciliation failed', { mealName: meal.name, error: error.message });
       reconciled.push(meal);
     }
   }
@@ -896,8 +955,10 @@ function runMealReconciliation(meals, targets, getItemMacros, config, log) {
  * @returns {Object} Reconciliation result
  */
 function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
+  const safeLog = createSafeLog(log);
+  
   if (!Array.isArray(meals)) {
-    log('error', 'runDailyReconciliation received non-array meals', { type: typeof meals });
+    safeLog('error', 'runDailyReconciliation received non-array meals', { type: typeof meals });
     return { meals: [] };
   }
   
@@ -908,9 +969,12 @@ function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
   });
   
   if (validMeals.length === 0) {
-    log('warning', 'No valid meals for daily reconciliation');
+    safeLog('warning', 'No valid meals for daily reconciliation');
     return { meals };
   }
+  
+  // Create orchestrator-style log for reconciliation module
+  const reconLog = createOrchestratorLog(log);
   
   try {
     const result = reconcileNonProtein({
@@ -920,13 +984,13 @@ function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
       getItemMacros,
       tolPct: (config.reconciliationTolerancePct || 0.15) * 100,
       allowProteinScaling: config.allowProteinScaling || false,
-      log
+      log: reconLog
     });
     
     return { meals: result.meals || validMeals, adjusted: result.adjusted, factor: result.factor };
   } catch (error) {
     if (error instanceof InvariantViolationError) {
-      log('error', 'Reconciliation invariant violated', {
+      safeLog('error', 'Reconciliation invariant violated', {
         invariantId: error.invariantId,
         message: error.message,
         context: error.context
@@ -934,7 +998,7 @@ function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
       throw error;
     }
     
-    log('warning', 'Daily reconciliation failed', { error: error.message });
+    safeLog('warning', 'Daily reconciliation failed', { error: error.message });
     return { meals };
   }
 }
@@ -953,13 +1017,14 @@ function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
  * @returns {Object} Validation result
  */
 function runValidation(dayPlan, getItemMacros, config, log, callbacks = {}) {
+  const safeLog = createSafeLog(log);
   const { onValidationWarning } = callbacks;
   
   try {
     const validationResult = validateDayPlan(dayPlan, getItemMacros, config);
     
     if (validationResult.warnings && validationResult.warnings.length > 0) {
-      log('warning', 'Validation warnings', { warnings: validationResult.warnings });
+      safeLog('warning', 'Validation warnings', { warnings: validationResult.warnings });
       
       if (onValidationWarning) {
         onValidationWarning('Validation completed with warnings', {
@@ -970,7 +1035,7 @@ function runValidation(dayPlan, getItemMacros, config, log, callbacks = {}) {
     
     return validationResult;
   } catch (error) {
-    log('error', 'Validation failed', { error: error.message });
+    safeLog('error', 'Validation failed', { error: error.message });
     
     if (config.enableBlockingValidation) {
       throw error;
@@ -990,6 +1055,7 @@ function runValidation(dayPlan, getItemMacros, config, log, callbacks = {}) {
  * @returns {Array} Validated and corrected output
  */
 async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetries, log) {
+  const safeLog = createSafeLog(log);
   let currentOutput = output;
   let attempts = 0;
   
@@ -998,7 +1064,7 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
     
     if (validation.valid) {
       if (validation.corrections && validation.corrections.length > 0) {
-        log('info', 'LLM output auto-corrected', {
+        safeLog('info', 'LLM output auto-corrected', {
           schemaName,
           corrections: validation.corrections
         });
@@ -1006,7 +1072,7 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
       return validation.correctedOutput || currentOutput;
     }
     
-    log('warning', 'LLM output validation failed', {
+    safeLog('warning', 'LLM output validation failed', {
       schemaName,
       attempt: attempts + 1,
       errors: validation.errors
@@ -1016,7 +1082,7 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
       try {
         currentOutput = await retryFn();
       } catch (e) {
-        log('error', 'LLM retry failed', { error: e.message });
+        safeLog('error', 'LLM retry failed', { error: e.message });
       }
     }
     
@@ -1043,13 +1109,15 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
  * @returns {Object} Day totals { kcal, calories, protein, fat, carbs }
  */
 function calculateDayTotals(meals, getItemMacros, log = null) {
+  const safeLog = createSafeLog(log);
+  
   let totalKcal = 0;
   let totalProtein = 0;
   let totalFat = 0;
   let totalCarbs = 0;
   
   if (!Array.isArray(meals)) {
-    if (log) log('error', 'calculateDayTotals received non-array meals', { type: typeof meals });
+    safeLog('error', 'calculateDayTotals received non-array meals', { type: typeof meals });
     return {
       kcal: 0,
       calories: 0,
@@ -1063,18 +1131,16 @@ function calculateDayTotals(meals, getItemMacros, log = null) {
     const meal = meals[mealIndex];
     
     if (!meal || typeof meal !== 'object') {
-      if (log) log('warning', 'Skipping invalid meal in calculateDayTotals', { mealIndex });
+      safeLog('warning', 'Skipping invalid meal in calculateDayTotals', { mealIndex });
       continue;
     }
     
     if (!Array.isArray(meal.items)) {
-      if (log) {
-        log('warning', 'meal.items not iterable in calculateDayTotals', {
-          mealIndex,
-          mealName: meal.name || meal.type || `meal_${mealIndex}`,
-          itemsType: meal.items === null ? 'null' : typeof meal.items
-        });
-      }
+      safeLog('warning', 'meal.items not iterable in calculateDayTotals', {
+        mealIndex,
+        mealName: meal.name || meal.type || `meal_${mealIndex}`,
+        itemsType: meal.items === null ? 'null' : typeof meal.items
+      });
       continue;
     }
     
@@ -1083,7 +1149,7 @@ function calculateDayTotals(meals, getItemMacros, log = null) {
         continue;
       }
       
-      // V3.3: Prefer directly attached macros, fall back to callback
+      // Prefer directly attached macros, fall back to callback
       if (typeof item.kcal === 'number' && !isNaN(item.kcal)) {
         totalKcal += sanitizeNumber(item.kcal, 0);
         totalProtein += sanitizeNumber(item.protein, 0);
@@ -1118,11 +1184,13 @@ function calculateDayTotals(meals, getItemMacros, log = null) {
  * @returns {Object} { flaggedCount, totalItems, flaggedRate }
  */
 function countFlaggedItems(meals, getItemMacros, log = null) {
+  const safeLog = createSafeLog(log);
+  
   let flaggedCount = 0;
   let totalItems = 0;
   
   if (!Array.isArray(meals)) {
-    if (log) log('error', 'countFlaggedItems received non-array meals', { type: typeof meals });
+    safeLog('error', 'countFlaggedItems received non-array meals', { type: typeof meals });
     return { flaggedCount: 0, totalItems: 0, flaggedRate: 0 };
   }
   
@@ -1134,12 +1202,10 @@ function countFlaggedItems(meals, getItemMacros, log = null) {
     }
     
     if (!Array.isArray(meal.items)) {
-      if (log) {
-        log('warning', 'meal.items not iterable in countFlaggedItems', {
-          mealIndex,
-          mealName: meal.name || meal.type || `meal_${mealIndex}`
-        });
-      }
+      safeLog('warning', 'meal.items not iterable in countFlaggedItems', {
+        mealIndex,
+        mealName: meal.name || meal.type || `meal_${mealIndex}`
+      });
       continue;
     }
     
@@ -1173,6 +1239,7 @@ function countFlaggedItems(meals, getItemMacros, log = null) {
 
 /**
  * Main pipeline execution function
+ * V3.3.2: Fixed function signature mismatches
  * V3.3: Added macro enhancement and output sanitization
  * V3.2: Added comprehensive meal structure validation
  * V3.1: Added entry guard to prevent "meals is not iterable" error
@@ -1547,7 +1614,8 @@ module.exports = {
   // Utility functions
   generateTraceId,
   createTracedLogger,
-  createLogAdapter,
+  createOrchestratorLog,
+  createSafeLog,
   
   // Sanitization helpers (V3.3)
   sanitizeNumber,
