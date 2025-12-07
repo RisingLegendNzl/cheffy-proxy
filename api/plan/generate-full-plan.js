@@ -2,7 +2,12 @@
  * api/plan/generate-full-plan.js
  * 
  * Multi-Day Orchestration Wrapper with SSE Streaming
- * V16.4 - Fixed extractMealsFromCache to validate ALL meals, not just first
+ * V16.5 - Added output validation before SSE complete
+ * 
+ * CHANGES V16.5:
+ * - Added validateOutputBeforeSend() to ensure frontend receives valid data
+ * - Output validation before sse.complete()
+ * - Compatible with pipeline V3.3 (macro enhancement + sanitization)
  * 
  * CHANGES V16.4:
  * - extractMealsFromCache now validates every meal has items array
@@ -21,7 +26,7 @@ const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
 // --- Shared Modules ---
-const { executePipeline, generateTraceId, createTracedLogger } = require('../../utils/pipeline.js');
+const { executePipeline, generateTraceId, createTracedLogger, sanitizeNumber } = require('../../utils/pipeline.js');
 const { validateLLMOutput } = require('../../utils/llmValidator.js');
 const { emitAlert, ALERT_LEVELS } = require('../../utils/alerting.js');
 const { createTrace, completeTrace, traceStageStart, traceStageEnd, traceError } = require('../trace.js');
@@ -153,6 +158,194 @@ function extractMealsFromCache(cached, log) {
     // All meals valid
     log(`Cache valid (${formatReason}), ${mealsArray.length} meals`, 'DEBUG', 'CACHE');
     return { valid: true, meals: mealsArray, reason: formatReason, invalidMeals: [] };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V16.5: OUTPUT VALIDATION - Ensure frontend receives valid data
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Validates a single item has all required fields for frontend
+ * @param {Object} item - Item to validate
+ * @returns {Object} { valid: boolean, issues: Array }
+ */
+function validateItemForFrontend(item) {
+    const issues = [];
+    
+    if (!item || typeof item !== 'object') {
+        return { valid: false, issues: ['item_is_null_or_not_object'] };
+    }
+    
+    // Required fields
+    if (!item.key || typeof item.key !== 'string') {
+        issues.push('missing_or_invalid_key');
+    }
+    
+    if (typeof item.qty_value !== 'number' || isNaN(item.qty_value)) {
+        issues.push('missing_or_invalid_qty_value');
+    }
+    
+    // Macro fields - must be numbers (0 is valid)
+    if (typeof item.kcal !== 'number' || isNaN(item.kcal)) {
+        issues.push('missing_or_invalid_kcal');
+    }
+    
+    if (typeof item.protein !== 'number' || isNaN(item.protein)) {
+        issues.push('missing_or_invalid_protein');
+    }
+    
+    if (typeof item.fat !== 'number' || isNaN(item.fat)) {
+        issues.push('missing_or_invalid_fat');
+    }
+    
+    if (typeof item.carbs !== 'number' || isNaN(item.carbs)) {
+        issues.push('missing_or_invalid_carbs');
+    }
+    
+    return { valid: issues.length === 0, issues };
+}
+
+/**
+ * Validates output data before sending to frontend
+ * @param {Array} days - Array of day data objects
+ * @param {Function} log - Logger function
+ * @returns {Object} { valid: boolean, stats: Object, issues: Array }
+ */
+function validateOutputBeforeSend(days, log) {
+    const stats = {
+        totalDays: 0,
+        totalMeals: 0,
+        totalItems: 0,
+        itemsWithMacros: 0,
+        itemsWithIssues: 0
+    };
+    const issues = [];
+    
+    if (!Array.isArray(days)) {
+        return { valid: false, stats, issues: ['days_is_not_array'] };
+    }
+    
+    for (let dayIndex = 0; dayIndex < days.length; dayIndex++) {
+        const day = days[dayIndex];
+        stats.totalDays++;
+        
+        if (!day || typeof day !== 'object') {
+            issues.push(`day_${dayIndex}_is_null_or_not_object`);
+            continue;
+        }
+        
+        const meals = day.meals || [];
+        if (!Array.isArray(meals)) {
+            issues.push(`day_${dayIndex}_meals_is_not_array`);
+            continue;
+        }
+        
+        for (let mealIndex = 0; mealIndex < meals.length; mealIndex++) {
+            const meal = meals[mealIndex];
+            stats.totalMeals++;
+            
+            if (!meal || typeof meal !== 'object') {
+                issues.push(`day_${dayIndex}_meal_${mealIndex}_is_null`);
+                continue;
+            }
+            
+            const items = meal.items || [];
+            if (!Array.isArray(items)) {
+                issues.push(`day_${dayIndex}_meal_${mealIndex}_items_is_not_array`);
+                continue;
+            }
+            
+            for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+                const item = items[itemIndex];
+                stats.totalItems++;
+                
+                const itemValidation = validateItemForFrontend(item);
+                if (itemValidation.valid) {
+                    stats.itemsWithMacros++;
+                } else {
+                    stats.itemsWithIssues++;
+                    // Only log first few issues to avoid spam
+                    if (issues.length < 10) {
+                        issues.push(`day_${dayIndex}_meal_${mealIndex}_item_${itemIndex}: ${itemValidation.issues.join(', ')}`);
+                    }
+                }
+            }
+        }
+    }
+    
+    const valid = stats.totalItems > 0 && stats.itemsWithIssues === 0;
+    
+    log('info', 'Output validation complete', {
+        valid,
+        ...stats,
+        issueCount: issues.length
+    });
+    
+    return { valid, stats, issues };
+}
+
+/**
+ * Repairs items that are missing macros by setting defaults
+ * @param {Array} days - Array of day data objects
+ * @param {Function} log - Logger function
+ * @returns {Array} Repaired days
+ */
+function repairOutputIfNeeded(days, log) {
+    if (!Array.isArray(days)) {
+        return days;
+    }
+    
+    let repairCount = 0;
+    
+    const repairedDays = days.map(day => {
+        if (!day || typeof day !== 'object') return day;
+        
+        const meals = day.meals || [];
+        if (!Array.isArray(meals)) return day;
+        
+        const repairedMeals = meals.map(meal => {
+            if (!meal || typeof meal !== 'object') return meal;
+            
+            const items = meal.items || [];
+            if (!Array.isArray(items)) return meal;
+            
+            const repairedItems = items.map(item => {
+                if (!item || typeof item !== 'object') return item;
+                
+                let needsRepair = false;
+                
+                // Check if macros are missing or invalid
+                if (typeof item.kcal !== 'number' || isNaN(item.kcal)) needsRepair = true;
+                if (typeof item.protein !== 'number' || isNaN(item.protein)) needsRepair = true;
+                if (typeof item.fat !== 'number' || isNaN(item.fat)) needsRepair = true;
+                if (typeof item.carbs !== 'number' || isNaN(item.carbs)) needsRepair = true;
+                
+                if (needsRepair) {
+                    repairCount++;
+                    return {
+                        ...item,
+                        kcal: sanitizeNumber(item.kcal, 0),
+                        protein: sanitizeNumber(item.protein, 0),
+                        fat: sanitizeNumber(item.fat, 0),
+                        carbs: sanitizeNumber(item.carbs, 0),
+                        _repaired: true
+                    };
+                }
+                
+                return item;
+            });
+            
+            return { ...meal, items: repairedItems };
+        });
+        
+        return { ...day, meals: repairedMeals };
+    });
+    
+    if (repairCount > 0) {
+        log('warning', 'Repaired items with missing macros', { repairCount });
+    }
+    
+    return repairedDays;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -367,7 +560,7 @@ async function generateMealPlan_Single(day, formData, nutritionalTargets, log, p
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAIN HANDLER (V16.4)
+// MAIN HANDLER (V16.5)
 // ═══════════════════════════════════════════════════════════════════════════
 
 module.exports = async (request, response) => {
@@ -411,7 +604,7 @@ module.exports = async (request, response) => {
             targets: nutritionalTargets 
         });
 
-        log(`Starting Multi-Day Plan Generation for ${numDays} days`, 'INFO', 'ORCHESTRATOR');
+        log('info', 'Starting Multi-Day Plan Generation', { numDays, store });
         sse.log('INFO', 'ORCHESTRATOR', `Starting plan generation for ${numDays} days`);
         
         sse.phaseStart('initialization', 'Calculating nutritional targets...');
@@ -472,7 +665,7 @@ module.exports = async (request, response) => {
                 // B. Validate LLM Output (now validates the ARRAY, not wrapper object)
                 const validation = validateLLMOutput(rawDayPlan.meals, 'MEALS_ARRAY');
                 if (!validation.valid) {
-                    log(`Day ${day} LLM Output validation issues: ${validation.errors.join(', ')}`, 'WARN', 'VALIDATOR');
+                    log('warning', `Day ${day} LLM Output validation issues`, { errors: validation.errors });
                     sse.log('WARN', 'VALIDATOR', `Day ${day}: LLM output validated with corrections`);
                     // Apply corrections if available
                     if (validation.correctedOutput && Array.isArray(validation.correctedOutput)) {
@@ -480,7 +673,7 @@ module.exports = async (request, response) => {
                     }
                 }
 
-                // C. Execute Pipeline
+                // C. Execute Pipeline (V3.3 - includes macro enhancement + sanitization)
                 sse.log('INFO', 'PIPELINE', `Day ${day}: Processing nutrition and macros...`);
                 
                 const processedDayResult = await executePipeline({
@@ -543,7 +736,7 @@ module.exports = async (request, response) => {
                 const errorCode = getErrorCode(dayError);
                 const errorMessage = getSafeErrorMessage(dayError);
                 
-                log(`Day ${day} failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
+                log('error', `Day ${day} failed`, { error: errorMessage });
                 traceError(traceId, `Day_${day}_Processing`, dayError);
                 
                 if (dayError.name === 'InvariantViolationError') {
@@ -581,6 +774,46 @@ module.exports = async (request, response) => {
             );
         }
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // V16.5: OUTPUT VALIDATION - Ensure frontend receives valid data
+        // ═══════════════════════════════════════════════════════════════════════════
+        const outputValidation = validateOutputBeforeSend(processedDays, log);
+        
+        if (!outputValidation.valid) {
+            log('warning', 'Output validation found issues, attempting repair', {
+                issues: outputValidation.issues.slice(0, 5),
+                stats: outputValidation.stats
+            });
+            
+            // Attempt to repair
+            const repairedDays = repairOutputIfNeeded(processedDays, log);
+            
+            // Re-validate after repair
+            const revalidation = validateOutputBeforeSend(repairedDays, log);
+            
+            if (!revalidation.valid && revalidation.stats.totalItems === 0) {
+                throw new PipelineError(
+                    ERROR_CODES.PIPELINE_EXECUTION_FAILED,
+                    'Output validation failed: No valid items in response',
+                    {
+                        traceId,
+                        stage: 'output_validation',
+                        context: { 
+                            stats: revalidation.stats,
+                            issues: revalidation.issues.slice(0, 10)
+                        }
+                    }
+                );
+            }
+            
+            // Use repaired days
+            processedDays.length = 0;
+            processedDays.push(...repairedDays);
+        }
+        
+        log('info', 'Output validation passed', { stats: outputValidation.stats });
+        // ═══════════════════════════════════════════════════════════════════════════
+
         completeTrace(traceId, { 
             status: processedDays.length === numDays ? 'success' : 'partial',
             daysGenerated: processedDays.length,
@@ -591,7 +824,10 @@ module.exports = async (request, response) => {
             await recordPipelineStats(traceId, allStats, log);
         }
 
-        log(`Multi-Day Plan Generation Complete: ${processedDays.length}/${numDays} days`, 'INFO', 'ORCHESTRATOR');
+        log('info', 'Multi-Day Plan Generation Complete', { 
+            successfulDays: processedDays.length, 
+            totalDays: numDays 
+        });
 
         const mealPlan = processedDays.map(dayData => dayData?.meals || []).flat();
         const uniqueIngredients = Array.from(uniqueIngredientsMap.values());
@@ -608,7 +844,8 @@ module.exports = async (request, response) => {
                 totalDays: numDays,
                 successfulDays: processedDays.length,
                 failedDays: failedDays.length,
-                failedDayDetails: failedDays
+                failedDayDetails: failedDays,
+                outputValidation: outputValidation.stats
             },
             macroDebug: allStats
         });
@@ -616,7 +853,7 @@ module.exports = async (request, response) => {
     } catch (error) {
         const pipelineError = PipelineError.from(error, { traceId, stage: 'orchestrator' });
         
-        log(`Multi-Day Plan Generation Failed: ${pipelineError.message}`, 'ERROR', 'ORCHESTRATOR');
+        log('error', 'Multi-Day Plan Generation Failed', { error: pipelineError.message });
         traceError(traceId, 'ORCHESTRATOR', pipelineError);
 
         emitAlert(ALERT_LEVELS.CRITICAL, 'pipeline_failure', {
@@ -642,7 +879,7 @@ module.exports = async (request, response) => {
         
     } finally {
         if (!terminalEventSent && !sse.isTerminated()) {
-            log('Handler exiting without terminal event - sending fallback error', 'ERROR', 'ORCHESTRATOR');
+            log('error', 'Handler exiting without terminal event - sending fallback error');
             sse.error(
                 ERROR_CODES.HANDLER_CRASHED,
                 'Plan generation terminated unexpectedly',
