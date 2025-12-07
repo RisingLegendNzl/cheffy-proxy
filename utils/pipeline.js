@@ -3,12 +3,17 @@
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
- * V3.3 - Fixed schema mismatch, added macro enhancement and output sanitization
+ * V3.3.1 - Fixed log parameter for lookupIngredientNutrition
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
  * into a single source of truth. Both orchestrators become thin wrappers
  * that call into this shared module.
+ * 
+ * V3.3.1 CHANGES:
+ * - CRITICAL FIX: Pass log function to lookupIngredientNutrition (was causing "log is not a function")
+ * - Added createLogAdapter() to bridge pipeline log format (level, message, data) 
+ *   with orchestrator format (message, level, module)
  * 
  * V3.3 CHANGES:
  * - CRITICAL FIX: computeItemMacros() now returns BOTH formats:
@@ -358,6 +363,33 @@ function extractUniqueIngredients(meals, log = null) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Creates a log adapter that works with both logging conventions:
+ * - Pipeline format: (level, message, data)
+ * - Orchestrator format: (message, level, module)
+ * 
+ * @param {Function} pipelineLog - Pipeline-style logger
+ * @returns {Function} Adapter that works with orchestrator-style calls
+ */
+function createLogAdapter(pipelineLog) {
+  return function adaptedLog(messageOrLevel, levelOrMessage, dataOrModule) {
+    // Detect which format is being used
+    const knownLevels = ['debug', 'info', 'warning', 'warn', 'error', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
+    
+    if (knownLevels.includes(messageOrLevel)) {
+      // Pipeline format: (level, message, data)
+      pipelineLog(messageOrLevel, levelOrMessage, dataOrModule || {});
+    } else if (knownLevels.includes(levelOrMessage)) {
+      // Orchestrator format: (message, level, module)
+      const level = levelOrMessage.toLowerCase();
+      pipelineLog(level, messageOrLevel, { module: dataOrModule || 'nutrition' });
+    } else {
+      // Fallback: treat as info message
+      pipelineLog('info', String(messageOrLevel), { context: levelOrMessage });
+    }
+  };
+}
+
+/**
  * Fetches nutrition data for all unique ingredients
  * @param {Set} ingredientKeys - Set of ingredient keys
  * @param {Object} config - Pipeline configuration
@@ -369,9 +401,13 @@ async function fetchNutritionForIngredients(ingredientKeys, config, log, callbac
   const nutritionMap = new Map();
   const { onIngredientFound, onIngredientFailed } = callbacks;
   
+  // V3.3.1: Create log adapter for lookupIngredientNutrition which uses orchestrator format
+  const nutritionLog = createLogAdapter(log);
+  
   const lookupPromises = Array.from(ingredientKeys).map(async (key) => {
     try {
-      const nutrition = await lookupIngredientNutrition(key, config.store);
+      // V3.3.1: Pass log adapter as third parameter
+      const nutrition = await lookupIngredientNutrition(key, config.store, nutritionLog);
       
       if (nutrition) {
         nutritionMap.set(key, nutrition);
@@ -1511,6 +1547,7 @@ module.exports = {
   // Utility functions
   generateTraceId,
   createTracedLogger,
+  createLogAdapter,
   
   // Sanitization helpers (V3.3)
   sanitizeNumber,
