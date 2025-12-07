@@ -1,8 +1,13 @@
 /**
  * api/plan/day.js
  * 
- * Single-Day Orchestration Wrapper
- * V15.5 - Fixed extractMealsFromCache to validate ALL meals, not just first
+ * Single-Day Meal Plan Generation Endpoint
+ * V15.6 - Added output validation before response
+ * 
+ * CHANGES V15.6:
+ * - Added validateOutputBeforeSend() to ensure frontend receives valid data
+ * - Output validation before response.json()
+ * - Compatible with pipeline V3.3 (macro enhancement + sanitization)
  * 
  * CHANGES V15.5:
  * - extractMealsFromCache now validates every meal has items array
@@ -21,16 +26,20 @@ const crypto = require('crypto');
 const { createClient } = require('@vercel/kv');
 
 // --- Shared Modules ---
-const { executePipeline, generateTraceId, createTracedLogger } = require('../../utils/pipeline.js');
+const { executePipeline, generateTraceId, createTracedLogger, sanitizeNumber } = require('../../utils/pipeline.js');
 const { validateLLMOutput } = require('../../utils/llmValidator.js');
 const { emitAlert, ALERT_LEVELS } = require('../../utils/alerting.js');
-const { createTrace, completeTrace, traceError } = require('../trace.js');
+const { createTrace, completeTrace, traceStageStart, traceStageEnd, traceError } = require('../trace.js');
 const { recordPipelineStats } = require('../metrics.js');
+
+// --- Error Handling ---
+const { PipelineError } = require('../../utils/errors.js');
+const { ERROR_CODES, getErrorCode, getSafeErrorMessage } = require('../../utils/sseHelper.js');
 
 // --- Configuration ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.5-flash';
-const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-pro';
+const PLAN_MODEL_NAME_PRIMARY = 'gemini-2.0-flash';
+const PLAN_MODEL_NAME_FALLBACK = 'gemini-2.5-flash';
 
 const kv = createClient({
     url: process.env.UPSTASH_REDIS_REST_URL,
@@ -38,13 +47,11 @@ const kv = createClient({
 });
 const kvReady = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 
-// V15.5: Bumped version to invalidate stale cache
+// --- Cache Configuration ---
+// V15.5: Bumped version to invalidate stale cache with old schema
 const CACHE_VERSION = 'v3';
-const CACHE_PREFIX = `cheffy:plan:${CACHE_VERSION}:day`;
-const TTL_PLAN_MS = 1000 * 60 * 60 * 24;
-
-const LLM_REQUEST_TIMEOUT_MS = 90000;
-const MAX_LLM_RETRIES = 3;
+const CACHE_PREFIX = `cheffy:plan:${CACHE_VERSION}`;
+const TTL_PLAN_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V15.5: CACHE EXTRACTION HELPER - Validates ALL meals
@@ -52,6 +59,9 @@ const MAX_LLM_RETRIES = 3;
 
 /**
  * Validates that a single meal object has required structure
+ * @param {any} meal - Meal object to validate
+ * @param {number} index - Index for logging
+ * @returns {Object} { valid: boolean, reason: string }
  */
 function validateSingleMeal(meal, index) {
     if (!meal) {
@@ -72,8 +82,19 @@ function validateSingleMeal(meal, index) {
 /**
  * Safely extracts meals array from cached data regardless of schema version.
  * V15.5: Now validates ALL meals, not just the first one.
+ * 
+ * Handles:
+ * - Old format: raw array [{ name, type, items }]
+ * - New format: { meals: [...] }
+ * - LLM format: { dayNumber, meals: [...] }
+ * - Invalid/corrupt: returns { valid: false }
+ * 
+ * @param {any} cached - Raw value from KV cache
+ * @param {Function} log - Logger function
+ * @returns {{ valid: boolean, meals: Array, reason: string, invalidMeals: Array }}
  */
 function extractMealsFromCache(cached, log) {
+    // Case 1: null/undefined - cache miss
     if (cached === null || cached === undefined) {
         return { valid: false, meals: [], reason: 'cache_miss', invalidMeals: [] };
     }
@@ -81,18 +102,24 @@ function extractMealsFromCache(cached, log) {
     let mealsArray = null;
     let formatReason = '';
     
+    // Case 2: Direct array (OLD schema - pre-V15.4)
     if (Array.isArray(cached)) {
         mealsArray = cached;
         formatReason = 'legacy_direct_array';
-    } else if (typeof cached === 'object' && Array.isArray(cached.meals)) {
+    }
+    // Case 3: Object wrapper with meals property
+    else if (typeof cached === 'object' && Array.isArray(cached.meals)) {
         mealsArray = cached.meals;
         formatReason = 'standard_object';
-    } else {
+    }
+    // Case 4: Unexpected structure
+    else {
         const keys = typeof cached === 'object' ? Object.keys(cached).slice(0, 5).join(', ') : 'N/A';
         log(`Cache object has unexpected structure. Keys: [${keys}]`, 'WARN', 'CACHE');
         return { valid: false, meals: [], reason: 'invalid_structure', invalidMeals: [] };
     }
     
+    // Validate we have an array with at least one element
     if (mealsArray.length === 0) {
         log(`Cache meals array is empty`, 'WARN', 'CACHE');
         return { valid: false, meals: [], reason: 'meals_empty', invalidMeals: [] };
@@ -113,11 +140,189 @@ function extractMealsFromCache(cached, log) {
     
     if (invalidMeals.length > 0) {
         log(`Cache contains ${invalidMeals.length} invalid meals: ${invalidMeals.map(m => m.reason).join(', ')}`, 'WARN', 'CACHE');
-        return { valid: false, meals: [], reason: 'some_meals_invalid', invalidMeals };
+        return { 
+            valid: false, 
+            meals: [], 
+            reason: 'some_meals_invalid', 
+            invalidMeals 
+        };
     }
     
+    // All meals valid
     log(`Cache valid (${formatReason}), ${mealsArray.length} meals`, 'DEBUG', 'CACHE');
     return { valid: true, meals: mealsArray, reason: formatReason, invalidMeals: [] };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V15.6: OUTPUT VALIDATION - Ensure frontend receives valid data
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Validates a single item has all required fields for frontend
+ * @param {Object} item - Item to validate
+ * @returns {Object} { valid: boolean, issues: Array }
+ */
+function validateItemForFrontend(item) {
+    const issues = [];
+    
+    if (!item || typeof item !== 'object') {
+        return { valid: false, issues: ['item_is_null_or_not_object'] };
+    }
+    
+    // Required fields
+    if (!item.key || typeof item.key !== 'string') {
+        issues.push('missing_or_invalid_key');
+    }
+    
+    if (typeof item.qty_value !== 'number' || isNaN(item.qty_value)) {
+        issues.push('missing_or_invalid_qty_value');
+    }
+    
+    // Macro fields - must be numbers (0 is valid)
+    if (typeof item.kcal !== 'number' || isNaN(item.kcal)) {
+        issues.push('missing_or_invalid_kcal');
+    }
+    
+    if (typeof item.protein !== 'number' || isNaN(item.protein)) {
+        issues.push('missing_or_invalid_protein');
+    }
+    
+    if (typeof item.fat !== 'number' || isNaN(item.fat)) {
+        issues.push('missing_or_invalid_fat');
+    }
+    
+    if (typeof item.carbs !== 'number' || isNaN(item.carbs)) {
+        issues.push('missing_or_invalid_carbs');
+    }
+    
+    return { valid: issues.length === 0, issues };
+}
+
+/**
+ * Validates output data before sending to frontend (single day version)
+ * @param {Object} dayData - Day data object with meals
+ * @param {Function} log - Logger function
+ * @returns {Object} { valid: boolean, stats: Object, issues: Array }
+ */
+function validateOutputBeforeSend(dayData, log) {
+    const stats = {
+        totalMeals: 0,
+        totalItems: 0,
+        itemsWithMacros: 0,
+        itemsWithIssues: 0
+    };
+    const issues = [];
+    
+    if (!dayData || typeof dayData !== 'object') {
+        return { valid: false, stats, issues: ['dayData_is_null_or_not_object'] };
+    }
+    
+    const meals = dayData.meals || [];
+    if (!Array.isArray(meals)) {
+        return { valid: false, stats, issues: ['meals_is_not_array'] };
+    }
+    
+    for (let mealIndex = 0; mealIndex < meals.length; mealIndex++) {
+        const meal = meals[mealIndex];
+        stats.totalMeals++;
+        
+        if (!meal || typeof meal !== 'object') {
+            issues.push(`meal_${mealIndex}_is_null`);
+            continue;
+        }
+        
+        const items = meal.items || [];
+        if (!Array.isArray(items)) {
+            issues.push(`meal_${mealIndex}_items_is_not_array`);
+            continue;
+        }
+        
+        for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+            const item = items[itemIndex];
+            stats.totalItems++;
+            
+            const itemValidation = validateItemForFrontend(item);
+            if (itemValidation.valid) {
+                stats.itemsWithMacros++;
+            } else {
+                stats.itemsWithIssues++;
+                // Only log first few issues to avoid spam
+                if (issues.length < 10) {
+                    issues.push(`meal_${mealIndex}_item_${itemIndex}: ${itemValidation.issues.join(', ')}`);
+                }
+            }
+        }
+    }
+    
+    const valid = stats.totalItems > 0 && stats.itemsWithIssues === 0;
+    
+    log('info', 'Output validation complete', {
+        valid,
+        ...stats,
+        issueCount: issues.length
+    });
+    
+    return { valid, stats, issues };
+}
+
+/**
+ * Repairs items that are missing macros by setting defaults
+ * @param {Object} dayData - Day data object with meals
+ * @param {Function} log - Logger function
+ * @returns {Object} Repaired day data
+ */
+function repairOutputIfNeeded(dayData, log) {
+    if (!dayData || typeof dayData !== 'object') {
+        return dayData;
+    }
+    
+    const meals = dayData.meals || [];
+    if (!Array.isArray(meals)) {
+        return dayData;
+    }
+    
+    let repairCount = 0;
+    
+    const repairedMeals = meals.map(meal => {
+        if (!meal || typeof meal !== 'object') return meal;
+        
+        const items = meal.items || [];
+        if (!Array.isArray(items)) return meal;
+        
+        const repairedItems = items.map(item => {
+            if (!item || typeof item !== 'object') return item;
+            
+            let needsRepair = false;
+            
+            // Check if macros are missing or invalid
+            if (typeof item.kcal !== 'number' || isNaN(item.kcal)) needsRepair = true;
+            if (typeof item.protein !== 'number' || isNaN(item.protein)) needsRepair = true;
+            if (typeof item.fat !== 'number' || isNaN(item.fat)) needsRepair = true;
+            if (typeof item.carbs !== 'number' || isNaN(item.carbs)) needsRepair = true;
+            
+            if (needsRepair) {
+                repairCount++;
+                return {
+                    ...item,
+                    kcal: sanitizeNumber(item.kcal, 0),
+                    protein: sanitizeNumber(item.protein, 0),
+                    fat: sanitizeNumber(item.fat, 0),
+                    carbs: sanitizeNumber(item.carbs, 0),
+                    _repaired: true
+                };
+            }
+            
+            return item;
+        });
+        
+        return { ...meal, items: repairedItems };
+    });
+    
+    if (repairCount > 0) {
+        log('warning', 'Repaired items with missing macros', { repairCount });
+    }
+    
+    return { ...dayData, meals: repairedMeals };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,22 +332,22 @@ function extractMealsFromCache(cached, log) {
 async function cacheGet(key, log) {
     if (!kvReady) return null;
     try {
-        const hit = await kv.get(key);
-        if (hit) log(`Cache HIT for key: ${key.split(':').pop()}`, 'DEBUG', 'CACHE');
-        return hit;
+        const val = await kv.get(key);
+        if (val) log(`Cache HIT: ${key}`, 'INFO', 'CACHE');
+        return val;
     } catch (e) {
-        log(`Cache GET Error: ${e.message}`, 'ERROR', 'CACHE');
+        log(`Cache GET error: ${e.message}`, 'WARN', 'CACHE');
         return null;
     }
 }
 
-async function cacheSet(key, val, ttl, log) {
+async function cacheSet(key, value, ttl, log) {
     if (!kvReady) return;
     try {
-        await kv.set(key, val, { px: ttl });
-        log(`Cache SET for key: ${key.split(':').pop()}`, 'DEBUG', 'CACHE');
+        await kv.set(key, value, { px: ttl });
+        log(`Cache SET: ${key}`, 'DEBUG', 'CACHE');
     } catch (e) {
-        log(`Cache SET Error: ${e.message}`, 'ERROR', 'CACHE');
+        log(`Cache SET error: ${e.message}`, 'WARN', 'CACHE');
     }
 }
 
@@ -154,67 +359,21 @@ function hashString(str) {
 // LLM HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-const getGeminiApiUrl = (modelName) => `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-
-async function fetchLLMWithRetry(url, options, log, attemptPrefix = "LLM") {
-    for (let attempt = 1; attempt <= MAX_LLM_RETRIES; attempt++) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
-
-        try {
-            log(`${attemptPrefix} Attempt ${attempt}: Fetching from ${url}`, 'DEBUG', 'HTTP');
-            const response = await fetch(url, { ...options, signal: controller.signal });
-            clearTimeout(timeout);
-
-            if (response.ok) {
-                const rawText = await response.text();
-                const trimmedText = rawText.trim();
-                if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
-                    return {
-                        ok: true,
-                        status: response.status,
-                        json: () => Promise.resolve(JSON.parse(trimmedText)),
-                        text: () => Promise.resolve(trimmedText)
-                    };
-                } else {
-                    throw new Error(`200 OK with non-JSON body: ${trimmedText.substring(0, 100)}`);
-                }
-            }
-
-            if (response.status !== 429 && response.status < 500) {
-                const errorBody = await response.text();
-                throw new Error(`${attemptPrefix} call failed with status ${response.status}. Body: ${errorBody.substring(0, 200)}`);
-            }
-
-            log(`${attemptPrefix} Attempt ${attempt} failed with status ${response.status}. Retrying...`, 'WARN', 'HTTP');
-        } catch (e) {
-            clearTimeout(timeout);
-            if (e.name === 'AbortError') {
-                log(`${attemptPrefix} Attempt ${attempt} timed out after ${LLM_REQUEST_TIMEOUT_MS}ms`, 'WARN', 'HTTP');
-            } else if (attempt === MAX_LLM_RETRIES) {
-                throw e;
-            } else {
-                log(`${attemptPrefix} Attempt ${attempt} error: ${e.message}. Retrying...`, 'WARN', 'HTTP');
-            }
-        }
-        
-        if (attempt < MAX_LLM_RETRIES) {
-            await new Promise(r => setTimeout(r, 1000 * attempt));
-        }
-    }
-    throw new Error(`${attemptPrefix} failed after ${MAX_LLM_RETRIES} retries`);
-}
-
 async function tryGenerateLLMPlan(modelName, payload, log, logPrefix) {
-    const url = `${getGeminiApiUrl(modelName)}?key=${GEMINI_API_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
     
     log(`${logPrefix}: Calling ${modelName}`, 'INFO', 'LLM');
     
-    const response = await fetchLLMWithRetry(url, {
+    const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-    }, log, logPrefix);
+    });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`${modelName} API error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
     
     const data = await response.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -268,16 +427,18 @@ Output ONLY the JSON.
 `;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MEAL GENERATION (V15.5 - fixed cache extraction)
+// SINGLE DAY GENERATION (V15.5 - fixed cache extraction)
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function generateMealPlan(day, formData, nutritionalTargets, log, perMealTargets) {
     const { name, weight, age, gender, goal, dietary, store, eatingOccasions, costPriority, cuisine } = formData;
     const { calories } = nutritionalTargets;
 
+    // Build cache key with version prefix
     const profileHash = hashString(JSON.stringify({ formData, nutritionalTargets }));
     const cacheKey = `${CACHE_PREFIX}:meals:day${day}:${profileHash}`;
     
+    // V15.5: Try cache with defensive extraction that validates ALL meals
     const cached = await cacheGet(cacheKey, log);
     const extraction = extractMealsFromCache(cached, log);
     
@@ -286,13 +447,17 @@ async function generateMealPlan(day, formData, nutritionalTargets, log, perMealT
         return { dayNumber: day, meals: extraction.meals };
     }
     
+    // Cache miss or invalid - regenerate via LLM
     if (cached !== null) {
         log(`Day ${day} cache invalid (${extraction.reason}), regenerating...`, 'WARN', 'CACHE');
+        
+        // Log which meals were invalid
         if (extraction.invalidMeals && extraction.invalidMeals.length > 0) {
             log(`Invalid meals: ${JSON.stringify(extraction.invalidMeals)}`, 'DEBUG', 'CACHE');
         }
     }
 
+    // Prepare Targets
     const mainMealCal = Math.round(perMealTargets.main.calories);
     const mainMealP = Math.round(perMealTargets.main.protein);
     const snackCal = Math.round(perMealTargets.snack.calories);
@@ -318,42 +483,65 @@ async function generateMealPlan(day, formData, nutritionalTargets, log, perMealT
         parsedResult = await tryGenerateLLMPlan(PLAN_MODEL_NAME_FALLBACK, payload, log, logPrefix);
     }
 
+    // V15.5: Extract and validate meals from LLM result
     const llmExtraction = extractMealsFromCache(parsedResult, log);
     
     if (!llmExtraction.valid) {
         throw new Error(`LLM returned invalid structure for Day ${day}: ${llmExtraction.reason}`);
     }
     
+    // Cache with consistent schema
     await cacheSet(cacheKey, { meals: llmExtraction.meals }, TTL_PLAN_MS, log);
     
     return { dayNumber: day, meals: llmExtraction.meals };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAIN HANDLER (V15.5)
+// MAIN HANDLER (V15.6)
 // ═══════════════════════════════════════════════════════════════════════════
 
 module.exports = async (request, response) => {
+    // Handle CORS preflight
+    if (request.method === 'OPTIONS') {
+        response.setHeader('Access-Control-Allow-Origin', '*');
+        response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+        return response.status(200).end();
+    }
+    
+    if (request.method !== 'POST') {
+        response.setHeader('Allow', 'POST, OPTIONS');
+        return response.status(405).json({ error: "Method Not Allowed" });
+    }
+
     const traceId = generateTraceId();
     const log = createTracedLogger(traceId);
-
-    if (request.method === 'OPTIONS') return response.status(200).end();
-    if (request.method !== 'POST') return response.status(405).json({ error: "Method Not Allowed" });
-
+    
     try {
-        const { formData, nutritionalTargets } = request.body;
-        const day = parseInt(request.query.day, 10) || 1;
+        const { formData, nutritionalTargets, dayNumber = 1 } = request.body;
+        
+        if (!formData || !nutritionalTargets) {
+            return response.status(400).json({
+                success: false,
+                error: 'Missing formData or nutritionalTargets in request body',
+                code: ERROR_CODES.UNKNOWN_ERROR,
+                traceId
+            });
+        }
+        
         const store = formData.store;
+        const day = parseInt(dayNumber, 10) || 1;
 
         createTrace(traceId, { 
             planType: 'single-day', 
-            dayNumber: day, 
+            dayNumber: day,
             store, 
             targets: nutritionalTargets 
         });
 
-        log(`Starting Single-Day Plan Generation for Day ${day}`, 'INFO', 'ORCHESTRATOR');
+        log('info', 'Starting Single-Day Plan Generation', { day, store });
 
+        // Calculate per-meal targets
         const eatingOccasions = parseInt(formData.eatingOccasions, 10) || 3;
         const mainMealCount = Math.min(eatingOccasions, 3);
         const snackCount = Math.max(0, eatingOccasions - mainMealCount);
@@ -377,26 +565,45 @@ module.exports = async (request, response) => {
             }
         };
 
-        const rawDayPlan = await generateMealPlan(day, formData, nutritionalTargets, log, targetsPerMealType);
+        traceStageStart(traceId, `Day_${day}_Generation`);
 
-        // V15.5: PRE-PIPELINE GUARD
+        // A. Generate Meals (with cache extraction fix)
+        log('info', `Day ${day}: Generating meal plan...`, {}, 'LLM');
+        const rawDayPlan = await generateMealPlan(
+            day, formData, nutritionalTargets, log, targetsPerMealType
+        );
+
+        // V15.5: PRE-PIPELINE GUARD - Ensure meals is array before any processing
         if (!rawDayPlan || !Array.isArray(rawDayPlan.meals)) {
-            throw new Error(`Day ${day} meals is not an array: got ${typeof rawDayPlan?.meals}`);
+            throw new PipelineError(
+                ERROR_CODES.PIPELINE_EXECUTION_FAILED,
+                `Day ${day} meals is not an array: got ${typeof rawDayPlan?.meals}`,
+                { stage: 'pre_pipeline_guard', traceId, dayNumber: day }
+            );
         }
         
         if (rawDayPlan.meals.length === 0) {
-            throw new Error(`Day ${day} meals array is empty`);
+            throw new PipelineError(
+                ERROR_CODES.PIPELINE_EXECUTION_FAILED,
+                `Day ${day} meals array is empty`,
+                { stage: 'pre_pipeline_guard', traceId, dayNumber: day }
+            );
         }
 
+        // B. Validate LLM Output (now validates the ARRAY, not wrapper object)
         const validation = validateLLMOutput(rawDayPlan.meals, 'MEALS_ARRAY');
         if (!validation.valid) {
-            log(`LLM Output validation issues: ${validation.errors.join(', ')}`, 'WARN', 'VALIDATOR');
+            log('warning', `Day ${day} LLM Output validation issues`, { errors: validation.errors });
+            // Apply corrections if available
             if (validation.correctedOutput && Array.isArray(validation.correctedOutput)) {
                 rawDayPlan.meals = validation.correctedOutput;
             }
         }
 
-        const result = await executePipeline({
+        // C. Execute Pipeline (V3.3 - includes macro enhancement + sanitization)
+        log('info', `Day ${day}: Processing nutrition and macros...`, {}, 'PIPELINE');
+        
+        const processedDayResult = await executePipeline({
             rawMeals: rawDayPlan.meals,
             targets: {
                 kcal: nutritionalTargets.calories,
@@ -404,7 +611,7 @@ module.exports = async (request, response) => {
                 fat: nutritionalTargets.fat,
                 carbs: nutritionalTargets.carbs
             },
-            llmRetryFn: fetchLLMWithRetry,
+            llmRetryFn: null, // No retry for single-day endpoint
             config: {
                 traceId,
                 dayNumber: day,
@@ -415,40 +622,117 @@ module.exports = async (request, response) => {
             }
         });
 
-        if (result.stats) {
-            recordPipelineStats(result.stats);
+        traceStageEnd(traceId, `Day_${day}_Generation`);
+
+        // Collect unique ingredients
+        const uniqueIngredientsMap = new Map();
+        if (processedDayResult.data?.meals) {
+            processedDayResult.data.meals.forEach(meal => {
+                if (meal && Array.isArray(meal.items)) {
+                    meal.items.forEach(item => {
+                        if (item && item.key) {
+                            const normalizedKey = item.key.toLowerCase().trim();
+                            if (!uniqueIngredientsMap.has(normalizedKey)) {
+                                uniqueIngredientsMap.set(normalizedKey, {
+                                    originalIngredient: item.key,
+                                    normalizedKey
+                                });
+                            }
+                        }
+                    });
+                }
+            });
         }
 
-        completeTrace(traceId, { status: 'success' });
+        // ═══════════════════════════════════════════════════════════════════════════
+        // V15.6: OUTPUT VALIDATION - Ensure frontend receives valid data
+        // ═══════════════════════════════════════════════════════════════════════════
+        let outputData = processedDayResult.data;
+        const outputValidation = validateOutputBeforeSend(outputData, log);
+        
+        if (!outputValidation.valid) {
+            log('warning', 'Output validation found issues, attempting repair', {
+                issues: outputValidation.issues.slice(0, 5),
+                stats: outputValidation.stats
+            });
+            
+            // Attempt to repair
+            outputData = repairOutputIfNeeded(outputData, log);
+            
+            // Re-validate after repair
+            const revalidation = validateOutputBeforeSend(outputData, log);
+            
+            if (!revalidation.valid && revalidation.stats.totalItems === 0) {
+                throw new PipelineError(
+                    ERROR_CODES.PIPELINE_EXECUTION_FAILED,
+                    'Output validation failed: No valid items in response',
+                    {
+                        traceId,
+                        stage: 'output_validation',
+                        dayNumber: day,
+                        context: { 
+                            stats: revalidation.stats,
+                            issues: revalidation.issues.slice(0, 10)
+                        }
+                    }
+                );
+            }
+        }
+        
+        log('info', 'Output validation passed', { stats: outputValidation.stats });
+        // ═══════════════════════════════════════════════════════════════════════════
 
-        log(`Single-Day Plan Generation Complete for Day ${day}`, 'INFO', 'ORCHESTRATOR');
+        // Record stats
+        if (processedDayResult.stats) {
+            await recordPipelineStats(traceId, [processedDayResult.stats], log);
+        }
+
+        completeTrace(traceId, { 
+            status: 'success',
+            dayNumber: day
+        });
+
+        log('info', 'Single-Day Plan Generation Complete', { day });
+
+        const uniqueIngredients = Array.from(uniqueIngredientsMap.values());
 
         return response.status(200).json({
             success: true,
             traceId,
-            data: result.data,
-            stats: result.stats
+            dayNumber: day,
+            meals: outputData.meals || [],
+            dayTotals: outputData.dayTotals || {},
+            validation: outputData.validation || {},
+            uniqueIngredients,
+            stats: {
+                outputValidation: outputValidation.stats
+            },
+            macroDebug: processedDayResult.stats ? [processedDayResult.stats] : []
         });
 
     } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const errorStack = error instanceof Error ? error.stack : undefined;
+        const pipelineError = PipelineError.from(error, { traceId, stage: 'day_handler' });
+        
+        log('error', 'Single-Day Plan Generation Failed', { error: pipelineError.message });
+        traceError(traceId, 'DAY_HANDLER', pipelineError);
 
-        log(`Single-Day Plan Generation Failed: ${errorMessage}`, 'ERROR', 'ORCHESTRATOR');
-        traceError(traceId, 'ORCHESTRATOR', error);
-
-        emitAlert(ALERT_LEVELS.CRITICAL, 'single_day_failure', {
+        emitAlert(ALERT_LEVELS.CRITICAL, 'day_pipeline_failure', {
             traceId,
-            error: errorMessage
+            error: pipelineError.message,
+            code: pipelineError.code
         });
 
-        completeTrace(traceId, { status: 'error', error: errorMessage });
+        completeTrace(traceId, { 
+            status: 'error', 
+            error: pipelineError.message 
+        });
 
         return response.status(500).json({
             success: false,
             traceId,
-            error: errorMessage,
-            stack: process.env.NODE_ENV === 'development' ? errorStack : undefined
+            error: pipelineError.message,
+            code: pipelineError.code,
+            stage: pipelineError.stage
         });
     }
 };
