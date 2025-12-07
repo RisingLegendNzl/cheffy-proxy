@@ -3,12 +3,20 @@
  * utils/pipeline.js
  * 
  * Shared Pipeline Module for Cheffy
- * V3.2 - Added defensive guards for meal.items iteration
+ * V3.3 - Fixed schema mismatch, added macro enhancement and output sanitization
  * 
  * PURPOSE:
  * Extracts common orchestration logic from generate-full-plan.js and day.js
  * into a single source of truth. Both orchestrators become thin wrappers
  * that call into this shared module.
+ * 
+ * V3.3 CHANGES:
+ * - CRITICAL FIX: computeItemMacros() now returns BOTH formats:
+ *   {protein, fat, carbs} for frontend AND {p, f, c} for reconciliation
+ * - Added enhanceItemsWithMacros() to attach computed macros to item objects
+ * - Added sanitizeOutputMeals() to validate all items before return
+ * - Added sanitizeNumber() helper to prevent NaN/undefined propagation
+ * - Output validation ensures frontend receives complete data
  * 
  * V3.2 CHANGES:
  * - Added defensive guards in normalizeAllItemStates()
@@ -110,8 +118,46 @@ function createTracedLogger(traceId, module = 'pipeline') {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V3.3: SANITIZATION HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * V3.2: Validates that a meal object has the required structure
+ * Safely converts a value to a valid number, defaulting to 0 if invalid
+ * @param {any} value - Value to sanitize
+ * @param {number} defaultValue - Default if invalid (default: 0)
+ * @returns {number} Valid number
+ */
+function sanitizeNumber(value, defaultValue = 0) {
+  if (typeof value === 'number' && !isNaN(value) && isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    if (!isNaN(parsed) && isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return defaultValue;
+}
+
+/**
+ * Rounds a number to specified decimal places
+ * @param {number} value - Value to round
+ * @param {number} decimals - Decimal places (default: 1)
+ * @returns {number} Rounded value
+ */
+function roundTo(value, decimals = 1) {
+  const factor = Math.pow(10, decimals);
+  return Math.round(sanitizeNumber(value) * factor) / factor;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3.2: MEAL STRUCTURE VALIDATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Validates that a meal object has the required structure
  * @param {any} meal - Meal object to validate
  * @returns {Object} { valid: boolean, reason: string }
  */
@@ -136,7 +182,7 @@ function validateMealStructure(meal) {
 }
 
 /**
- * V3.2: Validates all meals in array have required structure
+ * Validates all meals in array have required structure
  * @param {Array} meals - Array of meals to validate
  * @param {Function} log - Logger function
  * @returns {Object} { valid: boolean, invalidMeals: Array, validMeals: Array }
@@ -179,6 +225,10 @@ function validateAllMealStructures(meals, log) {
     invalidCount: invalidMeals.length
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE NORMALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Normalizes item state based on stateHint and methodHint
@@ -252,6 +302,10 @@ function normalizeAllItemStates(meals, log = null) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// INGREDIENT EXTRACTION
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * Extracts unique ingredient keys from meals
  * V3.2: Added defensive guard for meal.items
@@ -298,6 +352,10 @@ function extractUniqueIngredients(meals, log = null) {
   
   return uniqueKeys;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NUTRITION FETCHING
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Fetches nutrition data for all unique ingredients
@@ -347,42 +405,54 @@ async function fetchNutritionForIngredients(ingredientKeys, config, log, callbac
   return nutritionMap;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V3.3: MACRO COMPUTATION - DUAL FORMAT OUTPUT
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * Computes macros for a single item
+ * V3.3: Returns BOTH formats for compatibility:
+ *   - {protein, fat, carbs} for frontend
+ *   - {p, f, c} for reconciliation module
  * V3.1: Added defensive guards for NaN quantity propagation
  * 
  * @param {Object} item - Meal item with qty_value, qty_unit, key
  * @param {Map} nutritionMap - Map of ingredient key to nutrition data
  * @param {Function} log - Logger function
  * @param {Object} callbacks - SSE callbacks
- * @returns {Object} Computed macros { kcal, protein, fat, carbs, _flagged, _source }
+ * @returns {Object} Computed macros with both formats
  */
 function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
   const { onIngredientFlagged, onInvariantWarning } = callbacks;
   
+  // V3.3: Default return with both formats (all zeros)
+  const defaultMacros = {
+    kcal: 0,
+    protein: 0,
+    fat: 0,
+    carbs: 0,
+    // Aliases for reconciliation module
+    p: 0,
+    f: 0,
+    c: 0,
+    _flagged: false,
+    _source: 'default'
+  };
+  
   if (!item || typeof item !== 'object') {
     log('warning', 'computeItemMacros received invalid item', { type: typeof item });
-    return {
-      kcal: 0,
-      protein: 0,
-      fat: 0,
-      carbs: 0,
-      _flagged: false,
-      _source: 'invalid_item'
-    };
+    return { ...defaultMacros, _source: 'invalid_item' };
   }
   
   const normalizedKey = normalizeKey(item.key || '');
   const nutrition = nutritionMap.get(normalizedKey);
   
-  let safeQtyValue = item.qty_value;
-  if (typeof safeQtyValue !== 'number' || isNaN(safeQtyValue)) {
-    log('warning', 'Invalid qty_value detected, defaulting to 0', {
-      key: item.key,
-      originalValue: item.qty_value,
-      type: typeof item.qty_value
-    });
-    safeQtyValue = 0;
+  // V3.1: Sanitize qty_value
+  let safeQtyValue = sanitizeNumber(item.qty_value, 0);
+  
+  // V3.3: Also check for 'qty' field (reconciliation uses this)
+  if (safeQtyValue === 0) {
+    safeQtyValue = sanitizeNumber(item.qty, 0);
   }
   
   if (safeQtyValue < 0) {
@@ -395,47 +465,37 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
   
   if (!nutrition) {
     log('warning', 'No nutrition data for item', { key: item.key });
-    return {
-      kcal: 0,
-      protein: 0,
-      fat: 0,
-      carbs: 0,
-      _flagged: false,
-      _source: 'missing'
-    };
+    return { ...defaultMacros, _source: 'missing' };
   }
   
+  // Convert to grams for consistent calculation
   let gramsAsSold;
   try {
-    const normalized = normalizeToGramsOrMl(safeQtyValue, item.qty_unit, item.key);
+    const normalized = normalizeToGramsOrMl(safeQtyValue, item.qty_unit || item.unit, item.key);
     gramsAsSold = toAsSold(normalized, item._resolvedState || item.stateHint, item.key);
   } catch (error) {
     log('warning', 'Unit conversion failed', { key: item.key, error: error.message });
     gramsAsSold = safeQtyValue;
   }
   
-  if (typeof gramsAsSold !== 'number' || isNaN(gramsAsSold)) {
-    log('warning', 'gramsAsSold is NaN after conversion', {
-      key: item.key,
-      qty_value: safeQtyValue,
-      qty_unit: item.qty_unit,
-      resolvedState: item._resolvedState
-    });
-    gramsAsSold = 0;
-  }
+  // V3.1: Guard against NaN in gramsAsSold
+  gramsAsSold = sanitizeNumber(gramsAsSold, 0);
   
+  // Calculate macros based on per-100g values
   const factor = gramsAsSold / 100;
   
-  const rawKcal = (nutrition.kcal_per_100g || 0) * factor;
-  const rawProtein = (nutrition.protein_per_100g || 0) * factor;
-  const rawFat = (nutrition.fat_per_100g || 0) * factor;
-  const rawCarbs = (nutrition.carbs_per_100g || 0) * factor;
+  const rawKcal = sanitizeNumber(nutrition.kcal_per_100g, 0) * factor;
+  const rawProtein = sanitizeNumber(nutrition.protein_per_100g, 0) * factor;
+  const rawFat = sanitizeNumber(nutrition.fat_per_100g, 0) * factor;
+  const rawCarbs = sanitizeNumber(nutrition.carbs_per_100g, 0) * factor;
   
-  const kcal = isNaN(rawKcal) ? 0 : Math.round(rawKcal * 10) / 10;
-  const protein = isNaN(rawProtein) ? 0 : Math.round(rawProtein * 100) / 100;
-  const fat = isNaN(rawFat) ? 0 : Math.round(rawFat * 100) / 100;
-  const carbs = isNaN(rawCarbs) ? 0 : Math.round(rawCarbs * 100) / 100;
+  // V3.3: Round and ensure valid numbers
+  const kcal = roundTo(rawKcal, 1);
+  const protein = roundTo(rawProtein, 2);
+  const fat = roundTo(rawFat, 2);
+  const carbs = roundTo(rawCarbs, 2);
   
+  // INV-001: Check macro-calorie consistency
   const consistencyResult = checkMacroCalorieConsistency(
     { kcal, protein, fat, carbs },
     item.key,
@@ -465,18 +525,32 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
       deviation: consistencyResult.deviation
     });
     
-    return createFlaggedMacros(
+    const flaggedMacros = createFlaggedMacros(
       { kcal, protein, fat, carbs },
       consistencyResult,
       nutrition.source || 'lookup'
     );
+    
+    // V3.3: Add aliases for reconciliation
+    return {
+      ...flaggedMacros,
+      p: sanitizeNumber(flaggedMacros.protein, 0),
+      f: sanitizeNumber(flaggedMacros.fat, 0),
+      c: sanitizeNumber(flaggedMacros.carbs, 0),
+      _gramsAsSold: gramsAsSold
+    };
   }
   
+  // V3.3: Return both formats
   return {
     kcal,
     protein,
     fat,
     carbs,
+    // Aliases for reconciliation module (expects p, f, c)
+    p: protein,
+    f: fat,
+    c: carbs,
     _flagged: false,
     _source: nutrition.source || 'lookup',
     _gramsAsSold: gramsAsSold
@@ -485,6 +559,8 @@ function computeItemMacros(item, nutritionMap, log, callbacks = {}) {
 
 /**
  * Creates a callback function for getting item macros
+ * Uses caching to avoid recomputation
+ * 
  * @param {Map} nutritionMap - Map of ingredient key to nutrition data
  * @param {Map} macroCache - Cache for computed macros
  * @param {Function} log - Logger function
@@ -499,12 +575,15 @@ function createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks = 
         protein: 0,
         fat: 0,
         carbs: 0,
+        p: 0,
+        f: 0,
+        c: 0,
         _flagged: false,
         _source: 'invalid_item'
       };
     }
     
-    const cacheKey = `${item.key || 'unknown'}:${item.qty_value || 0}:${item.qty_unit || 'g'}:${item._resolvedState || item.stateHint || 'raw'}`;
+    const cacheKey = `${item.key || 'unknown'}:${item.qty_value || item.qty || 0}:${item.qty_unit || item.unit || 'g'}:${item._resolvedState || item.stateHint || 'raw'}`;
     
     if (macroCache.has(cacheKey)) {
       return macroCache.get(cacheKey);
@@ -516,6 +595,184 @@ function createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks = 
     return macros;
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3.3: MACRO ENHANCEMENT - ATTACH MACROS TO ITEMS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Enhances all items in meals by attaching computed macros directly to each item.
+ * This ensures the frontend receives items with kcal, protein, fat, carbs properties.
+ * 
+ * @param {Array} meals - Array of meals with items
+ * @param {Function} getItemMacros - Callback to get macros for an item
+ * @param {Function} log - Logger function
+ * @returns {Array} Meals with macros attached to each item
+ */
+function enhanceItemsWithMacros(meals, getItemMacros, log) {
+  if (!Array.isArray(meals)) {
+    log('error', 'enhanceItemsWithMacros received non-array', { type: typeof meals });
+    return [];
+  }
+  
+  return meals.map((meal, mealIndex) => {
+    if (!meal || typeof meal !== 'object') {
+      log('warning', 'Skipping invalid meal in enhanceItemsWithMacros', { mealIndex });
+      return meal;
+    }
+    
+    if (!Array.isArray(meal.items)) {
+      log('warning', 'meal.items not iterable in enhanceItemsWithMacros', {
+        mealIndex,
+        mealName: meal.name || meal.type || `meal_${mealIndex}`
+      });
+      return {
+        ...meal,
+        items: []
+      };
+    }
+    
+    const enhancedItems = meal.items.map((item, itemIndex) => {
+      if (!item || typeof item !== 'object') {
+        log('warning', 'Skipping invalid item in enhanceItemsWithMacros', {
+          mealIndex,
+          itemIndex
+        });
+        return null;
+      }
+      
+      const macros = getItemMacros(item);
+      
+      // V3.3: Merge item with macros, ensuring frontend-required fields exist
+      return {
+        ...item,
+        // Overwrite/add macro fields from computed values
+        kcal: sanitizeNumber(macros.kcal, 0),
+        protein: sanitizeNumber(macros.protein, 0),
+        fat: sanitizeNumber(macros.fat, 0),
+        carbs: sanitizeNumber(macros.carbs, 0),
+        // Preserve internal fields
+        _flagged: macros._flagged || false,
+        _source: macros._source || 'unknown'
+      };
+    }).filter(item => item !== null);
+    
+    return {
+      ...meal,
+      items: enhancedItems
+    };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3.3: OUTPUT SANITIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Validates and sanitizes a single item, ensuring all required fields exist
+ * @param {Object} item - Item to sanitize
+ * @param {Function} log - Logger function
+ * @returns {Object} Sanitized item
+ */
+function sanitizeItem(item, log) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+  
+  // Ensure required fields exist with valid values
+  const sanitized = {
+    ...item,
+    key: item.key || 'unknown',
+    qty_value: sanitizeNumber(item.qty_value || item.qty, 0),
+    qty_unit: item.qty_unit || item.unit || 'g',
+    kcal: sanitizeNumber(item.kcal, 0),
+    protein: sanitizeNumber(item.protein, 0),
+    fat: sanitizeNumber(item.fat, 0),
+    carbs: sanitizeNumber(item.carbs, 0)
+  };
+  
+  // Warn if macros are all zero (might indicate a problem)
+  if (sanitized.kcal === 0 && sanitized.protein === 0 && sanitized.fat === 0 && sanitized.carbs === 0) {
+    log('warning', 'Item has all-zero macros after sanitization', {
+      key: sanitized.key,
+      qty_value: sanitized.qty_value
+    });
+  }
+  
+  return sanitized;
+}
+
+/**
+ * Sanitizes all meals and items, ensuring valid output for frontend
+ * @param {Array} meals - Array of meals
+ * @param {Function} log - Logger function
+ * @returns {Object} { meals: Array, stats: Object }
+ */
+function sanitizeOutputMeals(meals, log) {
+  const stats = {
+    totalMeals: 0,
+    totalItems: 0,
+    itemsWithZeroMacros: 0,
+    itemsRemoved: 0
+  };
+  
+  if (!Array.isArray(meals)) {
+    log('error', 'sanitizeOutputMeals received non-array', { type: typeof meals });
+    return { meals: [], stats };
+  }
+  
+  const sanitizedMeals = meals.map((meal, mealIndex) => {
+    if (!meal || typeof meal !== 'object') {
+      log('warning', 'Removing invalid meal in sanitizeOutputMeals', { mealIndex });
+      return null;
+    }
+    
+    stats.totalMeals++;
+    
+    if (!Array.isArray(meal.items)) {
+      log('warning', 'Meal has no items array', {
+        mealIndex,
+        mealName: meal.name || meal.type
+      });
+      return {
+        ...meal,
+        name: meal.name || `Meal ${mealIndex + 1}`,
+        type: meal.type || 'meal',
+        items: []
+      };
+    }
+    
+    const sanitizedItems = meal.items
+      .map(item => {
+        const sanitized = sanitizeItem(item, log);
+        if (sanitized) {
+          stats.totalItems++;
+          if (sanitized.kcal === 0 && sanitized.protein === 0) {
+            stats.itemsWithZeroMacros++;
+          }
+        } else {
+          stats.itemsRemoved++;
+        }
+        return sanitized;
+      })
+      .filter(item => item !== null);
+    
+    return {
+      ...meal,
+      name: meal.name || `Meal ${mealIndex + 1}`,
+      type: meal.type || 'meal',
+      items: sanitizedItems
+    };
+  }).filter(meal => meal !== null);
+  
+  log('info', 'Output sanitization complete', stats);
+  
+  return { meals: sanitizedMeals, stats };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RECONCILIATION
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Runs meal-level reconciliation
@@ -568,16 +825,20 @@ function runMealReconciliation(meals, targets, getItemMacros, config, log) {
     }
     
     const divisor = validMealCount > 0 ? validMealCount : 1;
-    const mealTarget = {
-      kcal: targets.kcal / divisor,
-      protein: targets.protein / divisor,
-      fat: targets.fat / divisor,
-      carbs: targets.carbs / divisor
-    };
+    const mealTargetKcal = targets.kcal / divisor;
+    const mealTargetProtein = targets.protein / divisor;
     
     try {
-      const reconciledMeal = reconcileMealLevel(meal, mealTarget, getItemMacros, config);
-      reconciled.push(reconciledMeal);
+      const result = reconcileMealLevel({
+        meal,
+        targetKcal: mealTargetKcal,
+        targetProtein: mealTargetProtein,
+        getItemMacros,
+        log,
+        tolPct: (config.reconciliationTolerancePct || 0.15) * 100
+      });
+      
+      reconciled.push(result.meal || meal);
     } catch (error) {
       log('warning', 'Meal reconciliation failed', { mealName: meal.name, error: error.message });
       reconciled.push(meal);
@@ -616,9 +877,17 @@ function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
   }
   
   try {
-    const result = reconcileNonProtein(validMeals, targets, getItemMacros, config);
-    assertReconciliationBounds(result, targets, config.reconciliationTolerancePct);
-    return result;
+    const result = reconcileNonProtein({
+      meals: validMeals,
+      targetKcal: targets.kcal,
+      targetProtein: targets.protein,
+      getItemMacros,
+      tolPct: (config.reconciliationTolerancePct || 0.15) * 100,
+      allowProteinScaling: config.allowProteinScaling || false,
+      log
+    });
+    
+    return { meals: result.meals || validMeals, adjusted: result.adjusted, factor: result.factor };
   } catch (error) {
     if (error instanceof InvariantViolationError) {
       log('error', 'Reconciliation invariant violated', {
@@ -633,6 +902,10 @@ function runDailyReconciliation(meals, targets, getItemMacros, config, log) {
     return { meals };
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VALIDATION
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Runs validation on day plan
@@ -719,12 +992,17 @@ async function validateLLMOutputWithRetry(output, schemaName, retryFn, maxRetrie
   throw error;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DAY TOTALS CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * Calculates day totals from processed meals
+ * V3.3: Uses sanitized item values directly when available
  * V3.2: Added defensive guard for meal.items
  * 
- * @param {Array} meals - Array of processed meals
- * @param {Function} getItemMacros - Callback to get item macros
+ * @param {Array} meals - Array of processed meals (with macros attached)
+ * @param {Function} getItemMacros - Callback to get item macros (fallback)
  * @param {Function} log - Optional logger function
  * @returns {Object} Day totals { kcal, calories, protein, fat, carbs }
  */
@@ -769,20 +1047,28 @@ function calculateDayTotals(meals, getItemMacros, log = null) {
         continue;
       }
       
-      const macros = getItemMacros(item);
-      totalKcal += macros.kcal || 0;
-      totalProtein += macros.protein || 0;
-      totalFat += macros.fat || 0;
-      totalCarbs += macros.carbs || 0;
+      // V3.3: Prefer directly attached macros, fall back to callback
+      if (typeof item.kcal === 'number' && !isNaN(item.kcal)) {
+        totalKcal += sanitizeNumber(item.kcal, 0);
+        totalProtein += sanitizeNumber(item.protein, 0);
+        totalFat += sanitizeNumber(item.fat, 0);
+        totalCarbs += sanitizeNumber(item.carbs, 0);
+      } else {
+        const macros = getItemMacros(item);
+        totalKcal += sanitizeNumber(macros.kcal, 0);
+        totalProtein += sanitizeNumber(macros.protein, 0);
+        totalFat += sanitizeNumber(macros.fat, 0);
+        totalCarbs += sanitizeNumber(macros.carbs, 0);
+      }
     }
   }
   
   return {
     kcal: Math.round(totalKcal),
     calories: Math.round(totalKcal),
-    protein: Math.round(totalProtein * 10) / 10,
-    fat: Math.round(totalFat * 10) / 10,
-    carbs: Math.round(totalCarbs * 10) / 10
+    protein: roundTo(totalProtein, 1),
+    fat: roundTo(totalFat, 1),
+    carbs: roundTo(totalCarbs, 1)
   };
 }
 
@@ -827,9 +1113,15 @@ function countFlaggedItems(meals, getItemMacros, log = null) {
       }
       
       totalItems++;
-      const macros = getItemMacros(item);
-      if (macros._flagged) {
+      
+      // Check item directly first, then callback
+      if (item._flagged) {
         flaggedCount++;
+      } else {
+        const macros = getItemMacros(item);
+        if (macros._flagged) {
+          flaggedCount++;
+        }
       }
     }
   }
@@ -839,8 +1131,13 @@ function countFlaggedItems(meals, getItemMacros, log = null) {
   return { flaggedCount, totalItems, flaggedRate };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN PIPELINE EXECUTION
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * Main pipeline execution function
+ * V3.3: Added macro enhancement and output sanitization
  * V3.2: Added comprehensive meal structure validation
  * V3.1: Added entry guard to prevent "meals is not iterable" error
  * V3.0: Added SSE callback support
@@ -967,7 +1264,8 @@ async function executePipeline(params) {
       totalMeals: structureValidation.totalMeals,
       validCount: structureValidation.validCount,
       invalidCount: structureValidation.invalidCount
-    }
+    },
+    sanitizationStats: null
   };
   
   try {
@@ -983,13 +1281,13 @@ async function executePipeline(params) {
     debug.timings.validateLLM = Date.now() - startValidateLLM;
     debug.stages.push('llm_validation');
     
-    // Stage 2: Normalize state hints (V3.2: now has internal guards)
+    // Stage 2: Normalize state hints
     const startNormalize = Date.now();
     const normalizedMeals = normalizeAllItemStates(validatedMeals, log);
     debug.timings.normalize = Date.now() - startNormalize;
     debug.stages.push('state_normalization');
     
-    // Stage 3: Extract unique ingredients (V3.2: now has internal guards)
+    // Stage 3: Extract unique ingredients
     const startExtract = Date.now();
     const uniqueIngredients = extractUniqueIngredients(normalizedMeals, log);
     debug.timings.extract = Date.now() - startExtract;
@@ -1017,7 +1315,7 @@ async function executePipeline(params) {
     const macroCache = new Map();
     const getItemMacros = createGetItemMacrosCallback(nutritionMap, macroCache, log, callbacks);
     
-    // Stage 6: Run meal-level reconciliation (V3.2: now has internal guards)
+    // Stage 6: Run meal-level reconciliation
     const startMealRecon = Date.now();
     const mealReconResult = runMealReconciliation(
       normalizedMeals,
@@ -1029,7 +1327,7 @@ async function executePipeline(params) {
     debug.timings.mealReconciliation = Date.now() - startMealRecon;
     debug.stages.push('meal_reconciliation');
     
-    // Stage 7: Run daily reconciliation (V3.2: now has internal guards)
+    // Stage 7: Run daily reconciliation
     const startDailyRecon = Date.now();
     const dailyResult = runDailyReconciliation(
       mealReconResult.meals,
@@ -1041,12 +1339,34 @@ async function executePipeline(params) {
     debug.timings.dailyReconciliation = Date.now() - startDailyRecon;
     debug.stages.push('daily_reconciliation');
     
-    // Stage 8: Calculate day totals (V3.2: now has internal guards)
-    const dayTotals = calculateDayTotals(dailyResult.meals, getItemMacros, log);
+    // ═══════════════════════════════════════════════════════════════════════════
+    // V3.3: MACRO ENHANCEMENT - Attach computed macros to items
+    // ═══════════════════════════════════════════════════════════════════════════
+    const startEnhance = Date.now();
+    const enhancedMeals = enhanceItemsWithMacros(dailyResult.meals, getItemMacros, log);
+    debug.timings.macroEnhancement = Date.now() - startEnhance;
+    debug.stages.push('macro_enhancement');
     
-    // Stage 8b: Check INV-001 response-level blocking (V3.2: now has internal guards)
+    log('info', 'Macros attached to items', { mealsProcessed: enhancedMeals.length });
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // V3.3: OUTPUT SANITIZATION - Ensure all items have valid macros
+    // ═══════════════════════════════════════════════════════════════════════════
+    const startSanitize = Date.now();
+    const { meals: sanitizedMeals, stats: sanitizationStats } = sanitizeOutputMeals(enhancedMeals, log);
+    debug.timings.sanitization = Date.now() - startSanitize;
+    debug.stages.push('output_sanitization');
+    debug.sanitizationStats = sanitizationStats;
+    
+    log('info', 'Output sanitization complete', sanitizationStats);
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Stage 8: Calculate day totals (now uses sanitized meals with attached macros)
+    const dayTotals = calculateDayTotals(sanitizedMeals, getItemMacros, log);
+    
+    // Stage 8b: Check INV-001 response-level blocking
     if (config.enableInv001Blocking) {
-      const flaggedStats = countFlaggedItems(dailyResult.meals, getItemMacros, log);
+      const flaggedStats = countFlaggedItems(sanitizedMeals, getItemMacros, log);
       debug.inv001Stats = flaggedStats;
       
       log('info', 'INV-001 flagged items check', {
@@ -1098,7 +1418,7 @@ async function executePipeline(params) {
     // Stage 9: Validation (with SSE callbacks)
     const startValidation = Date.now();
     const dayPlan = {
-      meals: dailyResult.meals,
+      meals: sanitizedMeals,
       dayTotals: dayTotals,
       targets: {
         kcal: targets.kcal,
@@ -1113,8 +1433,8 @@ async function executePipeline(params) {
     debug.timings.validation = Date.now() - startValidation;
     debug.stages.push('validation');
     
-    // Validate item quantities (V3.2: added guards)
-    for (const meal of dailyResult.meals) {
+    // Validate item quantities
+    for (const meal of sanitizedMeals) {
       if (!meal || !Array.isArray(meal.items)) continue;
       
       for (const item of meal.items) {
@@ -1132,28 +1452,31 @@ async function executePipeline(params) {
       }
     }
     
+    const totalTime = Object.values(debug.timings).reduce((a, b) => a + b, 0);
+    
     log('info', 'Pipeline execution completed', {
       traceId,
-      totalTime: Object.values(debug.timings).reduce((a, b) => a + b, 0),
+      totalTime,
       dayTotals,
-      inv001Stats: debug.inv001Stats
+      inv001Stats: debug.inv001Stats,
+      sanitizationStats: debug.sanitizationStats
     });
     
     return {
       traceId,
-      meals: dailyResult.meals,
+      meals: sanitizedMeals,
       dayTotals,
       validation: validationResult,
       debug,
       data: {
-        meals: dailyResult.meals,
+        meals: sanitizedMeals,
         dayTotals,
         validation: validationResult
       },
       stats: {
         traceId,
         success: true,
-        totalDuration: Object.values(debug.timings).reduce((a, b) => a + b, 0),
+        totalDuration: totalTime,
         stageDurations: debug.timings,
         inv001Stats: debug.inv001Stats
       }
@@ -1179,22 +1502,52 @@ async function executePipeline(params) {
 }
 
 module.exports = {
+  // Main execution
   executePipeline,
+  
+  // Configuration
   DEFAULT_CONFIG,
+  
+  // Utility functions
   generateTraceId,
   createTracedLogger,
+  
+  // Sanitization helpers (V3.3)
+  sanitizeNumber,
+  roundTo,
+  sanitizeItem,
+  sanitizeOutputMeals,
+  
+  // Meal structure validation (V3.2)
   validateMealStructure,
   validateAllMealStructures,
+  
+  // State normalization
   normalizeItemState,
   normalizeAllItemStates,
+  
+  // Ingredient extraction
   extractUniqueIngredients,
+  
+  // Nutrition fetching
   fetchNutritionForIngredients,
+  
+  // Macro computation (V3.3 - dual format)
   computeItemMacros,
   createGetItemMacrosCallback,
+  
+  // Macro enhancement (V3.3)
+  enhanceItemsWithMacros,
+  
+  // Reconciliation
   runMealReconciliation,
   runDailyReconciliation,
+  
+  // Validation
   runValidation,
   validateLLMOutputWithRetry,
+  
+  // Totals calculation
   calculateDayTotals,
   countFlaggedItems
 };
